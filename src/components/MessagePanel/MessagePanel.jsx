@@ -233,7 +233,7 @@ const ThinkingBlock = ({ thinking, isThinking }) => {
   );
 };
 
-const ToolBlock = ({ toolCall }) => {
+const ToolBlock = ({ toolCall, onStopStreaming }) => {
   const { t } = useI18n();
   const [expanded, setExpanded] = useState(false);
   if (!toolCall) return null;
@@ -267,6 +267,7 @@ const ToolBlock = ({ toolCall }) => {
 
   // New tool call format: { name, status?, result?, summary? }
   const { name, status, result, summary } = toolCall;
+  const showShutdown = name === 'execute_command' && status === 'running' && onStopStreaming;
   return (
     <div className="tool-block">
       <div className="tool-header" onClick={() => setExpanded((v) => !v)}>
@@ -276,6 +277,21 @@ const ToolBlock = ({ toolCall }) => {
         {status === 'running' && <span className="tool-exit-code">{t('message.running')}</span>}
         {status === 'completed' && <span className="tool-exit-code success">{t('message.completed')}</span>}
         {status === 'error' && <span className="tool-exit-code error">{t('message.error')}</span>}
+        {status === 'aborted' && <span className="tool-exit-code aborted">{t('message.aborted')}</span>}
+        {showShutdown && (
+          <button
+            type="button"
+            className="tool-shutdown-button"
+            onClick={(event) => {
+              event.stopPropagation();
+              onStopStreaming();
+            }}
+            title={t('message.stop')}
+            aria-label={t('message.stop')}
+          >
+            <Stop width={12} height={12} />
+          </button>
+        )}
       </div>
       {expanded && result && (
         <div className="tool-output">
@@ -815,7 +831,13 @@ const MessagePanel = forwardRef(({
                   </div>
                 )}
                 {msg.role === 'assistant' && msg.toolCalls?.length > 0 && (
-                  msg.toolCalls.map((tc, i) => <ToolBlock key={tc.id || i} toolCall={tc} />)
+                  msg.toolCalls.map((tc, i) => (
+                    <ToolBlock
+                      key={tc.id || i}
+                      toolCall={tc}
+                      onStopStreaming={onStopStreaming}
+                    />
+                  ))
                 )}
                 <div className="message-text">
                   {editingMessageId === msg.id ? (

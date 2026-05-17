@@ -501,9 +501,9 @@ function App() {
         },
       });
 
-      // Mark tool calls as completed
+      // Mark unfinished tool calls as completed.
       for (const tc of toolCalls) {
-        tc.status = 'completed';
+        if (tc.status === 'running') tc.status = 'completed';
       }
 
       const finalContent = result.content || streamingContentRef.current;
@@ -513,7 +513,15 @@ function App() {
         setAgentList(await listAgents());
       }
     } catch (err) {
-      if (err.name !== 'AbortError') {
+      if (err.name === 'AbortError') {
+        for (const tc of toolCalls) {
+          if (tc.status === 'running') {
+            tc.status = 'aborted';
+            tc.result = tc.result || 'Aborted';
+          }
+        }
+        updateMessage({ content: streamingContentRef.current, thinking: streamingThinkingRef.current, toolCalls: [...toolCalls] });
+      } else {
         const errorContent = streamingContentRef.current || `Error: ${err.message}`;
         updateMessage({ content: errorContent, toolCalls: [...toolCalls] });
       }

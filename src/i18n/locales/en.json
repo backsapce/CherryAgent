@@ -23,6 +23,7 @@
         "running": "running...",
         "completed": "completed",
         "error": "error",
+        "aborted": "aborted",
         "exitCode": "exit {code}",
         "remove": "Remove",
         "uploadImage": "Upload image",

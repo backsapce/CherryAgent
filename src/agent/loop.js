@@ -145,6 +145,8 @@ export async function runAgentLoop(opts) {
     const toolResults = [];
     for (const tc of toolCalls) {
       try {
+        let streamingStdout = '';
+        let streamingStderr = '';
         const result = await registry.dispatch(tc.name, tc.parsedArgs, {
           agentUrl,
           agentId,
@@ -156,6 +158,17 @@ export async function runAgentLoop(opts) {
           contextWindow: opts.contextWindow,
           subAgentDepth,
           signal,
+          onToolUpdate: (chunk) => {
+            if (!allToolCalls[tc.id]) return;
+            if (chunk?.stdout) streamingStdout += chunk.stdout;
+            if (chunk?.stderr) streamingStderr += chunk.stderr;
+            let streamingResult = 'Running...';
+            if (streamingStdout) streamingResult += `\nStdout:\n${streamingStdout}`;
+            if (streamingStderr) streamingResult += `\nStderr:\n${streamingStderr}`;
+            allToolCalls[tc.id].result = streamingResult;
+            allToolCalls[tc.id].status = 'running';
+            onUpdate({ content, thinking, toolCalls: Object.values(allToolCalls) });
+          },
         });
         const resultStr = String(result);
         toolResults.push({
@@ -171,6 +184,22 @@ export async function runAgentLoop(opts) {
           allToolCalls[tc.id].summary = formatToolCallSummary(tc, resultStr);
         }
       } catch (err) {
+        if (err.name === 'AbortError') {
+          const abortStr = 'Aborted';
+          toolResults.push({
+            role: 'tool',
+            tool_call_id: tc.id,
+            name: tc.name,
+            content: abortStr,
+          });
+          if (allToolCalls[tc.id]) {
+            allToolCalls[tc.id].status = 'aborted';
+            allToolCalls[tc.id].result = abortStr;
+            allToolCalls[tc.id].summary = formatToolCallSummary(tc);
+          }
+          onUpdate({ content, thinking, toolCalls: Object.values(allToolCalls) });
+          throw err;
+        }
         const errStr = `Error: ${err.message}`;
         toolResults.push({
           role: 'tool',

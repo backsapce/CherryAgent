@@ -732,6 +732,29 @@
   background: rgba(239, 68, 68, 0.1);
 }
 
+.tool-exit-code.aborted {
+  color: var(--color-text-secondary);
+  background: color-mix(in srgb, var(--color-text-secondary) 12%, transparent);
+}
+
+.tool-shutdown-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  border: 1px solid color-mix(in srgb, #ef4444 34%, var(--color-border));
+  border-radius: 6px;
+  background: color-mix(in srgb, #ef4444 10%, var(--color-surface));
+  color: #ef4444;
+  cursor: pointer;
+}
+
+.tool-shutdown-button:hover {
+  background: color-mix(in srgb, #ef4444 16%, var(--color-surface));
+}
+
 .tool-output {
   padding: 10px 12px;
   font-family: 'SF Mono', 'Fira Code', monospace;

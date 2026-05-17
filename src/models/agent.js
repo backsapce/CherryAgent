@@ -26,6 +26,30 @@ function resolveAgentUrl(url) {
   return u.endsWith('/agent') ? u : `${u}/agent`;
 }
 
+function resolveAgentWsUrl(url) {
+  if (isLoopbackAgentUrl(url)) {
+    const base = new URL('/agent/ws', window.location.href);
+    base.protocol = base.protocol === 'https:' ? 'wss:' : 'ws:';
+    return base.toString();
+  }
+
+  const endpoint = resolveAgentUrl(url).replace(/\/agent$/, '/agent/ws');
+  const base = new URL(endpoint, window.location.href);
+  base.protocol = base.protocol === 'https:' ? 'wss:' : 'ws:';
+  return base.toString();
+}
+
+function isLoopbackAgentUrl(url) {
+  if (!url) return true;
+  try {
+    const parsed = new URL(resolveAgentUrl(url), window.location.href);
+    return ['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname)
+      && (parsed.port === '3099' || parsed.pathname.startsWith('/agent'));
+  } catch {
+    return false;
+  }
+}
+
 /** Build a unique config key for a given agent URL's token. */
 function tokenKey(url) {
   const base = (url || window.location.origin).replace(/[^a-zA-Z0-9]/g, '_');
@@ -108,10 +132,20 @@ export async function connectAgent(tempToken, url) {
  * @param {string} [url] - agent host URL (optional, defaults to local /agent)
  * @returns {Promise<{ stdout: string, stderr: string, code: number }>}
  */
-export async function executeCommand(cmd, url) {
+export async function executeCommand(cmd, url, opts = {}) {
   // Route through E2B sandbox
   if (url === E2B_AGENT_ID) {
     return executeInSandbox(cmd);
+  }
+
+  if (typeof WebSocket !== 'undefined' && opts.stream !== false) {
+    try {
+      return await executeCommandStreaming(cmd, url, opts);
+    } catch (err) {
+      if (opts.signal?.aborted) throw err;
+      if (opts.requireStreaming) throw err;
+      console.warn('[agent] WebSocket command stream failed; falling back to HTTP:', err);
+    }
   }
 
   const endpoint = resolveAgentUrl(url);
@@ -129,6 +163,90 @@ export async function executeCommand(cmd, url) {
     throw new Error(err.error || `Agent returned ${res.status}`);
   }
   return res.json();
+}
+
+function executeCommandStreaming(cmd, url, opts = {}) {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(resolveAgentWsUrl(url));
+    const token = getAgentToken(url);
+    const result = {
+      stdout: '',
+      stderr: '',
+      code: 1,
+    };
+    let started = false;
+    let finished = false;
+
+    const cleanup = () => {
+      opts.signal?.removeEventListener('abort', abort);
+    };
+
+    const fail = (err) => {
+      if (finished) return;
+      finished = true;
+      cleanup();
+      try { ws.close(); } catch { /* ignore */ }
+      reject(err);
+    };
+
+    const abort = () => {
+      fail(new DOMException('Command execution aborted', 'AbortError'));
+    };
+
+    if (opts.signal?.aborted) {
+      abort();
+      return;
+    }
+    opts.signal?.addEventListener('abort', abort, { once: true });
+
+    ws.addEventListener('open', () => {
+      started = true;
+      ws.send(JSON.stringify({ cmd, token }));
+    });
+
+    ws.addEventListener('message', (event) => {
+      let message;
+      try {
+        message = JSON.parse(event.data);
+      } catch {
+        return;
+      }
+
+      if (message.type === 'start') {
+        Object.assign(result, {
+          platform: message.platform,
+          shell: message.shell,
+          cwd: message.cwd,
+          filesRoot: message.filesRoot,
+        });
+      } else if (message.type === 'stdout') {
+        result.stdout += message.data || '';
+        opts.onStdout?.(message.data || '', { ...result });
+      } else if (message.type === 'stderr') {
+        result.stderr += message.data || '';
+        opts.onStderr?.(message.data || '', { ...result });
+      } else if (message.type === 'exit') {
+        finished = true;
+        cleanup();
+        Object.assign(result, message);
+        resolve(result);
+      } else if (message.type === 'error') {
+        const err = new Error(message.error || 'Agent WebSocket command failed');
+        err.status = message.status;
+        fail(err);
+      }
+    });
+
+    ws.addEventListener('error', () => {
+      fail(new Error('Agent WebSocket connection failed'));
+    });
+
+    ws.addEventListener('close', () => {
+      if (!finished) {
+        fail(new Error(started ? 'Agent WebSocket closed before command completed' : 'Agent WebSocket failed to open'));
+      }
+    });
+  });
 }
 
 /**

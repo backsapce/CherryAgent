@@ -22,8 +22,8 @@
  */
 
 import { createServer } from 'node:http';
-import { exec } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { exec, spawn } from 'node:child_process';
+import { createHash, randomBytes } from 'node:crypto';
 import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, mkdirSync, unlinkSync, rmSync } from 'node:fs';
 import { join, extname, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -36,10 +36,11 @@ const STATIC_DIR = join(__dirname, '..', 'dist');
 
 const PORT = process.env.AGENT_PORT || 3099;
 const MAX_TIMEOUT = 30_000;
+const MAX_OUTPUT_BYTES = 10 * 1024 * 1024;
 const DEFAULT_TOKEN_FILE = join(process.cwd(), '.vertex-token');
 const TOKEN_FILE = process.env.AGENT_TOKEN_FILE
   || DEFAULT_TOKEN_FILE;
-const ALLOWED_ORIGINS = (process.env.AGENT_ALLOWED_ORIGINS || 'https://127.0.0.1:5173').split(',');
+const ALLOWED_ORIGINS = (process.env.AGENT_ALLOWED_ORIGINS || 'https://127.0.0.1:5173,https://localhost:5173,http://127.0.0.1:5173,http://localhost:5173').split(',');
 const COMMAND_SHELL = process.env.AGENT_SHELL || (process.platform === 'win32' ? (process.env.ComSpec || 'cmd.exe') : undefined);
 const WORKSPACE_DIR = resolve(process.env.AGENT_WORKING_DIR || process.cwd());
 const FILES_ROOT_DIR = resolve(process.env.AGENT_FILES_DIR || WORKSPACE_DIR);
@@ -204,6 +205,80 @@ function execCommand(cmd, timeout = MAX_TIMEOUT) {
   });
 }
 
+function streamCommand(cmd, { onStart, onStdout, onStderr, onExit, onError }, timeout = MAX_TIMEOUT) {
+  let stdout = '';
+  let stderr = '';
+  let outputBytes = 0;
+  let timedOut = false;
+  let settled = false;
+
+  const child = spawn(cmd, {
+    cwd: WORKSPACE_DIR,
+    shell: COMMAND_SHELL || true,
+    windowsHide: true,
+  });
+
+  onStart?.({
+    platform: process.platform,
+    shell: COMMAND_SHELL || 'default',
+    cwd: WORKSPACE_DIR,
+    filesRoot: FILES_ROOT_DIR,
+    pid: child.pid,
+  });
+
+  const killTimer = setTimeout(() => {
+    timedOut = true;
+    child.kill('SIGTERM');
+  }, timeout);
+
+  const handleChunk = (streamName, chunk) => {
+    const text = chunk.toString();
+    outputBytes += Buffer.byteLength(text);
+
+    if (streamName === 'stdout') {
+      stdout += text;
+      onStdout?.(text);
+    } else {
+      stderr += text;
+      onStderr?.(text);
+    }
+
+    if (outputBytes > MAX_OUTPUT_BYTES) {
+      stderr += `\n[agent] Output exceeded ${MAX_OUTPUT_BYTES} bytes; command terminated.\n`;
+      child.kill('SIGTERM');
+    }
+  };
+
+  child.stdout?.on('data', (chunk) => handleChunk('stdout', chunk));
+  child.stderr?.on('data', (chunk) => handleChunk('stderr', chunk));
+
+  child.on('error', (err) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(killTimer);
+    onError?.(err);
+  });
+
+  child.on('close', (code, signal) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(killTimer);
+    onExit?.({
+      stdout,
+      stderr,
+      code: timedOut ? 124 : (code ?? 1),
+      signal,
+      timedOut,
+      platform: process.platform,
+      shell: COMMAND_SHELL || 'default',
+      cwd: WORKSPACE_DIR,
+      filesRoot: FILES_ROOT_DIR,
+    });
+  });
+
+  return child;
+}
+
 function truncateLog(value, max = 2000) {
   if (!value) return '';
   return value.length > max ? `${value.slice(0, max)}\n...[truncated]` : value;
@@ -228,6 +303,82 @@ async function readBodyBuffer(req) {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   }
   return Buffer.concat(chunks);
+}
+
+function isAllowedWsOrigin(req) {
+  const origin = req.headers.origin || '';
+  return !origin || ALLOWED_ORIGINS.includes(origin);
+}
+
+function sendWsFrame(socket, value) {
+  if (socket.destroyed) return;
+  const payload = Buffer.from(JSON.stringify(value));
+  let header;
+  if (payload.length < 126) {
+    header = Buffer.from([0x81, payload.length]);
+  } else if (payload.length < 65536) {
+    header = Buffer.alloc(4);
+    header[0] = 0x81;
+    header[1] = 126;
+    header.writeUInt16BE(payload.length, 2);
+  } else {
+    header = Buffer.alloc(10);
+    header[0] = 0x81;
+    header[1] = 127;
+    header.writeBigUInt64BE(BigInt(payload.length), 2);
+  }
+  socket.write(Buffer.concat([header, payload]));
+}
+
+function closeWs(socket, code = 1000, reason = '') {
+  if (socket.destroyed) return;
+  const reasonBuffer = Buffer.from(reason);
+  const payload = Buffer.alloc(2 + reasonBuffer.length);
+  payload.writeUInt16BE(code, 0);
+  reasonBuffer.copy(payload, 2);
+  const header = Buffer.from([0x88, payload.length]);
+  socket.end(Buffer.concat([header, payload]));
+}
+
+function parseWsFrames(buffer) {
+  const frames = [];
+  let offset = 0;
+
+  while (offset + 2 <= buffer.length) {
+    const first = buffer[offset];
+    const second = buffer[offset + 1];
+    const opcode = first & 0x0f;
+    const masked = (second & 0x80) !== 0;
+    let length = second & 0x7f;
+    let headerLength = 2;
+
+    if (length === 126) {
+      if (offset + 4 > buffer.length) break;
+      length = buffer.readUInt16BE(offset + 2);
+      headerLength = 4;
+    } else if (length === 127) {
+      if (offset + 10 > buffer.length) break;
+      const bigLength = buffer.readBigUInt64BE(offset + 2);
+      if (bigLength > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error('WebSocket frame too large');
+      length = Number(bigLength);
+      headerLength = 10;
+    }
+
+    const maskLength = masked ? 4 : 0;
+    const frameEnd = offset + headerLength + maskLength + length;
+    if (frameEnd > buffer.length) break;
+
+    let payload = buffer.slice(offset + headerLength + maskLength, frameEnd);
+    if (masked) {
+      const mask = buffer.slice(offset + headerLength, offset + headerLength + 4);
+      payload = Buffer.from(payload.map((byte, index) => byte ^ mask[index % 4]));
+    }
+
+    frames.push({ opcode, payload });
+    offset = frameEnd;
+  }
+
+  return { frames, rest: buffer.slice(offset) };
 }
 
 // ─── Server ─────────────────────────────────────────────────────────────────
@@ -579,6 +730,132 @@ const server = createServer(async (req, res) => {
     console.error(`[agent] Unhandled error: ${err.message}`);
     json(res, 500, { error: 'Internal server error' }, req);
   }
+});
+
+server.on('upgrade', (req, socket) => {
+  const url = new URL(req.url, `http://localhost:${PORT}`);
+  if (url.pathname !== '/agent/ws') {
+    socket.destroy();
+    return;
+  }
+
+  if (!isAllowedWsOrigin(req)) {
+    socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+    socket.destroy();
+    return;
+  }
+
+  const key = req.headers['sec-websocket-key'];
+  if (!key) {
+    socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
+    socket.destroy();
+    return;
+  }
+
+  const accept = createHash('sha1')
+    .update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
+    .digest('base64');
+
+  socket.write([
+    'HTTP/1.1 101 Switching Protocols',
+    'Upgrade: websocket',
+    'Connection: Upgrade',
+    `Sec-WebSocket-Accept: ${accept}`,
+    '\r\n',
+  ].join('\r\n'));
+
+  let pending = Buffer.alloc(0);
+  let child = null;
+  let started = false;
+
+  const fail = (status, error) => {
+    sendWsFrame(socket, { type: 'error', error, status });
+    closeWs(socket, 1008, error);
+  };
+
+  socket.on('data', (chunk) => {
+    pending = Buffer.concat([pending, chunk]);
+    let parsed;
+    try {
+      parsed = parseWsFrames(pending);
+    } catch (err) {
+      fail(400, err.message);
+      return;
+    }
+    pending = parsed.rest;
+
+    for (const frame of parsed.frames) {
+      if (frame.opcode === 0x8) {
+        child?.kill('SIGTERM');
+        socket.end();
+        return;
+      }
+      if (frame.opcode !== 0x1 || started) continue;
+      started = true;
+
+      let body;
+      try {
+        body = JSON.parse(frame.payload.toString('utf8'));
+      } catch {
+        fail(400, 'Invalid JSON body');
+        return;
+      }
+
+      const { cmd, token } = body;
+      const authed = AUTH_DISABLED || (typeof token === 'string' && validTokens.has(token));
+      if (!authed) {
+        fail(401, 'Unauthorized.');
+        return;
+      }
+
+      const clientIp = req.socket.remoteAddress;
+      if (isRateLimited(`cmd:${clientIp}`, 30, 60_000)) {
+        fail(429, 'Too many commands. Slow down.');
+        return;
+      }
+
+      if (!cmd || typeof cmd !== 'string') {
+        fail(400, 'Missing or invalid "cmd" field');
+        return;
+      }
+
+      const validation = validateCommand(cmd);
+      if (validation.blocked) {
+        console.warn(`[agent] BLOCKED command: ${cmd} (${validation.reason})`);
+        fail(403, `Command blocked: ${validation.reason}`);
+        return;
+      }
+
+      console.log(`[agent] ws exec: ${cmd}`);
+      child = streamCommand(cmd, {
+        onStart: (meta) => sendWsFrame(socket, { type: 'start', ...meta }),
+        onStdout: (data) => sendWsFrame(socket, { type: 'stdout', data }),
+        onStderr: (data) => sendWsFrame(socket, { type: 'stderr', data }),
+        onError: (err) => {
+          console.warn(`[agent] ws exec error: ${err.message}`);
+          sendWsFrame(socket, { type: 'error', error: err.message });
+          closeWs(socket, 1011, err.message);
+        },
+        onExit: (result) => {
+          console.log(`[agent] ws exit code: ${result.code} (${result.platform}, ${result.shell}, cwd=${result.cwd})`);
+          if (result.code !== 0) {
+            if (result.stdout) console.log(`[agent] stdout:\n${truncateLog(result.stdout)}`);
+            if (result.stderr) console.warn(`[agent] stderr:\n${truncateLog(result.stderr)}`);
+          }
+          sendWsFrame(socket, { type: 'exit', ...result });
+          closeWs(socket);
+        },
+      });
+    }
+  });
+
+  socket.on('close', () => {
+    child?.kill('SIGTERM');
+  });
+
+  socket.on('error', () => {
+    child?.kill('SIGTERM');
+  });
 });
 
 // ─── Start ───────────────────────────────────────────────────────────────────

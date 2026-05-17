@@ -23,6 +23,7 @@
         "running": "実行中...",
         "completed": "完了",
         "error": "エラー",
+        "aborted": "中止",
         "exitCode": "終了コード {code}",
         "remove": "削除",
         "uploadImage": "画像をアップロード",

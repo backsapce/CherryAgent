@@ -131,7 +131,13 @@ registry.register({
   },
   checkAvailable: (ctx) => !!ctx?.agentUrl,
   async handler({ command }, ctx) {
-    const result = await executeCommand(command, ctx.agentUrl);
+    const result = await executeCommand(command, ctx.agentUrl, {
+      stream: true,
+      requireStreaming: true,
+      signal: ctx?.signal,
+      onStdout: (chunk) => ctx?.onToolUpdate?.({ stdout: chunk }),
+      onStderr: (chunk) => ctx?.onToolUpdate?.({ stderr: chunk }),
+    });
     let out = `Exit code: ${result.code}`;
     if (result.platform || result.shell || result.cwd || result.filesRoot) {
       out += `\nEnvironment: platform=${result.platform || 'unknown'}, shell=${result.shell || 'unknown'}, cwd=${result.cwd || 'unknown'}, filesRoot=${result.filesRoot || 'unknown'}`;

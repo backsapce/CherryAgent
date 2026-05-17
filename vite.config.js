@@ -67,6 +67,7 @@ const agentProxy = {
   '/agent': {
     target: 'http://localhost:3099',
     changeOrigin: true,
+    ws: true,
   },
 }
 
