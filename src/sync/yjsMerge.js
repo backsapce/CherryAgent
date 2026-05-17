@@ -157,8 +157,11 @@ function timestampMs(value) {
 function newerTimestampedRecord(localValue, incomingValue) {
   const localTimestamp = timestampMs(localValue);
   const incomingTimestamp = timestampMs(incomingValue);
-  if (localTimestamp == null || incomingTimestamp == null || localTimestamp === incomingTimestamp) return null;
   if (localValue?.id == null || String(localValue.id) !== String(incomingValue?.id)) return null;
+  if (localTimestamp == null && incomingTimestamp == null) return null;
+  if (localTimestamp == null) return incomingValue;
+  if (incomingTimestamp == null) return localValue;
+  if (localTimestamp === incomingTimestamp) return null;
   return incomingTimestamp > localTimestamp ? incomingValue : localValue;
 }
 

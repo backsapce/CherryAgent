@@ -94,12 +94,26 @@ npm run dev:agent
 Or run the Docker image:
 
 ```bash
+mkdir -p ./vertex-workspace
+
 docker run -d \
   --name vertex-sandbox \
   --restart unless-stopped \
   -p 3099:3099 \
   -e AGENT_ALLOWED_ORIGINS=https://your-frontend-origin \
-  -v $(pwd)/vertex-workspace:/home/vertex \
+  -v "$(pwd)/vertex-workspace:/home/vertex" \
+  backsapce/vertex-sandbox:latest
+```
+
+The sandbox container uses `/home/vertex` as its Docker `WORKDIR` and `AGENT_WORKING_DIR`. Mount your host workspace directory there so `docker exec`, shell commands, file operations, and the saved `.vertex-token` all use the same persistent home directory:
+
+```bash
+docker run -d \
+  --name vertex-sandbox \
+  --restart unless-stopped \
+  -p 3099:3099 \
+  -e AGENT_ALLOWED_ORIGINS=https://your-frontend-origin \
+  -v "/absolute/path/to/workspace:/home/vertex" \
   backsapce/vertex-sandbox:latest
 ```
 
@@ -128,7 +142,8 @@ Agent Node environment variables:
 | `AGENT_PORT` | `3099` | HTTP port for `/agent` |
 | `AGENT_WORKING_DIR` | Server process cwd | Agent workspace root. Commands run here, and file APIs use this same directory by default. |
 | `AGENT_FILES_DIR` | `AGENT_WORKING_DIR` | Optional separate root for file APIs. Set this only when you intentionally want managed files isolated from the command cwd. |
-| `AGENT_TOKEN_FILE` | `.agent-token` | File used to persist long-lived auth tokens |
+| `AGENT_TOKEN_FILE` | `.vertex-token` | File used to persist long-lived auth tokens; the sandbox Docker image sets this to `/home/vertex/.vertex-token`. |
+| `AGENT_DISABLE_AUTH` | unset | Set to `true` only when the sandbox is already protected by another trusted boundary. When enabled, `/agent` returns `needsAuth: false` and command/file APIs do not require a token. |
 | `AGENT_ALLOWED_ORIGINS` | `http://localhost:5173` | Comma-separated CORS allowlist |
 | `AGENT_SHELL` | Windows: `%ComSpec%`; other platforms: Node default | Shell used to execute commands. Set to `powershell.exe` or `pwsh.exe` when you want PowerShell syntax. |
 

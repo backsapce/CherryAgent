@@ -166,10 +166,38 @@ function collectDeletedRecordIds(path, ...records) {
   return mergeSets(...records.map((record) => collectDeletedLlmProfileIds(record)));
 }
 
+function isConfigPath(path) {
+  return path === 'config.yaml' || path === 'config.yml' || path === 'config.json';
+}
+
+function stripLocalOnlyConfig(data) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return data;
+  const next = { ...data };
+  delete next.agentTokens;
+  return next;
+}
+
+function preserveLocalOnlyConfig(path, mergedData, localData = {}) {
+  if (!isConfigPath(path) || !mergedData || typeof mergedData !== 'object' || Array.isArray(mergedData)) {
+    return mergedData;
+  }
+
+  const next = stripLocalOnlyConfig(mergedData);
+  if (
+    localData
+    && typeof localData === 'object'
+    && !Array.isArray(localData)
+    && localData.agentTokens != null
+  ) {
+    next.agentTokens = localData.agentTokens;
+  }
+  return next;
+}
+
 function pruneDeletedRecords(path, data, deletedSessionIds, deletedAgentIds, deletedLlmProfileIds = new Set()) {
   let next = data;
   if (path === 'session.json') next = pruneDeletedSessions(next, deletedSessionIds);
-  if (path === 'config.yaml' || path === 'config.yml' || path === 'config.json') {
+  if (isConfigPath(path)) {
     next = pruneDeletedAgents(next, deletedAgentIds);
     next = pruneDeletedLlmProfiles(next, mergeSets(deletedLlmProfileIds, collectDeletedLlmProfileIds(next)));
   }
@@ -282,7 +310,7 @@ async function applyRemoteFile(backend, syncConfig, path, entry, localEntry, del
     if (!remoteUpdate) return null;
     if (localEntry) {
       let localText = await readPathText(path);
-      if (path === 'session.json' || path === 'config.yaml' || path === 'config.yml' || path === 'config.json') {
+      if (path === 'session.json' || isConfigPath(path)) {
         const localRawData = parseStructuredContent(path, localText);
         const remoteRawData = readStructuredUpdate(remoteUpdate);
         const deletedLlmProfileIds = collectDeletedRecordIds(path, localRawData, remoteRawData);
@@ -290,9 +318,12 @@ async function applyRemoteFile(backend, syncConfig, path, entry, localEntry, del
         localText = formatStructuredContent(path, localData);
         const remoteData = pruneDeletedRecords(path, remoteRawData, deletedSessionIds, deletedAgentIds, deletedLlmProfileIds);
         const merged = mergeStructuredContent(path, localText, createStructuredUpdate(remoteData));
-        await writePathText(path, merged.content, { internal: true });
-        await backend.putBytes(entry.yjsKey || objectKey(syncConfig, yjsPath(path)), merged.update, 'application/octet-stream');
-        return { merged: true, update: merged.update };
+        const finalData = preserveLocalOnlyConfig(path, merged.data, localData);
+        const syncData = isConfigPath(path) ? stripLocalOnlyConfig(finalData) : finalData;
+        const update = createStructuredUpdate(syncData);
+        await writePathText(path, formatStructuredContent(path, finalData), { internal: true });
+        await backend.putBytes(entry.yjsKey || objectKey(syncConfig, yjsPath(path)), update, 'application/octet-stream');
+        return { merged: true, update };
       }
       const remoteData = dataFromStructuredUpdate(path, remoteUpdate, deletedSessionIds, deletedAgentIds);
       const merged = mergeStructuredContent(path, localText, createStructuredUpdate(remoteData));
@@ -300,8 +331,8 @@ async function applyRemoteFile(backend, syncConfig, path, entry, localEntry, del
       await backend.putBytes(entry.yjsKey || objectKey(syncConfig, yjsPath(path)), merged.update, 'application/octet-stream');
       return { merged: true, update: merged.update };
     }
-    const data = dataFromStructuredUpdate(path, remoteUpdate, deletedSessionIds, deletedAgentIds);
-    const update = createStructuredUpdate(data);
+    const data = preserveLocalOnlyConfig(path, dataFromStructuredUpdate(path, remoteUpdate, deletedSessionIds, deletedAgentIds));
+    const update = createStructuredUpdate(isConfigPath(path) ? stripLocalOnlyConfig(data) : data);
     await writeStructuredFileFromUpdate(path, update);
     return { merged: false, update };
   }
@@ -443,7 +474,7 @@ async function pushInternal(syncConfig) {
     }
 
     const shouldPruneIndex = (path === 'session.json' && deletedSessionIds.size > 0)
-      || ((path === 'config.yaml' || path === 'config.yml' || path === 'config.json') && deletedAgentIds.size > 0);
+      || (isConfigPath(path) && deletedAgentIds.size > 0);
     if (!shouldPruneIndex && previous?.hash === entry.hash && remoteEntry && !remoteEntry.deleted) {
       stats.skipped += 1;
       continue;
@@ -458,8 +489,9 @@ async function pushInternal(syncConfig) {
       const localText = await readPathText(path);
       const localRawData = parseStructuredContent(path, localText);
       let localData = pruneDeletedRecords(path, localRawData, deletedSessionIds, deletedAgentIds);
-      let localUpdate = createStructuredUpdate(localData);
-      if (path === 'session.json' || path === 'config.yaml' || path === 'config.yml' || path === 'config.json') {
+      let syncData = isConfigPath(path) ? stripLocalOnlyConfig(localData) : localData;
+      let localUpdate = createStructuredUpdate(syncData);
+      if (path === 'session.json' || isConfigPath(path)) {
         await writePathText(path, formatStructuredContent(path, localData), { internal: true });
       }
       const remoteUpdate = remoteEntry && !remoteEntry.deleted
@@ -470,13 +502,19 @@ async function pushInternal(syncConfig) {
         const deletedLlmProfileIds = collectDeletedRecordIds(path, localRawData, remoteRawData);
         localData = pruneDeletedRecords(path, localRawData, deletedSessionIds, deletedAgentIds, deletedLlmProfileIds);
         const remoteData = pruneDeletedRecords(path, remoteRawData, deletedSessionIds, deletedAgentIds, deletedLlmProfileIds);
-        localUpdate = createStructuredUpdate(localData);
-        const merged = mergeStructuredUpdates([createStructuredUpdate(remoteData), localUpdate]);
-        localUpdate = merged.update;
-        await writePathText(path, formatStructuredContent(path, merged.data), { internal: true });
+        const localSyncData = isConfigPath(path) ? stripLocalOnlyConfig(localData) : localData;
+        const remoteSyncData = isConfigPath(path) ? stripLocalOnlyConfig(remoteData) : remoteData;
+        localUpdate = createStructuredUpdate(localSyncData);
+        const merged = mergeStructuredUpdates([createStructuredUpdate(remoteSyncData), localUpdate]);
+        const finalData = preserveLocalOnlyConfig(path, merged.data, localData);
+        syncData = isConfigPath(path) ? stripLocalOnlyConfig(finalData) : finalData;
+        localUpdate = createStructuredUpdate(syncData);
+        await writePathText(path, formatStructuredContent(path, finalData), { internal: true });
         stats.merged += 1;
       }
-      const content = await readPathText(path);
+      const content = isConfigPath(path)
+        ? formatStructuredContent(path, syncData)
+        : await readPathText(path);
       await backend.putBytes(updateKey, localUpdate, 'application/octet-stream');
       await backend.putBytes(rawKey, new TextEncoder().encode(content), path.endsWith('.json') ? 'application/json' : 'text/yaml');
     } else {

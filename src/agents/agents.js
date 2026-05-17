@@ -27,9 +27,18 @@ function normalizeAgent(agent) {
     id: agent.id,
     name: agent.name || agent.id,
     createdAt: agent.createdAt || new Date().toISOString(),
+    updatedAtMs: Number.isFinite(agent.updatedAtMs) ? agent.updatedAtMs : null,
     llmProfileId: agent.llmProfileId || null,
     sandboxUrl: agent.sandboxUrl || null,
   };
+}
+
+function touchAgent(agent, patch = {}) {
+  return normalizeAgent({
+    ...agent,
+    ...patch,
+    updatedAtMs: Date.now(),
+  });
 }
 
 // ─── OPFS helpers ─────────────────────────────────────────────────────────────
@@ -110,7 +119,7 @@ export async function ensureDefaultAgent() {
   }
 
   const id = generateAgentId();
-  const agent = normalizeAgent({ id, name: id, createdAt: new Date().toISOString() });
+  const agent = touchAgent({ id, name: id, createdAt: new Date().toISOString() });
   await config.set('agentsList', [agent]);
 
   await ensureAgentWorkspace(id, id);
@@ -146,7 +155,7 @@ export async function getAgent(id) {
 export async function createAgent(name) {
   const id = generateAgentId();
   const agentName = name || id;
-  const agent = normalizeAgent({ id, name: agentName, createdAt: new Date().toISOString() });
+  const agent = touchAgent({ id, name: agentName, createdAt: new Date().toISOString() });
 
   const agents = await listAgents();
   agents.push(agent);
@@ -187,7 +196,7 @@ export async function deleteAgent(id) {
  */
 export async function updateAgentName(id, name) {
   const agents = await listAgents();
-  const updated = agents.map((a) => (a.id === id ? { ...a, name } : a));
+  const updated = agents.map((a) => (a.id === id ? touchAgent(a, { name }) : a));
   await config.set('agentsList', updated);
 
   // Update meta.json with new name
@@ -195,7 +204,7 @@ export async function updateAgentName(id, name) {
     const wsDir = await getWorkspaceDir(id);
     const existing = await readJSON(wsDir, 'meta.json');
     if (existing) {
-      await writeWorkspaceJSON(id, 'meta.json', { ...existing, name });
+      await writeWorkspaceJSON(id, 'meta.json', touchAgent(existing, { name }));
     }
   } catch {
     // workspace may not exist yet
@@ -225,7 +234,7 @@ export async function updateAgentConfig(id, patch) {
   const agents = await listAgents();
   const updated = agents.map((a) => (
     a.id === id
-      ? normalizeAgent({
+      ? touchAgent({
           ...a,
           ...patch,
           llmProfileId: Object.prototype.hasOwnProperty.call(patch, 'llmProfileId')
@@ -243,7 +252,7 @@ export async function updateAgentConfig(id, patch) {
     const wsDir = await getWorkspaceDir(id);
     const existing = await readJSON(wsDir, 'meta.json');
     if (existing) {
-      await writeWorkspaceJSON(id, 'meta.json', normalizeAgent({ ...existing, ...patch }));
+      await writeWorkspaceJSON(id, 'meta.json', touchAgent(existing, patch));
     }
   } catch {
     // workspace may not exist yet

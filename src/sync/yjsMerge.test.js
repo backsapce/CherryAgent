@@ -39,6 +39,53 @@ test('session metadata merge keeps newer agent selection by timestamp', () => {
   assert.equal(merged.data[0].updatedAtMs, 2000);
 });
 
+test('agent config merge keeps newer sandbox removal', () => {
+  const oldAgent = {
+    id: 'agent-a',
+    name: 'Agent A',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    llmProfileId: null,
+    sandboxUrl: 'http://localhost:3099',
+  };
+  const newAgent = {
+    ...oldAgent,
+    updatedAtMs: 2000,
+    sandboxUrl: null,
+  };
+
+  const merged = mergeStructuredUpdates([
+    createStructuredUpdate({ agentsList: [oldAgent] }),
+    createStructuredUpdate({ agentsList: [newAgent] }),
+  ]);
+
+  assert.equal(merged.data.agentsList[0].sandboxUrl, null);
+  assert.equal(merged.data.agentsList[0].updatedAtMs, 2000);
+});
+
+test('agent config merge keeps newer sandbox selection', () => {
+  const oldAgent = {
+    id: 'agent-a',
+    name: 'Agent A',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAtMs: 1000,
+    llmProfileId: null,
+    sandboxUrl: null,
+  };
+  const newAgent = {
+    ...oldAgent,
+    updatedAtMs: 2000,
+    sandboxUrl: 'http://localhost:3099',
+  };
+
+  const merged = mergeStructuredUpdates([
+    createStructuredUpdate({ agentsList: [oldAgent] }),
+    createStructuredUpdate({ agentsList: [newAgent] }),
+  ]);
+
+  assert.equal(merged.data.agentsList[0].sandboxUrl, 'http://localhost:3099');
+  assert.equal(merged.data.agentsList[0].updatedAtMs, 2000);
+});
+
 test('scalar conflicts resolve to one deterministic Yjs value', () => {
   const left = createStructuredUpdate({ theme: 'light' });
   const right = createStructuredUpdate({ theme: 'dark' });

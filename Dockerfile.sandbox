@@ -8,9 +8,11 @@ RUN mkdir -p /home/vertex
 
 ENV AGENT_PORT=3099
 ENV AGENT_WORKING_DIR=/home/vertex
-ENV AGENT_TOKEN_FILE=/app/.agent-token
+ENV AGENT_TOKEN_FILE=/home/vertex/.vertex-token
 ENV AGENT_ALLOWED_ORIGINS=http://localhost:3099
 
 EXPOSE 3099
 
-CMD ["node", "server/agent.js"]
+WORKDIR /home/vertex
+
+CMD ["node", "/app/server/agent.js"]

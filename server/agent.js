@@ -36,11 +36,14 @@ const STATIC_DIR = join(__dirname, '..', 'dist');
 
 const PORT = process.env.AGENT_PORT || 3099;
 const MAX_TIMEOUT = 30_000;
-const TOKEN_FILE = process.env.AGENT_TOKEN_FILE || join(process.cwd(), '.agent-token');
+const DEFAULT_TOKEN_FILE = join(process.cwd(), '.vertex-token');
+const TOKEN_FILE = process.env.AGENT_TOKEN_FILE
+  || DEFAULT_TOKEN_FILE;
 const ALLOWED_ORIGINS = (process.env.AGENT_ALLOWED_ORIGINS || 'https://127.0.0.1:5173').split(',');
 const COMMAND_SHELL = process.env.AGENT_SHELL || (process.platform === 'win32' ? (process.env.ComSpec || 'cmd.exe') : undefined);
 const WORKSPACE_DIR = resolve(process.env.AGENT_WORKING_DIR || process.cwd());
 const FILES_ROOT_DIR = resolve(process.env.AGENT_FILES_DIR || WORKSPACE_DIR);
+const AUTH_DISABLED = /^(1|true|yes)$/i.test(process.env.AGENT_DISABLE_AUTH || '');
 
 // ─── MIME types ─────────────────────────────────────────────────────────────
 
@@ -119,10 +122,13 @@ function generateToken(bytes = 32) {
 function loadTokens() {
   try {
     if (existsSync(TOKEN_FILE)) {
+      const before = validTokens.size;
       const content = readFileSync(TOKEN_FILE, 'utf-8');
       const lines = content.split('\n').map((l) => l.trim()).filter(Boolean);
       for (const t of lines) validTokens.add(t);
-      console.log(`[agent] Loaded ${validTokens.size} saved token(s)`);
+      const loaded = validTokens.size - before;
+      console.log(`[agent] Loaded ${loaded} saved token(s) from ${TOKEN_FILE}`);
+      console.log(`[agent] Current valid tokens: ${[...validTokens].join(', ')}`);
     }
   } catch (err) {
     console.warn('[agent] Could not read token file:', err.message);
@@ -138,6 +144,7 @@ function saveTokens() {
 }
 
 function isAuthorized(req) {
+  if (AUTH_DISABLED) return true;
   const auth = req.headers['authorization'] || '';
   const token = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
   return validTokens.has(token);
@@ -240,7 +247,7 @@ const server = createServer(async (req, res) => {
   if (url.pathname === '/agent' && req.method === 'GET') {
     const authed = isAuthorized(req);
 
-    if (!authed) {
+    if (!AUTH_DISABLED && !authed) {
       tempToken = generateToken(8);
       console.log(`\n[agent] ─── Fresh temp connect token ───`);
       console.log(`[agent]   ${tempToken}`);
@@ -250,6 +257,8 @@ const server = createServer(async (req, res) => {
     return json(res, 200, {
       status: 'ok',
       needsAuth: !authed,
+      authRequired: !AUTH_DISABLED,
+      authenticated: authed,
       platform: process.platform,
       shell: COMMAND_SHELL || 'default',
       cwd: WORKSPACE_DIR,
@@ -574,7 +583,9 @@ const server = createServer(async (req, res) => {
 
 // ─── Start ───────────────────────────────────────────────────────────────────
 
-loadTokens();
+if (!AUTH_DISABLED) {
+  loadTokens();
+}
 
 server.listen(PORT, () => {
   try {
@@ -592,6 +603,7 @@ server.listen(PORT, () => {
 
   console.log(`[agent] Server listening on http://localhost:${PORT}/agent`);
   console.log(`[agent] Allowed origins: ${ALLOWED_ORIGINS.join(', ')}`);
+  console.log(`[agent] Auth: ${AUTH_DISABLED ? 'disabled' : 'token required'}`);
   console.log(`[agent] Workspace cwd: ${WORKSPACE_DIR}`);
   console.log(`[agent] Files root: ${FILES_ROOT_DIR}`);
 });
