@@ -768,6 +768,29 @@
   background: var(--color-bg);
 }
 
+.tool-output.terminal-output {
+  padding: 0;
+  height: clamp(160px, 34vh, 360px);
+  overflow: hidden;
+  background: var(--color-bg);
+}
+
+.tool-terminal {
+  width: 100%;
+  height: 100%;
+  padding: 10px 12px;
+  box-sizing: border-box;
+  background: var(--color-bg);
+}
+
+.tool-terminal .xterm {
+  height: 100%;
+}
+
+.tool-terminal .xterm-viewport {
+  background: transparent;
+}
+
 .tool-output .stderr {
   color: #ef4444;
 }

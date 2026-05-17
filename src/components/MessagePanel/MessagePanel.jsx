@@ -5,6 +5,9 @@ import { ChevronRight, Settings as SettingsIcon, Folder, File, FileEdit, Message
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeSanitize from 'rehype-sanitize';
+import { Terminal } from '@xterm/xterm';
+import { FitAddon } from '@xterm/addon-fit';
+import '@xterm/xterm/css/xterm.css';
 import './MessagePanel.css';
 
 const Settings = lazy(() => import('../Settings/Settings'));
@@ -233,6 +236,98 @@ const ThinkingBlock = ({ thinking, isThinking }) => {
   );
 };
 
+const normalizeTerminalOutput = (value) => String(value || '').replace(/\r?\n/g, '\r\n');
+
+function fitAndScrollTerminal(terminal, fitAddon) {
+  if (!terminal?.element || !fitAddon) return;
+  try {
+    fitAddon.fit();
+    if (terminal.cols > 0 && terminal.rows > 0) {
+      terminal.scrollToBottom();
+    }
+  } catch {
+    // xterm can briefly lack renderer dimensions while mounting or resizing.
+  }
+}
+
+const ToolTerminal = ({ output }) => {
+  const containerRef = useRef(null);
+  const terminalRef = useRef(null);
+  const fitAddonRef = useRef(null);
+  const previousOutputRef = useRef('');
+
+  useEffect(() => {
+    if (!containerRef.current) return;
+
+    const style = getComputedStyle(containerRef.current);
+    const terminal = new Terminal({
+      convertEol: true,
+      cursorBlink: false,
+      cursorInactiveStyle: 'none',
+      disableStdin: true,
+      fontFamily: "'SF Mono', 'Fira Code', ui-monospace, monospace",
+      fontSize: 12,
+      lineHeight: 1.45,
+      scrollback: 5000,
+      theme: {
+        background: style.getPropertyValue('--color-bg').trim() || '#0f172a',
+        foreground: style.getPropertyValue('--color-text-content').trim() || '#e5e7eb',
+        cursor: style.getPropertyValue('--color-text-content').trim() || '#e5e7eb',
+        selectionBackground: style.getPropertyValue('--color-accent').trim() || '#2563eb',
+      },
+    });
+    const fitAddon = new FitAddon();
+    terminal.loadAddon(fitAddon);
+    terminal.open(containerRef.current);
+    fitAddon.fit();
+
+    terminalRef.current = terminal;
+    fitAddonRef.current = fitAddon;
+    previousOutputRef.current = '';
+
+    const resizeObserver = new ResizeObserver(() => {
+      requestAnimationFrame(() => {
+        fitAndScrollTerminal(terminalRef.current, fitAddonRef.current);
+      });
+    });
+    resizeObserver.observe(containerRef.current);
+
+    return () => {
+      resizeObserver.disconnect();
+      terminal.dispose();
+      terminalRef.current = null;
+      fitAddonRef.current = null;
+      previousOutputRef.current = '';
+    };
+  }, []);
+
+  useEffect(() => {
+    const terminal = terminalRef.current;
+    if (!terminal) return;
+    const nextOutput = String(output || '');
+    const previousOutput = previousOutputRef.current;
+    if (nextOutput.startsWith(previousOutput)) {
+      terminal.write(normalizeTerminalOutput(nextOutput.slice(previousOutput.length)));
+    } else {
+      terminal.reset();
+      terminal.write(normalizeTerminalOutput(nextOutput));
+    }
+    previousOutputRef.current = nextOutput;
+    requestAnimationFrame(() => {
+      fitAndScrollTerminal(terminal, fitAddonRef.current);
+    });
+  }, [output]);
+
+  return <div className="tool-terminal" ref={containerRef} />;
+};
+
+const OldExecuteTerminalOutput = ({ result }) => {
+  let output = '';
+  if (result?.stdout) output += result.stdout;
+  if (result?.stderr) output += `${output ? '\n' : ''}${result.stderr}`;
+  return <ToolTerminal output={output} />;
+};
+
 const ToolBlock = ({ toolCall, onStopStreaming }) => {
   const { t } = useI18n();
   const [expanded, setExpanded] = useState(false);
@@ -256,9 +351,8 @@ const ToolBlock = ({ toolCall, onStopStreaming }) => {
           {!result && <span className="tool-exit-code">{t('message.running')}</span>}
         </div>
         {expanded && hasOutput && (
-          <div className="tool-output">
-            {result.stdout && <span>{result.stdout}</span>}
-            {result.stderr && <span className="stderr">{result.stderr}</span>}
+          <div className="tool-output terminal-output">
+            <OldExecuteTerminalOutput result={result} />
           </div>
         )}
       </div>
@@ -268,6 +362,7 @@ const ToolBlock = ({ toolCall, onStopStreaming }) => {
   // New tool call format: { name, status?, result?, summary? }
   const { name, status, result, summary } = toolCall;
   const showShutdown = name === 'execute_command' && status === 'running' && onStopStreaming;
+  const renderTerminal = name === 'execute_command';
   return (
     <div className="tool-block">
       <div className="tool-header" onClick={() => setExpanded((v) => !v)}>
@@ -294,8 +389,8 @@ const ToolBlock = ({ toolCall, onStopStreaming }) => {
         )}
       </div>
       {expanded && result && (
-        <div className="tool-output">
-          <pre>{result}</pre>
+        <div className={`tool-output ${renderTerminal ? 'terminal-output' : ''}`}>
+          {renderTerminal ? <ToolTerminal output={result} /> : <pre>{result}</pre>}
         </div>
       )}
     </div>

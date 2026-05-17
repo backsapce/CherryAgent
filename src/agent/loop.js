@@ -144,9 +144,9 @@ export async function runAgentLoop(opts) {
     // Execute tool calls and build results
     const toolResults = [];
     for (const tc of toolCalls) {
+      let streamingStdout = '';
+      let streamingStderr = '';
       try {
-        let streamingStdout = '';
-        let streamingStderr = '';
         const result = await registry.dispatch(tc.name, tc.parsedArgs, {
           agentUrl,
           agentId,
@@ -185,7 +185,13 @@ export async function runAgentLoop(opts) {
         }
       } catch (err) {
         if (err.name === 'AbortError') {
-          const abortStr = 'Aborted';
+          let abortStr = 'Aborted';
+          if (streamingStdout || streamingStderr) {
+            abortStr = '';
+            if (streamingStdout) abortStr += `Stdout:\n${streamingStdout}`;
+            if (streamingStderr) abortStr += `${abortStr ? '\n' : ''}Stderr:\n${streamingStderr}`;
+            abortStr += `${abortStr ? '\n' : ''}Aborted`;
+          }
           toolResults.push({
             role: 'tool',
             tool_call_id: tc.id,
