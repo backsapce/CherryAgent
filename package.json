@@ -2,7 +2,7 @@
   "name": "vertex-agent",
   "description": "AI agent running purely in the browser",
   "private": true,
-  "version": "0.0.11",
+  "version": "0.0.12",
   "type": "module",
   "scripts": {
     "dev": "concurrently \"node server/agent.js\" \"vite\"",
