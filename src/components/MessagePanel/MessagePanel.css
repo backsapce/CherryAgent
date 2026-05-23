@@ -675,6 +675,7 @@
   display: flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
   padding: 8px 12px;
   background: var(--color-surface-alt);
   border-bottom: 1px solid var(--color-border);
@@ -698,6 +699,9 @@
 }
 
 .tool-cmd {
+  flex: 0 1 min(54ch, 58%);
+  min-width: 0;
+  max-width: min(54ch, 58%);
   font-family: 'SF Mono', 'Fira Code', monospace;
   color: var(--color-text-content);
   overflow: hidden;
@@ -716,10 +720,12 @@
 
 .tool-exit-code {
   margin-left: auto;
+  flex-shrink: 0;
   font-size: 11px;
   padding: 2px 6px;
   border-radius: 4px;
   font-weight: 500;
+  white-space: nowrap;
 }
 
 .tool-exit-code.success {

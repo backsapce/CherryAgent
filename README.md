@@ -91,6 +91,19 @@ Run the Agent Node when you want VertexAgent to execute commands or manage files
 npm run dev:agent
 ```
 
+Install the sandbox runtime from GitHub with npm and keep it in the background with PM2:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/backsapce/VertexAgent/main/script/install_sandbox_npm.sh | sh
+```
+
+The installer runs `npm install -g github:backsapce/VertexAgent`, starts the `vertex-sandbox` binary with PM2, and saves the PM2 process list. The default workspace is `~/vertex-workspace`; override it with `VERTEX_SANDBOX_WORKDIR=/path/to/workspace`. You can also run the binary yourself after installing:
+
+```bash
+npm install -g github:backsapce/VertexAgent
+vertex-sandbox
+```
+
 Or run the Docker image:
 
 ```bash

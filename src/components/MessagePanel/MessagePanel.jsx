@@ -330,7 +330,13 @@ const OldExecuteTerminalOutput = ({ result }) => {
 
 const ToolBlock = ({ toolCall, onStopStreaming }) => {
   const { t } = useI18n();
+  const isLegacyExecute = !!toolCall?.cmd;
+  const isRunningExecute = isLegacyExecute
+    ? !toolCall?.result
+    : toolCall?.name === 'execute_command' && toolCall?.status === 'running';
   const [expanded, setExpanded] = useState(false);
+  const effectiveExpanded = expanded || isRunningExecute;
+
   if (!toolCall) return null;
 
   // Old execute format: { cmd, result }
@@ -340,7 +346,7 @@ const ToolBlock = ({ toolCall, onStopStreaming }) => {
     return (
       <div className="tool-block">
         <div className="tool-header" onClick={() => setExpanded((v) => !v)}>
-          <ChevronRight className={expanded ? 'expanded' : ''} width={14} height={14} />
+          <ChevronRight className={effectiveExpanded ? 'expanded' : ''} width={14} height={14} />
           <span className="tool-label">{t('message.execute')}</span>
           <span className="tool-cmd">{cmd}</span>
           {result && (
@@ -350,7 +356,7 @@ const ToolBlock = ({ toolCall, onStopStreaming }) => {
           )}
           {!result && <span className="tool-exit-code">{t('message.running')}</span>}
         </div>
-        {expanded && hasOutput && (
+        {effectiveExpanded && hasOutput && (
           <div className="tool-output terminal-output">
             <OldExecuteTerminalOutput result={result} />
           </div>
@@ -360,14 +366,17 @@ const ToolBlock = ({ toolCall, onStopStreaming }) => {
   }
 
   // New tool call format: { name, status?, result?, summary? }
-  const { name, status, result, summary } = toolCall;
+  const { name, status, result, summary, command } = toolCall;
   const showShutdown = name === 'execute_command' && status === 'running' && onStopStreaming;
   const renderTerminal = name === 'execute_command';
+  const label = renderTerminal ? t('message.execute') : name;
+
   return (
     <div className="tool-block">
       <div className="tool-header" onClick={() => setExpanded((v) => !v)}>
-        <ChevronRight className={expanded ? 'expanded' : ''} width={14} height={14} />
-        <span className="tool-label">{name}</span>
+        <ChevronRight className={effectiveExpanded ? 'expanded' : ''} width={14} height={14} />
+        <span className="tool-label">{label}</span>
+        {renderTerminal && command && <span className="tool-cmd" title={command}>{command}</span>}
         {summary && <span className="tool-summary">{summary}</span>}
         {status === 'running' && <span className="tool-exit-code">{t('message.running')}</span>}
         {status === 'completed' && <span className="tool-exit-code success">{t('message.completed')}</span>}
@@ -388,7 +397,7 @@ const ToolBlock = ({ toolCall, onStopStreaming }) => {
           </button>
         )}
       </div>
-      {expanded && result && (
+      {effectiveExpanded && (result || (renderTerminal && status === 'running')) && (
         <div className={`tool-output ${renderTerminal ? 'terminal-output' : ''}`}>
           {renderTerminal ? <ToolTerminal output={result} /> : <pre>{result}</pre>}
         </div>

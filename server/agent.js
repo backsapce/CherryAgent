@@ -395,7 +395,7 @@ const server = createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
 
   // ── Health check ───────────────────────────────────────────────────────
-  if (url.pathname === '/agent' && req.method === 'GET') {
+  if ((url.pathname === '/agent' || url.pathname === '/agent/health') && req.method === 'GET') {
     const authed = isAuthorized(req);
 
     if (!AUTH_DISABLED && !authed) {

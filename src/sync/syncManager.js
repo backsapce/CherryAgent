@@ -270,6 +270,20 @@ async function localFileMap() {
   return new Map(entries.map((entry) => [entry.path, entry]));
 }
 
+async function currentLocalEntry(path) {
+  try {
+    const file = await readPathBlob(path);
+    return {
+      path,
+      size: file.size,
+      lastModified: file.lastModified,
+      hash: await hashBlob(file),
+    };
+  } catch {
+    return null;
+  }
+}
+
 function makeDeleteEntry(previous = {}) {
   return {
     deleted: true,
@@ -353,9 +367,10 @@ async function pullInternal(syncConfig) {
   const stats = { downloaded: 0, merged: 0, deleted: 0, skipped: 0 };
 
   for (const [path, entry] of Object.entries(manifest.files || {})) {
-    const localEntry = local.get(path);
+    let localEntry = local.get(path);
 
     if (entry.deleted) {
+      if (!localEntry) localEntry = await currentLocalEntry(path);
       const previous = state.files[path];
       if (
         entry.hash == null ||
@@ -370,6 +385,7 @@ async function pullInternal(syncConfig) {
       continue;
     }
 
+    if (!localEntry) localEntry = await currentLocalEntry(path);
     const previous = state.files[path];
     const localDirty = localEntry && previous?.hash && previous.hash !== localEntry.hash;
     const remoteNewer = !localEntry || !previous || entry.updatedAt !== previous.remoteUpdatedAt;

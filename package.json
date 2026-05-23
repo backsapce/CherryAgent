@@ -4,6 +4,16 @@
   "private": true,
   "version": "0.0.12",
   "type": "module",
+  "bin": {
+    "vertex-sandbox": "./bin/vertex-sandbox.js",
+    "vertex-agent-server": "./bin/vertex-sandbox.js"
+  },
+  "files": [
+    "bin/",
+    "server/",
+    "README.md",
+    "LICENSE.md"
+  ],
   "scripts": {
     "dev": "concurrently \"node server/agent.js\" \"vite\"",
     "dev:agent": "node server/agent.js",

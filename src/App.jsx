@@ -48,6 +48,42 @@ function sortSessions(sessions) {
   return [...sessions].sort((a, b) => sessionTimestamp(b) - sessionTimestamp(a));
 }
 
+function sessionDataChanged(left, right) {
+  return JSON.stringify(left) !== JSON.stringify(right);
+}
+
+function mergeStoredSessions(savedSessions, currentSessions) {
+  const mergedById = new Map();
+  let keptLocalState = false;
+
+  for (const session of savedSessions) {
+    if (session?.id != null) mergedById.set(String(session.id), session);
+  }
+
+  for (const session of currentSessions) {
+    if (session?.id == null) continue;
+
+    const id = String(session.id);
+    const saved = mergedById.get(id);
+    if (!saved) {
+      mergedById.set(id, session);
+      keptLocalState = true;
+      continue;
+    }
+
+    if (sessionTimestamp(session) > sessionTimestamp(saved)) {
+      mergedById.set(id, session);
+      keptLocalState = true;
+    }
+  }
+
+  const merged = sortSessions([...mergedById.values()]);
+  return {
+    sessions: merged,
+    keptLocalState: keptLocalState || sessionDataChanged(merged, savedSessions),
+  };
+}
+
 const AGENT_SYSTEM_PROMPT = `You are a helpful assistant with access to tools for executing commands, reading/writing files, managing the filesystem, and delegating focused tasks to sub-agents. Use these tools to help the user accomplish their tasks.
 
 Rules:
@@ -117,6 +153,16 @@ function App() {
   const selectedAgentRef = useRef(null); // avoid stale closure
   const messagePanelRef = useRef(null);
   const wasStreamingRef = useRef(false);
+  const sessionsRef = useRef(sessions);
+  const activeSessionIdRef = useRef(activeSessionId);
+
+  useEffect(() => {
+    sessionsRef.current = sessions;
+  }, [sessions]);
+
+  useEffect(() => {
+    activeSessionIdRef.current = activeSessionId;
+  }, [activeSessionId]);
 
   const refreshFromStorage = useCallback(async () => {
     await config.init();
@@ -133,30 +179,32 @@ function App() {
     setAvatar(config.get('general.avatar') || '');
 
     const savedSessions = sortSessions(await loadSessions());
-    suppressNextSaveRef.current = true;
-    setSessions(savedSessions);
+    const { sessions: mergedSessions, keptLocalState } = mergeStoredSessions(savedSessions, sessionsRef.current);
+    suppressNextSaveRef.current = !keptLocalState;
+    setSessions(mergedSessions);
 
     const agentMap = {};
     const llmMap = {};
-    for (const session of savedSessions) {
+    for (const session of mergedSessions) {
       if (session.agentId) agentMap[session.id] = session.agentId;
       if (session.llmProfileId) llmMap[session.id] = session.llmProfileId;
     }
     setSessionAgents(agentMap);
     setSessionLlmProfiles(llmMap);
 
-    const lastWithAgent = savedSessions.find((c) => c.agentId);
+    const lastWithAgent = mergedSessions.find((c) => c.agentId);
     setLastAgentId(lastWithAgent?.agentId || null);
 
-    if (savedSessions.length === 0) {
+    const selectedSessionId = activeSessionIdRef.current;
+    if (mergedSessions.length === 0) {
       setActiveSessionId(null);
-    } else if (!savedSessions.some((session) => session.id === activeSessionId)) {
-      setActiveSessionId(savedSessions[0].id);
+    } else if (!mergedSessions.some((session) => session.id === selectedSessionId)) {
+      setActiveSessionId(mergedSessions[0].id);
     }
 
     await llm.init();
     const activeLlmId = llm.getActiveProfileId();
-    const selectedSession = savedSessions.find((session) => session.id === activeSessionId) || savedSessions[0];
+    const selectedSession = mergedSessions.find((session) => session.id === selectedSessionId) || mergedSessions[0];
     const sessionLlmId = selectedSession?.llmProfileId;
     setCurrentLlmProfileId(sessionLlmId || activeLlmId || null);
     setLlmReady((prev) => !prev);
@@ -164,7 +212,7 @@ function App() {
     const savedAgents = await listAgents();
     setAgentList(savedAgents);
     setStorageVersion((prev) => prev + 1);
-  }, [activeSessionId]);
+  }, []);
 
   // Load config, sessions and LLM settings from OPFS on mount
   useEffect(() => {
@@ -295,7 +343,7 @@ function App() {
   const selectedAgentId = activeSession?.agentId || lastAgentId || null;
   const activeAgentConfig = selectedAgentId ? agentList.find((agent) => agent.id === selectedAgentId) : null;
   const firstLlmProfileId = llm.getProfiles()[0]?.id || null;
-  const activeLlmProfileId = activeSession?.llmProfileId || activeAgentConfig?.llmProfileId || currentLlmProfileId || llm.getActiveProfileId() || firstLlmProfileId;
+  const activeLlmProfileId = activeSession?.llmProfileId || currentLlmProfileId || activeAgentConfig?.llmProfileId || llm.getActiveProfileId() || firstLlmProfileId;
   const activeSandboxUrl = activeAgentConfig?.sandboxUrl || null;
 
   const getFirstLlmProfileId = useCallback(() => llm.getProfiles()[0]?.id || null, []);
@@ -315,7 +363,7 @@ function App() {
     // Use last used agent, falling back to first available agent
     const agentId = lastAgentId ?? (agentList.length > 0 ? agentList[0].id : null);
 
-    const llmProfileId = getAgentDefaultLlmId(agentId) || currentLlmProfileId || llm.getActiveProfileId();
+    const llmProfileId = currentLlmProfileId || getAgentDefaultLlmId(agentId) || llm.getActiveProfileId();
 
     const newSession = {
       id: generateId(),
@@ -389,7 +437,7 @@ function App() {
 
     const sessionAgentId = opts.agentId ?? sessionAgents[sessionId] ?? null;
     const agentConfig = sessionAgentId ? agentList.find((agent) => agent.id === sessionAgentId) : null;
-    const llmProfileId = opts.llmProfileId ?? sessionLlmProfiles[sessionId] ?? agentConfig?.llmProfileId ?? currentLlmProfileId ?? llm.getActiveProfileId() ?? getFirstLlmProfileId();
+    const llmProfileId = opts.llmProfileId ?? sessionLlmProfiles[sessionId] ?? currentLlmProfileId ?? agentConfig?.llmProfileId ?? llm.getActiveProfileId() ?? getFirstLlmProfileId();
     if (!llm.isProfileConfigured(llmProfileId)) {
       const hintId = generateId();
       setSessions((prev) =>
@@ -487,13 +535,22 @@ function App() {
             for (const tc of tcList) {
               const existing = toolCalls.find((t) => t.id === tc.id);
               if (!existing) {
-                toolCalls.push({ id: tc.id, name: tc.name, status: tc.status, result: tc.result, summary: tc.summary });
+                toolCalls.push({
+                  id: tc.id,
+                  name: tc.name,
+                  status: tc.status,
+                  result: tc.result,
+                  summary: tc.summary,
+                  command: tc.command,
+                });
               } else if (tc.result !== undefined) {
                 existing.status = tc.status;
                 existing.result = tc.result;
                 existing.summary = tc.summary;
+                if (tc.command !== undefined) existing.command = tc.command;
               } else if (tc.summary !== undefined) {
                 existing.summary = tc.summary;
+                if (tc.command !== undefined) existing.command = tc.command;
               }
             }
           }
@@ -547,7 +604,7 @@ function App() {
         // Auto-create a session if none selected
         const userMsg = { id: generateId(), role: 'user', content: text, ...(images && { images }), ...(contextFiles && { contextFiles }) };
         const agentId = lastAgentId ?? (agentList.length > 0 ? agentList[0].id : null);
-        const llmProfileId = getAgentDefaultLlmId(agentId) || currentLlmProfileId || llm.getActiveProfileId();
+        const llmProfileId = currentLlmProfileId || getAgentDefaultLlmId(agentId) || llm.getActiveProfileId();
         const newSession = {
           id: generateId(),
           title: text.slice(0, 30) + (text.length > 30 ? '...' : ''),
@@ -663,17 +720,25 @@ function App() {
   }, [activeSessionId, sessions, streaming, streamResponse]);
 
   const handleSelectLLM = useCallback(async (profileId) => {
+    const nextProfileId = profileId || null;
     await llm.selectProfile(profileId || null);
-    setCurrentLlmProfileId(profileId || null);
+    setCurrentLlmProfileId(nextProfileId);
     setLlmReady((prev) => !prev);
     if (!activeSessionId) return;
-    setSessionLlmProfiles((prev) => ({ ...prev, [activeSessionId]: profileId || null }));
+    setSessionLlmProfiles((prev) => {
+      const next = { ...prev };
+      if (nextProfileId) next[activeSessionId] = nextProfileId;
+      else delete next[activeSessionId];
+      return next;
+    });
     setSessions((prev) =>
-      prev.map((c) =>
-        c.id === activeSessionId
-          ? { ...c, llmProfileId: profileId || null }
-          : c
-      )
+      sortSessions(prev.map((c) => {
+        if (c.id !== activeSessionId) return c;
+        const nextSession = { ...c, ...sessionTimeFields() };
+        if (nextProfileId) nextSession.llmProfileId = nextProfileId;
+        else delete nextSession.llmProfileId;
+        return nextSession;
+      }))
     );
   }, [activeSessionId]);
 

@@ -404,12 +404,25 @@ export async function loadSessions() {
 export async function saveSessions(sessions) {
   const root = await getRootDir();
   const sessionDir = await getDirectory(SESSIONS_DIR);
+  const existingSessions = (await readJSON(root, SESSION_FILE)) || [];
+  const nextSessionsById = new Map();
+
+  for (const session of existingSessions) {
+    if (session?.id != null) nextSessionsById.set(String(session.id), session);
+  }
+
+  for (const session of sessions) {
+    if (session?.id != null) {
+      const { messages: _messages, ...rest } = session;
+      nextSessionsById.set(String(session.id), rest);
+    }
+  }
 
   // Save metadata
   await writeJSON(
     root,
     SESSION_FILE,
-    sessions.map(({ messages: _messages, ...rest }) => rest),
+    [...nextSessionsById.values()],
     { localPath: SESSION_FILE }
   );
 
@@ -428,12 +441,28 @@ export async function saveSessions(sessions) {
 export async function deleteSession(sessions, sessionId) {
   const root = await getRootDir();
   const sessionDir = await getDirectory(SESSIONS_DIR);
-  const remaining = sessions.filter((c) => c.id !== sessionId);
+  const existingSessions = (await readJSON(root, SESSION_FILE)) || [];
+  const remainingById = new Map();
+
+  for (const session of existingSessions) {
+    if (session?.id != null && String(session.id) !== String(sessionId)) {
+      remainingById.set(String(session.id), session);
+    }
+  }
+
+  for (const session of sessions) {
+    if (session?.id != null && String(session.id) !== String(sessionId)) {
+      const { messages: _messages, ...rest } = session;
+      remainingById.set(String(session.id), rest);
+    }
+  }
+
+  const remaining = [...remainingById.values()];
 
   await writeJSON(
     root,
     SESSION_FILE,
-    remaining.map(({ messages: _messages, ...rest }) => rest),
+    remaining,
     { localPath: SESSION_FILE }
   );
   await deleteEntry(sessionDir, `${sessionId}.json`);

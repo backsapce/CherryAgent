@@ -137,13 +137,14 @@ export async function runAgentLoop(opts) {
         id: tc.id,
         name: tc.name,
         status: 'running',
+        command: getToolCallCommand(tc),
         summary: formatToolCallSummary(tc),
       };
     }
+    onUpdate({ content, thinking, toolCalls: Object.values(allToolCalls) });
 
     // Execute tool calls and build results
-    const toolResults = [];
-    for (const tc of toolCalls) {
+    const executeToolCall = async (tc) => {
       let streamingStdout = '';
       let streamingStderr = '';
       try {
@@ -171,18 +172,19 @@ export async function runAgentLoop(opts) {
           },
         });
         const resultStr = String(result);
-        toolResults.push({
-          role: 'tool',
-          tool_call_id: tc.id,
-          name: tc.name,
-          content: resultStr,
-        });
         // Update tracking with result
         if (allToolCalls[tc.id]) {
           allToolCalls[tc.id].status = 'completed';
           allToolCalls[tc.id].result = resultStr;
           allToolCalls[tc.id].summary = formatToolCallSummary(tc, resultStr);
         }
+        onUpdate({ content, thinking, toolCalls: Object.values(allToolCalls) });
+        return {
+          role: 'tool',
+          tool_call_id: tc.id,
+          name: tc.name,
+          content: resultStr,
+        };
       } catch (err) {
         if (err.name === 'AbortError') {
           let abortStr = 'Aborted';
@@ -192,12 +194,6 @@ export async function runAgentLoop(opts) {
             if (streamingStderr) abortStr += `${abortStr ? '\n' : ''}Stderr:\n${streamingStderr}`;
             abortStr += `${abortStr ? '\n' : ''}Aborted`;
           }
-          toolResults.push({
-            role: 'tool',
-            tool_call_id: tc.id,
-            name: tc.name,
-            content: abortStr,
-          });
           if (allToolCalls[tc.id]) {
             allToolCalls[tc.id].status = 'aborted';
             allToolCalls[tc.id].result = abortStr;
@@ -207,17 +203,29 @@ export async function runAgentLoop(opts) {
           throw err;
         }
         const errStr = `Error: ${err.message}`;
-        toolResults.push({
-          role: 'tool',
-          tool_call_id: tc.id,
-          name: tc.name,
-          content: errStr,
-        });
         if (allToolCalls[tc.id]) {
           allToolCalls[tc.id].status = 'error';
           allToolCalls[tc.id].result = errStr;
           allToolCalls[tc.id].summary = formatToolCallSummary(tc);
         }
+        onUpdate({ content, thinking, toolCalls: Object.values(allToolCalls) });
+        return {
+          role: 'tool',
+          tool_call_id: tc.id,
+          name: tc.name,
+          content: errStr,
+        };
+      }
+    };
+
+    let toolResults = [];
+    const canRunInParallel =
+      toolCalls.length > 1 && toolCalls.every((tc) => tc.name === 'execute_command');
+    if (canRunInParallel) {
+      toolResults = await Promise.all(toolCalls.map((tc) => executeToolCall(tc)));
+    } else {
+      for (const tc of toolCalls) {
+        toolResults.push(await executeToolCall(tc));
       }
     }
 
@@ -388,6 +396,13 @@ function finalizeToolCalls(fragments) {
  */
 function getAvailableToolSchemas(context) {
   return getEnabledToolSchemas(context);
+}
+
+function getToolCallCommand(toolCall) {
+  if (toolCall.name !== 'execute_command') return undefined;
+
+  const command = toolCall.parsedArgs?.command;
+  return typeof command === 'string' && command.trim() ? command : undefined;
 }
 
 function formatToolCallSummary(toolCall, result = '') {
