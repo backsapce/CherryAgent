@@ -733,6 +733,11 @@
   background: color-mix(in srgb, var(--color-success) 12%, transparent);
 }
 
+.tool-exit-code.writing {
+  color: #2563eb;
+  background: rgba(37, 99, 235, 0.1);
+}
+
 .tool-exit-code.error {
   color: #ef4444;
   background: rgba(239, 68, 68, 0.1);

@@ -198,6 +198,30 @@ async function ensureSandbox() {
   }
 }
 
+function sandboxRelativePath(path, options = {}) {
+  const rawPath = String(path || '').trim().replace(/\\/g, '/');
+  if (rawPath.includes('\0')) {
+    throw new Error('Path contains invalid characters');
+  }
+  if (rawPath.startsWith('/') || /^[A-Za-z]:\//.test(rawPath)) {
+    throw new Error('Path must be relative to the sandbox workspace');
+  }
+  const parts = rawPath.split('/').filter((part) => part && part !== '.');
+  if (parts.some((part) => part === '..')) {
+    throw new Error('Path cannot leave the sandbox workspace');
+  }
+  const normalizedPath = parts.join('/');
+  if (!options.allowEmpty && !normalizedPath) {
+    throw new Error('Path is required');
+  }
+  return normalizedPath;
+}
+
+function sandboxApiPath(path, options) {
+  const safePath = sandboxRelativePath(path, options);
+  return safePath ? `/${safePath}` : '/';
+}
+
 /**
  * List files/directories in the E2B sandbox.
  * @param {string} [path] - Directory path (empty for root)
@@ -205,8 +229,9 @@ async function ensureSandbox() {
  */
 export async function listE2bFiles(path = '') {
   await ensureSandbox();
-  const entries = await _sandbox.files.list(path || '/');
-  const parentDir = path === '' || path === '/' ? '' : path;
+  const safePath = sandboxRelativePath(path, { allowEmpty: true });
+  const entries = await _sandbox.files.list(sandboxApiPath(safePath, { allowEmpty: true }));
+  const parentDir = safePath;
   return {
     id: 'root',
     name: '/',
@@ -230,7 +255,7 @@ export async function listE2bFiles(path = '') {
  */
 export async function createE2bFile(path, content = '') {
   await ensureSandbox();
-  await _sandbox.files.write(`/${path}`, content);
+  await _sandbox.files.write(sandboxApiPath(path), content);
   return { success: true, message: 'File created' };
 }
 
@@ -241,7 +266,7 @@ export async function createE2bFile(path, content = '') {
  */
 export async function createE2bDir(path) {
   await ensureSandbox();
-  await _sandbox.files.makeDir(`/${path}`, { force: true });
+  await _sandbox.files.makeDir(sandboxApiPath(path), { force: true });
   return { success: true, message: 'Directory created' };
 }
 
@@ -252,7 +277,7 @@ export async function createE2bDir(path) {
  */
 export async function deleteE2bFile(path) {
   await ensureSandbox();
-  await _sandbox.files.remove(`/${path}`);
+  await _sandbox.files.remove(sandboxApiPath(path));
   return { success: true, message: 'Deleted successfully' };
 }
 
@@ -265,7 +290,7 @@ export async function deleteE2bFile(path) {
 export async function uploadE2bFile(path, file) {
   await ensureSandbox();
   const content = await file.arrayBuffer();
-  await _sandbox.files.write(`/${path}`, content);
+  await _sandbox.files.write(sandboxApiPath(path), content);
   return { success: true, message: 'File uploaded' };
 }
 
@@ -276,7 +301,7 @@ export async function uploadE2bFile(path, file) {
  */
 export async function downloadE2bFile(path) {
   await ensureSandbox();
-  return _sandbox.files.read(`/${path}`, { format: 'blob' });
+  return _sandbox.files.read(sandboxApiPath(path), { format: 'blob' });
 }
 
 /**
@@ -286,7 +311,7 @@ export async function downloadE2bFile(path) {
  */
 export async function readE2bFileText(path) {
   await ensureSandbox();
-  return _sandbox.files.read(`/${path}`, { format: 'text' });
+  return _sandbox.files.read(sandboxApiPath(path), { format: 'text' });
 }
 
 /**
@@ -297,5 +322,5 @@ export async function readE2bFileText(path) {
  */
 export async function writeE2bFileText(path, content) {
   await ensureSandbox();
-  await _sandbox.files.write(`/${path}`, content);
+  await _sandbox.files.write(sandboxApiPath(path), content);
 }

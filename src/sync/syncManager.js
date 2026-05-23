@@ -69,6 +69,14 @@ function isPathOrChild(path, parentPath) {
   return path === parentPath || path.startsWith(`${parentPath}/`);
 }
 
+function hasDeletedAncestor(files = {}, path) {
+  for (const [deletedPath, entry] of Object.entries(files || {})) {
+    if (!entry?.deleted || deletedPath === path) continue;
+    if (isPathOrChild(path, deletedPath)) return true;
+  }
+  return false;
+}
+
 function collectDeletedSessionIds(files = {}) {
   const ids = new Set();
   for (const [path, entry] of Object.entries(files || {})) {
@@ -385,6 +393,18 @@ async function pullInternal(syncConfig) {
       continue;
     }
 
+    if (hasDeletedAncestor(manifest.files, path)) {
+      await deletePath(path, { internal: true });
+      state.files[path] = {
+        ...(state.files[path] || {}),
+        deleted: true,
+        deletedAt: nowIso(),
+        remoteUpdatedAt: entry.updatedAt || state.files[path]?.remoteUpdatedAt || null,
+      };
+      stats.deleted += 1;
+      continue;
+    }
+
     if (!localEntry) localEntry = await currentLocalEntry(path);
     const previous = state.files[path];
     const localDirty = localEntry && previous?.hash && previous.hash !== localEntry.hash;
@@ -431,6 +451,14 @@ async function pushInternal(syncConfig) {
 
   for (const [path, previous] of Object.entries(state.files || {})) {
     if (previous.deleted) {
+      for (const [remotePath, remoteEntry] of Object.entries(manifest.files || {})) {
+        if (!remoteEntry?.deleted && isPathOrChild(remotePath, path)) {
+          const entry = makeDeleteEntry(state.files[remotePath] || remoteEntry || previous);
+          manifest.files[remotePath] = entry;
+          state.files[remotePath] = { ...(state.files[remotePath] || {}), ...entry };
+          stats.deleted += 1;
+        }
+      }
       if (!manifest.files[path]?.deleted) {
         const entry = makeDeleteEntry(previous);
         manifest.files[path] = entry;
@@ -452,6 +480,15 @@ async function pushInternal(syncConfig) {
   for (const [path, entry] of local) {
     const previous = state.files[path];
     const remoteEntry = manifest.files[path];
+    if (hasDeletedAncestor(state.files, path) || hasDeletedAncestor(manifest.files, path)) {
+      await deletePath(path, { internal: true });
+      const deleteEntry = makeDeleteEntry(previous || remoteEntry || entry);
+      manifest.files[path] = deleteEntry;
+      state.files[path] = { ...(previous || {}), ...deleteEntry };
+      stats.deleted += 1;
+      continue;
+    }
+
     if ((previous?.deleted || remoteEntry?.deleted) && isSessionMessagesPath(path)) {
       if (!manifest.files[path]?.deleted) {
         const deleteEntry = makeDeleteEntry(previous);

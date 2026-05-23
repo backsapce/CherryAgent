@@ -22,6 +22,27 @@ function normalizeLocalPath(path) {
   return pathParts(path).join('/');
 }
 
+export function normalizeWorkspaceRelativePath(path, options = {}) {
+  const rawPath = String(path || '').trim().replace(/\\/g, '/');
+  if (rawPath.includes('\0')) {
+    throw new Error('Path contains invalid characters');
+  }
+  if (rawPath.startsWith('/') || /^[A-Za-z]:\//.test(rawPath)) {
+    throw new Error('Path must be relative to the agent workspace');
+  }
+
+  const parts = rawPath.split('/').filter((part) => part && part !== '.');
+  if (parts.some((part) => part === '..')) {
+    throw new Error('Path cannot leave the agent workspace');
+  }
+
+  const normalizedPath = parts.join('/');
+  if (!options.allowEmpty && !normalizedPath) {
+    throw new Error('Path is required');
+  }
+  return normalizedPath;
+}
+
 function isInternalSyncPath(path) {
   return normalizeLocalPath(path).split('/')[0] === SYNC_DIR;
 }
@@ -1014,15 +1035,16 @@ export async function deleteAgentSkillDir(agentId, skillName) {
 // Agent-scoped file operations
 
 export async function listAgentFiles(agentId, path = '') {
-  const dir = path
-    ? await getAgentDir(agentId, 'files', ...pathParts(path))
+  const safePath = normalizeWorkspaceRelativePath(path, { allowEmpty: true });
+  const dir = safePath
+    ? await getAgentDir(agentId, 'files', ...pathParts(safePath))
     : await getAgentFilesDir(agentId);
   const children = [];
   for (const { name, kind } of await listEntries(dir)) {
     if (kind === 'file') {
       const file = await (await dir.getFileHandle(name)).getFile();
       children.push({
-        id: `file-${agentId}-${path ? `${path}/` : ''}${name}`,
+        id: `file-${agentId}-${safePath ? `${safePath}/` : ''}${name}`,
         name,
         type: 'file',
         size: file.size,
@@ -1030,7 +1052,7 @@ export async function listAgentFiles(agentId, path = '') {
       });
     } else {
       children.push({
-        id: `dir-${agentId}-${path ? `${path}/` : ''}${name}`,
+        id: `dir-${agentId}-${safePath ? `${safePath}/` : ''}${name}`,
         name,
         type: 'directory',
         children: [],
@@ -1041,7 +1063,8 @@ export async function listAgentFiles(agentId, path = '') {
 }
 
 export async function readAgentFile(agentId, path) {
-  const parts = pathParts(path);
+  const safePath = normalizeWorkspaceRelativePath(path);
+  const parts = pathParts(safePath);
   const fileName = parts.pop();
   const dir = parts.length > 0
     ? await getAgentDir(agentId, 'files', ...parts)
@@ -1050,17 +1073,19 @@ export async function readAgentFile(agentId, path) {
 }
 
 export async function writeAgentFile(agentId, path, content) {
-  const parts = pathParts(path);
+  const safePath = normalizeWorkspaceRelativePath(path);
+  const parts = pathParts(safePath);
   const fileName = parts.pop();
   const dir = parts.length > 0
     ? await getAgentDir(agentId, 'files', ...parts)
     : await getAgentFilesDir(agentId);
   const name = await resolveWorkspaceName(agentId);
-  await writeText(dir, fileName, content, { localPath: `${WORKSPACE_DIR}/${name}/files/${normalizeLocalPath(path)}` });
+  await writeText(dir, fileName, content, { localPath: `${WORKSPACE_DIR}/${name}/files/${safePath}` });
 }
 
 export async function createAgentFile(agentId, path, isDirectory = false) {
-  const parts = pathParts(path);
+  const safePath = normalizeWorkspaceRelativePath(path);
+  const parts = pathParts(safePath);
   const name = parts.pop();
   const dir = parts.length > 0
     ? await getAgentDir(agentId, 'files', ...parts)
@@ -1068,15 +1093,16 @@ export async function createAgentFile(agentId, path, isDirectory = false) {
   if (isDirectory) {
     await dir.getDirectoryHandle(name, { create: true });
     const workspaceName = await resolveWorkspaceName(agentId);
-    notifyOpfsMutation(`${WORKSPACE_DIR}/${workspaceName}/files/${normalizeLocalPath(path)}`, 'mkdir');
+    notifyOpfsMutation(`${WORKSPACE_DIR}/${workspaceName}/files/${safePath}`, 'mkdir');
   } else {
     const workspaceName = await resolveWorkspaceName(agentId);
-    await writeText(dir, name, '', { localPath: `${WORKSPACE_DIR}/${workspaceName}/files/${normalizeLocalPath(path)}` });
+    await writeText(dir, name, '', { localPath: `${WORKSPACE_DIR}/${workspaceName}/files/${safePath}` });
   }
 }
 
 export async function deleteAgentFile(agentId, path) {
-  const parts = pathParts(path);
+  const safePath = normalizeWorkspaceRelativePath(path);
+  const parts = pathParts(safePath);
   const name = parts.pop();
   const dir = parts.length > 0
     ? await getAgentDir(agentId, 'files', ...parts)
@@ -1084,6 +1110,6 @@ export async function deleteAgentFile(agentId, path) {
   try {
     await dir.removeEntry(name, { recursive: true });
     const workspaceName = await resolveWorkspaceName(agentId);
-    notifyOpfsMutation(`${WORKSPACE_DIR}/${workspaceName}/files/${normalizeLocalPath(path)}`, 'delete');
+    notifyOpfsMutation(`${WORKSPACE_DIR}/${workspaceName}/files/${safePath}`, 'delete');
   } catch { /* ignore */ }
 }

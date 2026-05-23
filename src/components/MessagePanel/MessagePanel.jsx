@@ -1,6 +1,6 @@
 import { forwardRef, lazy, Suspense, useImperativeHandle, useState, useRef, useEffect, useLayoutEffect, useMemo } from 'react';
 import { useI18n } from '../../i18n/context';
-import { getAgentDir } from '../../vfs/opfs';
+import { getAgentDir, normalizeWorkspaceRelativePath } from '../../vfs/opfs';
 import { ChevronRight, Settings as SettingsIcon, Folder, File, FileEdit, MessageSquare, Plus, X, Send, Stop, Plug, PieChart, Cloud, User } from '../Icons/Icons';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -62,7 +62,7 @@ async function collectAgentWorkspaceFiles(agentId) {
         files.push({
           name,
           relativePath,
-          displayPath: `/workspace/${agentId}/${relativePath}`,
+          displayPath: relativePath,
           size: file.size,
           lastModified: file.lastModified,
         });
@@ -75,7 +75,8 @@ async function collectAgentWorkspaceFiles(agentId) {
 }
 
 async function readAgentWorkspaceFile(agentId, relativePath) {
-  const parts = relativePath.split('/').filter(Boolean);
+  const safePath = normalizeWorkspaceRelativePath(relativePath);
+  const parts = safePath.split('/').filter(Boolean);
   const fileName = parts.pop();
   const dir = parts.length > 0 ? await getAgentDir(agentId, ...parts) : await getAgentDir(agentId);
   const fileHandle = await dir.getFileHandle(fileName);
@@ -87,7 +88,7 @@ function buildDisplayMessageWithFileRefs(text, files) {
   if (!files.length) return text;
   const totalTokens = files.reduce((sum, file) => sum + estimateTokensFromText(file.content), 0);
   const refs = files
-    .map((file) => `- ${file.displayPath} (${formatBytes(file.size)}, ~${estimateTokensFromText(file.content)} tokens)`)
+    .map((file) => `- ${file.relativePath || file.displayPath} (${formatBytes(file.size)}, ~${estimateTokensFromText(file.content)} tokens)`)
     .join('\n');
   return `${text}\n\nReferenced files: ${files.length} (~${totalTokens} tokens)\n${refs}`.trim();
 }
@@ -378,6 +379,7 @@ const ToolBlock = ({ toolCall, onStopStreaming }) => {
         <span className="tool-label">{label}</span>
         {renderTerminal && command && <span className="tool-cmd" title={command}>{command}</span>}
         {summary && <span className="tool-summary">{summary}</span>}
+        {status === 'writing' && <span className="tool-exit-code writing">{t('message.writing')}</span>}
         {status === 'running' && <span className="tool-exit-code">{t('message.running')}</span>}
         {status === 'completed' && <span className="tool-exit-code success">{t('message.completed')}</span>}
         {status === 'error' && <span className="tool-exit-code error">{t('message.error')}</span>}
@@ -1039,7 +1041,7 @@ const MessagePanel = forwardRef(({
             <div className="file-mention-popover">
               <div className="file-mention-header">
                 <span>@ files</span>
-                <span>/workspace/{agentId || 'agent'}</span>
+                <span>workspace</span>
               </div>
               <div className="file-mention-list">
                 {mentionLoading ? (

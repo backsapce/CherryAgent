@@ -133,10 +133,11 @@ export async function runAgentLoop(opts) {
 
     // Record tool calls by id (deduplicate)
     for (const tc of toolCalls) {
+      const isWriteFile = tc.name === 'write_file';
       allToolCalls[tc.id] = {
         id: tc.id,
         name: tc.name,
-        status: 'running',
+        status: isWriteFile ? 'writing' : 'running',
         command: getToolCallCommand(tc),
         summary: formatToolCallSummary(tc),
       };
@@ -327,7 +328,11 @@ async function streamAndCollect(apiMessages, systemPrompt, toolSchemas, opts) {
         opts.onUpdate?.({
           content,
           thinking,
-          toolCalls: toolCallFragments.map((f) => ({ id: f.id || '', name: f.name })),
+          toolCalls: toolCallFragments.map((f) => ({
+            id: f.id || '',
+            name: f.name,
+            status: f.name === 'write_file' ? 'writing' : undefined,
+          })),
         });
       }
     }
@@ -406,6 +411,13 @@ function getToolCallCommand(toolCall) {
 }
 
 function formatToolCallSummary(toolCall, result = '') {
+  if (toolCall.name === 'write_file') {
+    const args = toolCall.parsedArgs || {};
+    const path = typeof args.path === 'string' && args.path.trim() ? args.path : 'file';
+    const contentSize = typeof args.content === 'string' ? ` (${formatBytes(args.content.length)})` : '';
+    return `${path}${contentSize}`;
+  }
+
   if (toolCall.name !== 'spawn_agent') return undefined;
 
   const completedAgents = [];
@@ -428,6 +440,19 @@ function formatToolCallSummary(toolCall, result = '') {
   });
 
   return targets.join(', ');
+}
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) return '0 B';
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ['KB', 'MB', 'GB'];
+  let value = bytes / 1024;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  return `${value >= 10 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`;
 }
 
 // Map app provider IDs to tokenlens provider prefixes

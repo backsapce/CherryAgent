@@ -25,7 +25,7 @@ import { createServer } from 'node:http';
 import { exec, spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, mkdirSync, unlinkSync, rmSync } from 'node:fs';
-import { join, extname, normalize, resolve, sep } from 'node:path';
+import { isAbsolute, join, extname, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import process from 'node:process';
 
@@ -44,6 +44,7 @@ const ALLOWED_ORIGINS = (process.env.AGENT_ALLOWED_ORIGINS || 'https://127.0.0.1
 const COMMAND_SHELL = process.env.AGENT_SHELL || (process.platform === 'win32' ? (process.env.ComSpec || 'cmd.exe') : undefined);
 const WORKSPACE_DIR = resolve(process.env.AGENT_WORKING_DIR || process.cwd());
 const FILES_ROOT_DIR = resolve(process.env.AGENT_FILES_DIR || WORKSPACE_DIR);
+const PUBLIC_WORKSPACE_LABEL = 'workspace';
 const AUTH_DISABLED = /^(1|true|yes)$/i.test(process.env.AGENT_DISABLE_AUTH || '');
 
 // ─── MIME types ─────────────────────────────────────────────────────────────
@@ -176,9 +177,10 @@ function validateCommand(cmd) {
 // ─── Path safety ────────────────────────────────────────────────────────────
 
 function isSafePath(inputPath) {
+  if (typeof inputPath !== 'string' || inputPath.includes('\0') || isAbsolute(inputPath)) return false;
   const normalizedPath = normalize(inputPath);
   // Reject paths containing .. after normalization (should already be resolved, but double-check)
-  if (normalizedPath.includes('..')) return false;
+  if (normalizedPath.split(/[\\/]+/).includes('..')) return false;
   const fullPath = join(FILES_ROOT_DIR, normalizedPath);
   const resolvedPath = resolve(fullPath);
   // On Windows, compare case-insensitively
@@ -198,8 +200,8 @@ function execCommand(cmd, timeout = MAX_TIMEOUT) {
         code: error ? error.code ?? 1 : 0,
         platform: process.platform,
         shell: COMMAND_SHELL || 'default',
-        cwd: WORKSPACE_DIR,
-        filesRoot: FILES_ROOT_DIR,
+        cwd: PUBLIC_WORKSPACE_LABEL,
+        filesRoot: PUBLIC_WORKSPACE_LABEL,
       });
     });
   });
@@ -221,8 +223,8 @@ function streamCommand(cmd, { onStart, onStdout, onStderr, onExit, onError }, ti
   onStart?.({
     platform: process.platform,
     shell: COMMAND_SHELL || 'default',
-    cwd: WORKSPACE_DIR,
-    filesRoot: FILES_ROOT_DIR,
+    cwd: PUBLIC_WORKSPACE_LABEL,
+    filesRoot: PUBLIC_WORKSPACE_LABEL,
     pid: child.pid,
   });
 
@@ -271,8 +273,8 @@ function streamCommand(cmd, { onStart, onStdout, onStderr, onExit, onError }, ti
       timedOut,
       platform: process.platform,
       shell: COMMAND_SHELL || 'default',
-      cwd: WORKSPACE_DIR,
-      filesRoot: FILES_ROOT_DIR,
+      cwd: PUBLIC_WORKSPACE_LABEL,
+      filesRoot: PUBLIC_WORKSPACE_LABEL,
     });
   });
 
@@ -412,8 +414,8 @@ const server = createServer(async (req, res) => {
       authenticated: authed,
       platform: process.platform,
       shell: COMMAND_SHELL || 'default',
-      cwd: WORKSPACE_DIR,
-      filesRoot: FILES_ROOT_DIR,
+      cwd: PUBLIC_WORKSPACE_LABEL,
+      filesRoot: PUBLIC_WORKSPACE_LABEL,
     }, req);
   }
 

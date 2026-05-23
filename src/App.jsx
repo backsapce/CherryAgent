@@ -89,10 +89,16 @@ const AGENT_SYSTEM_PROMPT = `You are a helpful assistant with access to tools fo
 Rules:
 - Always explain what you're doing before and after using tools.
 - Spawn a sub-agent only for a bounded task that can be handled independently.
+- Use workspace-relative file paths only; do not use absolute host paths.
 - Be careful with destructive operations — confirm with the user first.
 - If a tool fails, explain the error and suggest alternatives.`;
 
 const FILE_CONTEXT_MARKER = 'Selected local files from the active agent workspace:';
+
+function contextFilePromptPath(file) {
+  if (file?.relativePath) return file.relativePath;
+  return String(file?.displayPath || '').replace(/^\/workspace\/[^/]+\//, '');
+}
 
 function expandMessagesForLlm(messages) {
   return messages.map((message) => {
@@ -100,7 +106,7 @@ function expandMessagesForLlm(messages) {
     if (!contextFiles?.length) return rest;
 
     const fileBlocks = contextFiles
-      .map((file) => `<file path="${file.displayPath}">\n${file.content}\n</file>`)
+      .map((file) => `<file path="${contextFilePromptPath(file)}">\n${file.content}\n</file>`)
       .join('\n\n');
 
     return {
@@ -543,10 +549,10 @@ function App() {
                   summary: tc.summary,
                   command: tc.command,
                 });
-              } else if (tc.result !== undefined) {
-                existing.status = tc.status;
-                existing.result = tc.result;
-                existing.summary = tc.summary;
+              } else if (tc.result !== undefined || tc.status !== undefined) {
+                if (tc.status !== undefined) existing.status = tc.status;
+                if (tc.result !== undefined) existing.result = tc.result;
+                if (tc.summary !== undefined) existing.summary = tc.summary;
                 if (tc.command !== undefined) existing.command = tc.command;
               } else if (tc.summary !== undefined) {
                 existing.summary = tc.summary;
@@ -560,7 +566,7 @@ function App() {
 
       // Mark unfinished tool calls as completed.
       for (const tc of toolCalls) {
-        if (tc.status === 'running') tc.status = 'completed';
+        if (tc.status === 'running' || tc.status === 'writing') tc.status = 'completed';
       }
 
       const finalContent = result.content || streamingContentRef.current;
@@ -572,7 +578,7 @@ function App() {
     } catch (err) {
       if (err.name === 'AbortError') {
         for (const tc of toolCalls) {
-          if (tc.status === 'running') {
+          if (tc.status === 'running' || tc.status === 'writing') {
             tc.status = 'aborted';
             tc.result = tc.result || 'Aborted';
           }
