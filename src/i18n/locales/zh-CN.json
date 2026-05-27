@@ -21,6 +21,7 @@
     "thoughtFor": "已思考 {seconds}",
         "execute": "执行：",
         "running": "运行中...",
+        "imageGeneration": "正在生成图片",
         "writing": "写入中...",
         "completed": "已完成",
         "error": "错误",

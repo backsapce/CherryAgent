@@ -21,6 +21,7 @@
     "thoughtFor": "Thought for {seconds}",
         "execute": "Execute:",
         "running": "running...",
+        "imageGeneration": "Creating image",
         "writing": "writing...",
         "completed": "completed",
         "error": "error",

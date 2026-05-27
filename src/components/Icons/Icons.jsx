@@ -283,6 +283,17 @@ export const WifiOff = ({ width = 16, height = 16, className = '' }) => (
 );
 
 // Image & Attachment Icons
+export const ImageGenerate = ({ width = 18, height = 18, className = '' }) => (
+  <IconBase width={width} height={height} viewBox="0 0 24 24" className={className}>
+    <rect x="3" y="5" width="15" height="14" rx="2" ry="2" />
+    <circle cx="8.5" cy="10.5" r="1.5" />
+    <path d="M4 17l4.5-4.5L12 16l2-2 3 3" />
+    <path d="M18 2v4" />
+    <path d="M20 4h-4" />
+    <path d="M21 8v2" />
+    <path d="M22 9h-2" />
+  </IconBase>
+);
 
 // Loading / Spinner Icon
 export const Spinner = ({ width = 16, height = 16, className = '' }) => (

@@ -1,7 +1,7 @@
 import { forwardRef, lazy, Suspense, useImperativeHandle, useState, useRef, useEffect, useLayoutEffect, useMemo } from 'react';
 import { useI18n } from '../../i18n/context';
 import { getAgentDir, normalizeWorkspaceRelativePath } from '../../vfs/opfs';
-import { ChevronRight, Settings as SettingsIcon, Folder, File, FileEdit, MessageSquare, Plus, X, Send, Stop, Plug, PieChart, Cloud, User } from '../Icons/Icons';
+import { ChevronRight, Settings as SettingsIcon, Folder, File, FileEdit, MessageSquare, Plus, X, Send, Stop, Plug, PieChart, Cloud, User, ImageGenerate } from '../Icons/Icons';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeSanitize from 'rehype-sanitize';
@@ -45,6 +45,14 @@ function formatBytes(bytes) {
 
 function estimateTokensFromText(text) {
   return Math.ceil((text?.length || 0) / 4);
+}
+
+function isImageGenerationToolName(name) {
+  return /(^|[_-])(image|img|picture|photo|draw|vision)([_-]|$)|generate.*image|image.*generate/i.test(name || '');
+}
+
+function isImageGenerationPrompt(text) {
+  return /\b(generate|create|make|draw|render|paint|design)\b[\s\S]{0,80}\b(image|picture|photo|illustration|poster|avatar|logo|icon)\b|\b(image|picture|photo|illustration|poster|avatar|logo|icon)\b[\s\S]{0,80}\b(generate|create|make|draw|render|paint|design)\b/i.test(text || '');
 }
 
 async function collectAgentWorkspaceFiles(agentId) {
@@ -370,12 +378,14 @@ const ToolBlock = ({ toolCall, onStopStreaming }) => {
   const { name, status, result, summary, command } = toolCall;
   const showShutdown = name === 'execute_command' && status === 'running' && onStopStreaming;
   const renderTerminal = name === 'execute_command';
-  const label = renderTerminal ? t('message.execute') : name;
+  const isImageGeneration = isImageGenerationToolName(name);
+  const label = renderTerminal ? t('message.execute') : (isImageGeneration ? t('message.imageGeneration') : name);
 
   return (
-    <div className="tool-block">
+    <div className={`tool-block ${isImageGeneration ? 'image-generation-tool' : ''}`}>
       <div className="tool-header" onClick={() => setExpanded((v) => !v)}>
         <ChevronRight className={effectiveExpanded ? 'expanded' : ''} width={14} height={14} />
+        {isImageGeneration && <ImageGenerate width={16} height={16} className="tool-kind-icon" />}
         <span className="tool-label">{label}</span>
         {renderTerminal && command && <span className="tool-cmd" title={command}>{command}</span>}
         {summary && <span className="tool-summary">{summary}</span>}
@@ -404,6 +414,19 @@ const ToolBlock = ({ toolCall, onStopStreaming }) => {
           {renderTerminal ? <ToolTerminal output={result} /> : <pre>{result}</pre>}
         </div>
       )}
+    </div>
+  );
+};
+
+const ImageGenerationStatus = () => {
+  const { t } = useI18n();
+  return (
+    <div className="image-generation-status" role="status" aria-live="polite">
+      <span className="image-generation-icon" aria-hidden="true">
+        <ImageGenerate width={18} height={18} />
+      </span>
+      <span className="image-generation-label">{t('message.imageGeneration')}</span>
+      <span className="image-generation-dots" aria-hidden="true"><span>.</span><span>.</span><span>.</span></span>
     </div>
   );
 };
@@ -901,7 +924,19 @@ const MessagePanel = forwardRef(({
           {hasHiddenMessages && (
             <div className="message-history-marker" aria-hidden="true" />
           )}
-          {visibleMessages.map((msg) => (
+          {visibleMessages.map((msg, index) => {
+            const previousMessage = visibleMessages[index - 1];
+            const isLatestAssistant = msg.role === 'assistant' && msg === messages[messages.length - 1];
+            const showImageGenerationStatus = isLatestAssistant
+              && streaming
+              && !msg.content
+              && !msg.thinking
+              && (
+                msg.toolCalls?.some((tc) => isImageGenerationToolName(tc.name))
+                || isImageGenerationPrompt(previousMessage?.role === 'user' ? previousMessage.content : '')
+              );
+
+            return (
             <div key={msg.id} className={`message ${msg.role}`}>
               <div className="message-avatar">
                 {msg.role === 'assistant' && avatar ? (
@@ -926,9 +961,10 @@ const MessagePanel = forwardRef(({
                     </button>
                   )}
                 </div>
-                {msg.role === 'assistant' && (msg.thinking || (streaming && msg.content === '')) && (
+                {msg.role === 'assistant' && !showImageGenerationStatus && (msg.thinking || (streaming && msg.content === '')) && (
                   <ThinkingBlock thinking={msg.thinking} isThinking={streaming && msg === messages[messages.length - 1]} />
                 )}
+                {showImageGenerationStatus && <ImageGenerationStatus />}
                 {msg.images && msg.images.length > 0 && (
                   <div className="message-images">
                     {msg.images.map((img, i) => (
@@ -981,7 +1017,8 @@ const MessagePanel = forwardRef(({
                 </div>
               </div>
             </div>
-          ))}
+            );
+          })}
           </>
         )}
       </div>

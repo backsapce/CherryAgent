@@ -21,6 +21,7 @@
     "thoughtFor": "思考時間 {seconds}",
         "execute": "実行：",
         "running": "実行中...",
+        "imageGeneration": "画像を生成中",
         "writing": "書き込み中...",
         "completed": "完了",
         "error": "エラー",

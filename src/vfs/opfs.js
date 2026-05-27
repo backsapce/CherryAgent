@@ -85,6 +85,14 @@ export async function getDirectory(...pathParts) {
   return dir;
 }
 
+async function getExistingDirectory(...pathParts) {
+  let dir = await getRootDir();
+  for (const part of pathParts) {
+    dir = await dir.getDirectoryHandle(part);
+  }
+  return dir;
+}
+
 /**
  * Read a JSON file from a directory.
  * @param {FileSystemDirectoryHandle} dirHandle
@@ -148,7 +156,7 @@ export async function writeText(dirHandle, filename, content, options = {}) {
 export async function readPathBlob(localPath) {
   const parts = pathParts(localPath);
   const filename = parts.pop();
-  const dir = parts.length > 0 ? await getDirectory(...parts) : await getRootDir();
+  const dir = parts.length > 0 ? await getExistingDirectory(...parts) : await getRootDir();
   const fileHandle = await dir.getFileHandle(filename);
   return fileHandle.getFile();
 }
@@ -182,8 +190,8 @@ export async function deletePath(localPath, options = {}) {
   const parts = pathParts(localPath);
   const filename = parts.pop();
   if (!filename) return;
-  const dir = parts.length > 0 ? await getDirectory(...parts) : await getRootDir();
   try {
+    const dir = parts.length > 0 ? await getExistingDirectory(...parts) : await getRootDir();
     await dir.removeEntry(filename, { recursive: true });
     if (!options.internal) notifyOpfsMutation(localPath, 'delete');
   } catch (_e) { /* ignore */ }

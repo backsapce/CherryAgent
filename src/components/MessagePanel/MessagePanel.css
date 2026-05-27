@@ -692,6 +692,10 @@
   transform: rotate(90deg);
 }
 
+.tool-kind-icon {
+  color: #10a37f;
+}
+
 .tool-label {
   font-weight: 500;
   color: var(--color-text-secondary);
@@ -804,6 +808,59 @@
 
 .tool-output .stderr {
   color: #ef4444;
+}
+
+.image-generation-tool {
+  border-color: color-mix(in srgb, #10a37f 28%, var(--color-border));
+}
+
+.image-generation-tool .tool-header {
+  background: color-mix(in srgb, #10a37f 8%, var(--color-surface-alt));
+}
+
+.image-generation-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  max-width: 100%;
+  margin: 0 0 8px;
+  padding: 7px 12px;
+  border: 1px solid color-mix(in srgb, #10a37f 28%, var(--color-border));
+  border-radius: 999px;
+  background: color-mix(in srgb, #10a37f 9%, var(--color-surface));
+  color: var(--color-text-content);
+  font-size: 13px;
+  line-height: 1.2;
+}
+
+.image-generation-icon {
+  display: inline-flex;
+  color: #10a37f;
+  flex-shrink: 0;
+}
+
+.image-generation-label {
+  min-width: 0;
+  font-weight: 500;
+}
+
+.image-generation-dots {
+  display: inline-flex;
+  width: 14px;
+  color: var(--color-text-secondary);
+}
+
+.image-generation-dots span {
+  animation: thinking-bounce 1.4s infinite ease-in-out;
+}
+
+.image-generation-dots span:nth-child(2) {
+  animation-delay: 0.16s;
+}
+
+.image-generation-dots span:nth-child(3) {
+  animation-delay: 0.32s;
 }
 
 /* Message images */
