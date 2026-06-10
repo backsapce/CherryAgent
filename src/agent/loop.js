@@ -34,6 +34,13 @@ import { readAgentAgentsFile } from '../vfs/opfs.js';
 import { getAgent, getWorkspaceDirName } from '../agents/agents.js';
 
 const DEFAULT_MAX_ROUNDS = 10;
+const MAX_CONTINUATION_GUARDS = 2;
+
+const CONTINUATION_INTENT_RE =
+  /\b(?:wait(?:ing)?|poll|check(?:ing)?|download(?:ing)?|compare|continue|next step|not (?:done|finished|complete)|after .*complete|once .*complete)\b|(?:等待|生成完成后|完成后|下载|对比|继续|下一步|稍后|轮生成任务)/i;
+
+const CONTINUATION_GUARD_PROMPT =
+  'You just said the task still needs a later step, but you did not call a tool. Continue the task now. If a tool can check status, wait, download, inspect, or compare results, call that tool instead of saying you will do it later. Only provide a final answer when the requested task is actually complete.';
 
 /**
  * Run the agent loop for a session.
@@ -83,6 +90,7 @@ export async function runAgentLoop(opts) {
   const allToolCalls = {}; // id -> { id, name, status, result? }
   let finalContent = '';
   let finalThinking = '';
+  let continuationGuardCount = 0;
   // Accumulate usage across rounds (prompt_tokens grows each round)
   let totalPromptTokens = 0;
   let totalCompletionTokens = 0;
@@ -126,10 +134,39 @@ export async function runAgentLoop(opts) {
       totalTokens += usage.total_tokens || 0;
     }
 
-    // No tool calls — we're done
+    // No tool calls — usually done. If the model describes unfinished async
+    // work after prior tool use, nudge it to continue instead of stopping.
     if (!toolCalls || toolCalls.length === 0) {
+      if (
+        shouldContinueWithoutToolCall({
+          content,
+          thinking,
+          toolSchemas,
+          toolCallsSoFar: Object.keys(allToolCalls).length,
+          continuationGuardCount,
+          round,
+          maxRounds,
+        })
+      ) {
+        continuationGuardCount += 1;
+        apiMessages = [
+          ...apiMessages,
+          {
+            role: 'assistant',
+            content,
+            ...(thinking ? { reasoning_content: thinking } : {}),
+          },
+          {
+            role: 'user',
+            content: CONTINUATION_GUARD_PROMPT,
+          },
+        ];
+        continue;
+      }
       break;
     }
+
+    continuationGuardCount = 0;
 
     // Record tool calls by id (deduplicate)
     for (const tc of toolCalls) {
@@ -401,6 +438,24 @@ function finalizeToolCalls(fragments) {
  */
 function getAvailableToolSchemas(context) {
   return getEnabledToolSchemas(context);
+}
+
+function shouldContinueWithoutToolCall({
+  content,
+  thinking,
+  toolSchemas,
+  toolCallsSoFar,
+  continuationGuardCount,
+  round,
+  maxRounds,
+}) {
+  if (!toolSchemas?.length) return false;
+  if (toolCallsSoFar <= 0) return false;
+  if (continuationGuardCount >= MAX_CONTINUATION_GUARDS) return false;
+  if (round >= maxRounds) return false;
+
+  const text = `${content || ''}\n${thinking || ''}`;
+  return CONTINUATION_INTENT_RE.test(text);
 }
 
 function getToolCallCommand(toolCall) {

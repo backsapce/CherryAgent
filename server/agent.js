@@ -47,6 +47,32 @@ const FILES_ROOT_DIR = resolve(process.env.AGENT_FILES_DIR || WORKSPACE_DIR);
 const PUBLIC_WORKSPACE_LABEL = 'workspace';
 const AUTH_DISABLED = /^(1|true|yes)$/i.test(process.env.AGENT_DISABLE_AUTH || '');
 
+function printBootConfig() {
+  const agentEnv = Object.fromEntries(
+    Object.entries(process.env)
+      .filter(([key]) => key.startsWith('AGENT_'))
+      .sort(([a], [b]) => a.localeCompare(b))
+  );
+
+  console.log('[agent] Boot config:');
+  console.log(JSON.stringify({
+    env: agentEnv,
+    resolved: {
+      port: PORT,
+      maxTimeout: MAX_TIMEOUT,
+      maxOutputBytes: MAX_OUTPUT_BYTES,
+      tokenFile: TOKEN_FILE,
+      allowedOrigins: ALLOWED_ORIGINS,
+      commandShell: COMMAND_SHELL || null,
+      workspaceDir: WORKSPACE_DIR,
+      filesRootDir: FILES_ROOT_DIR,
+      publicWorkspaceLabel: PUBLIC_WORKSPACE_LABEL,
+      authDisabled: AUTH_DISABLED,
+      staticDir: STATIC_DIR,
+    },
+  }, null, 2));
+}
+
 // ─── MIME types ─────────────────────────────────────────────────────────────
 
 const MIME_TYPES = {
@@ -880,6 +906,7 @@ server.listen(PORT, () => {
     console.warn(`[agent] Could not create workspace or files root directory: ${err.message}`);
   }
 
+  printBootConfig();
   console.log(`[agent] Server listening on http://localhost:${PORT}/agent`);
   console.log(`[agent] Allowed origins: ${ALLOWED_ORIGINS.join(', ')}`);
   console.log(`[agent] Auth: ${AUTH_DISABLED ? 'disabled' : 'token required'}`);

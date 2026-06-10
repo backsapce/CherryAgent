@@ -87,6 +87,14 @@ function collectDeletedSessionIds(files = {}) {
   return ids;
 }
 
+function collectDeletedPaths(files = {}) {
+  const paths = new Set();
+  for (const [path, entry] of Object.entries(files || {})) {
+    if (entry?.deleted) paths.add(path);
+  }
+  return paths;
+}
+
 function collectDeletedAgentIds(files = {}) {
   const ids = new Set();
   for (const [path, entry] of Object.entries(files || {})) {
@@ -370,12 +378,30 @@ async function pullInternal(syncConfig) {
   const manifest = await loadRemoteManifest(backend, syncConfig);
   const state = await loadState();
   const local = await localFileMap();
-  const deletedSessionIds = collectDeletedSessionIds(manifest.files);
-  const deletedAgentIds = collectDeletedAgentIds(manifest.files);
+  const deletedSessionIds = mergeSets(collectDeletedSessionIds(manifest.files), collectDeletedSessionIds(state.files));
+  const deletedAgentIds = mergeSets(collectDeletedAgentIds(manifest.files), collectDeletedAgentIds(state.files));
+  const locallyDeletedPaths = collectDeletedPaths(state.files);
   const stats = { downloaded: 0, merged: 0, deleted: 0, skipped: 0 };
 
   for (const [path, entry] of Object.entries(manifest.files || {})) {
     let localEntry = local.get(path);
+
+    if (locallyDeletedPaths.has(path) || hasDeletedAncestor(state.files, path)) {
+      if (!localEntry) localEntry = await currentLocalEntry(path);
+      if (localEntry) {
+        await deletePath(path, { internal: true });
+        stats.deleted += 1;
+      } else {
+        stats.skipped += 1;
+      }
+      state.files[path] = {
+        ...(state.files[path] || {}),
+        deleted: true,
+        deletedAt: state.files[path]?.deletedAt || nowIso(),
+        remoteUpdatedAt: entry.updatedAt || state.files[path]?.remoteUpdatedAt || null,
+      };
+      continue;
+    }
 
     if (entry.deleted) {
       if (!localEntry) localEntry = await currentLocalEntry(path);
@@ -703,3 +729,11 @@ export function configureAutoSync(onStorageRestored, options = {}) {
     autoRefreshCallback = null;
   };
 }
+
+export const __syncInternals = {
+  collectDeletedPaths,
+  collectDeletedSessionIds,
+  hasDeletedAncestor,
+  mergeSets,
+  pruneDeletedRecords,
+};

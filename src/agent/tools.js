@@ -12,10 +12,20 @@
 
 import { clearMemory, loadMemory, MEMORY_MAX, saveMemory, saveUser, USER_MAX } from './memory.js';
 import { createSkill, deleteSkill, getSkill, listSkills, updateSkill } from './skills.js';
-import { executeCommand, listFiles, readFileText, writeFile } from '../models/agent';
-import { listAgentFiles, loadFiles, readAgentFile, readFileContent, writeAgentFile } from '../vfs/opfs';
+import { downloadE2bFile, downloadRemoteFile, executeCommand, listFiles, readFileText, writeFile } from '../models/agent';
+import { getAgentFileInfo, listAgentFiles, loadFiles, readAgentFile, readAgentFileBlob, readPathBlob, writeAgentFile } from '../vfs/opfs';
 import config from '../config/config';
 import { getAgent, listAgents, updateAgentConfig } from '../agents/agents.js';
+
+const DEFAULT_READ_FILE_MAX_BYTES = 256 * 1024;
+const ABSOLUTE_READ_FILE_MAX_BYTES = 1024 * 1024;
+const DEFAULT_IMAGE_MAX_SOURCE_BYTES = 10 * 1024 * 1024;
+const ABSOLUTE_IMAGE_MAX_SOURCE_BYTES = 25 * 1024 * 1024;
+const DEFAULT_IMAGE_MAX_DIMENSION = 1024;
+const ABSOLUTE_IMAGE_MAX_DIMENSION = 2048;
+const DEFAULT_IMAGE_QUALITY = 0.82;
+const MAX_IMAGE_DATA_URL_BYTES = 1_500_000;
+const E2B_AGENT_ID = '__e2b__';
 
 // ─── Registry singleton ─────────────────────────────────────────────────────
 
@@ -112,6 +122,207 @@ export function getEnabledToolSchemas(context = {}) {
 
 // ─── Built-in tools ─────────────────────────────────────────────────────────
 
+function clampReadLimit(maxBytes) {
+  const parsed = Number(maxBytes);
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_READ_FILE_MAX_BYTES;
+  return Math.min(Math.floor(parsed), ABSOLUTE_READ_FILE_MAX_BYTES);
+}
+
+function clampImageSourceLimit(maxBytes) {
+  const parsed = Number(maxBytes);
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_IMAGE_MAX_SOURCE_BYTES;
+  return Math.min(Math.floor(parsed), ABSOLUTE_IMAGE_MAX_SOURCE_BYTES);
+}
+
+function clampImageDimension(maxDimension) {
+  const parsed = Number(maxDimension);
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_IMAGE_MAX_DIMENSION;
+  return Math.min(Math.floor(parsed), ABSOLUTE_IMAGE_MAX_DIMENSION);
+}
+
+function clampImageQuality(quality) {
+  const parsed = Number(quality);
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_IMAGE_QUALITY;
+  return Math.min(Math.max(parsed, 0.1), 0.95);
+}
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes)) return 'unknown size';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function oversizedFileMessage(path, size, maxBytes) {
+  return [
+    `Refusing to read ${path}: file is ${formatBytes(size)}, which exceeds the read_file safety limit of ${formatBytes(maxBytes)}.`,
+    'Use list_files to inspect metadata, or use execute_command with a targeted command such as sed/head/tail to read a smaller range.',
+  ].join('\n');
+}
+
+function splitParentPath(path) {
+  const parts = String(path || '').split('/').filter(Boolean);
+  const name = parts.pop() || '';
+  return { parent: parts.join('/'), name };
+}
+
+async function findListedFile(path, ctx) {
+  const { parent, name } = splitParentPath(path);
+  const listing = ctx?.agentId && !ctx?.agentUrl
+    ? await listAgentFiles(ctx.agentId, parent)
+    : await listFiles(parent, ctx?.agentUrl);
+  const entries = Array.isArray(listing) ? listing : listing?.children;
+  return entries?.find((entry) => entry.name === name) || null;
+}
+
+async function assertReadableFileSize(path, maxBytes, ctx) {
+  const entry = ctx?.agentId && !ctx?.agentUrl
+    ? await getAgentFileInfo(ctx.agentId, path).catch(() => null)
+    : await findListedFile(path, ctx).catch(() => null);
+
+  if (!entry) return null;
+  if (entry.type === 'directory') return `Cannot read ${path}: it is a directory.`;
+  if (Number.isFinite(entry.size) && entry.size > maxBytes) {
+    return oversizedFileMessage(path, entry.size, maxBytes);
+  }
+  return null;
+}
+
+function inferImageMimeFromPath(path) {
+  const extension = String(path || '').split('.').pop()?.toLowerCase();
+  if (extension === 'png') return 'image/png';
+  if (extension === 'jpg' || extension === 'jpeg') return 'image/jpeg';
+  if (extension === 'webp') return 'image/webp';
+  if (extension === 'gif') return 'image/gif';
+  if (extension === 'svg') return 'image/svg+xml';
+  if (extension === 'bmp') return 'image/bmp';
+  return '';
+}
+
+function isSupportedImageMime(type) {
+  return ['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/svg+xml', 'image/bmp'].includes(String(type || '').toLowerCase());
+}
+
+function getImageOutputType(format) {
+  return ['image/jpeg', 'image/png', 'image/webp'].includes(format) ? format : 'image/jpeg';
+}
+
+function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(reader.error || new Error('Failed to read image data URL'));
+    reader.readAsDataURL(blob);
+  });
+}
+
+function loadImageElement(blob) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(blob);
+    const image = new Image();
+    image.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(image);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('Unsupported or corrupt image file'));
+    };
+    image.src = url;
+  });
+}
+
+function canvasToBlob(canvas, outputType, quality) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (blob) resolve(blob);
+      else reject(new Error(`Could not encode image as ${outputType}`));
+    }, outputType, quality);
+  });
+}
+
+async function resizeImageBlob(blob, options = {}) {
+  const sourceType = isSupportedImageMime(blob.type)
+    ? blob.type
+    : inferImageMimeFromPath(options.path);
+  if (!isSupportedImageMime(sourceType)) {
+    return { error: `Unsupported image type: ${blob.type || 'unknown'}` };
+  }
+
+  const maxDimension = clampImageDimension(options.maxDimension);
+  const quality = clampImageQuality(options.quality);
+  const outputType = getImageOutputType(options.outputFormat);
+  const sourceBlob = blob.type === sourceType ? blob : new Blob([blob], { type: sourceType });
+  const image = await loadImageElement(sourceBlob);
+  const originalWidth = image.naturalWidth || image.width;
+  const originalHeight = image.naturalHeight || image.height;
+  if (!originalWidth || !originalHeight) {
+    return { error: 'Could not determine image dimensions.' };
+  }
+
+  const scale = Math.min(1, maxDimension / Math.max(originalWidth, originalHeight));
+  const width = Math.max(1, Math.round(originalWidth * scale));
+  const height = Math.max(1, Math.round(originalHeight * scale));
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext('2d');
+  if (!context) return { error: 'Could not prepare image canvas.' };
+  context.fillStyle = '#ffffff';
+  context.fillRect(0, 0, width, height);
+  context.drawImage(image, 0, 0, width, height);
+
+  const resizedBlob = await canvasToBlob(canvas, outputType, quality);
+  const dataUrl = await blobToDataUrl(resizedBlob);
+  if (new Blob([dataUrl]).size > MAX_IMAGE_DATA_URL_BYTES) {
+    return {
+      error: `Refusing to return image data URL: encoded result is ${formatBytes(new Blob([dataUrl]).size)}, above ${formatBytes(MAX_IMAGE_DATA_URL_BYTES)}. Try a smaller max_dimension or lower quality.`,
+    };
+  }
+
+  return {
+    dataUrl,
+    originalWidth,
+    originalHeight,
+    width,
+    height,
+    inputBytes: blob.size,
+    outputBytes: resizedBlob.size,
+    mimeType: outputType,
+  };
+}
+
+async function readAgentImageBlob(path, ctx) {
+  if (ctx?.agentId && !ctx?.agentUrl) {
+    return readAgentFileBlob(ctx.agentId, path);
+  }
+  if (ctx?.agentUrl === E2B_AGENT_ID) {
+    return downloadE2bFile(path);
+  }
+  return downloadRemoteFile(path, ctx?.agentUrl);
+}
+
+async function readImageToolResult(path, blob, options) {
+  const maxSourceBytes = clampImageSourceLimit(options.maxSourceBytes);
+  if (blob.size > maxSourceBytes) {
+    return `Refusing to read image ${path}: file is ${formatBytes(blob.size)}, above the image source limit of ${formatBytes(maxSourceBytes)}.`;
+  }
+
+  const result = await resizeImageBlob(blob, { ...options, path });
+  if (result.error) return result.error;
+  return JSON.stringify({
+    path,
+    mime_type: result.mimeType,
+    original_width: result.originalWidth,
+    original_height: result.originalHeight,
+    width: result.width,
+    height: result.height,
+    input_bytes: result.inputBytes,
+    output_bytes: result.outputBytes,
+    data_url: result.dataUrl,
+  });
+}
+
 registry.register({
   name: 'execute_command',
   schema: {
@@ -160,14 +371,22 @@ registry.register({
           type: 'string',
           description: 'Path to the file to read, relative to the agent file root',
         },
+        max_bytes: {
+          type: 'number',
+          description: `Maximum file size to read. Defaults to ${DEFAULT_READ_FILE_MAX_BYTES} bytes and is capped at ${ABSOLUTE_READ_FILE_MAX_BYTES} bytes.`,
+        },
       },
       required: ['path'],
       additionalProperties: false,
     },
   },
   checkAvailable: (ctx) => !!ctx?.agentUrl || !!ctx?.agentId,
-  async handler({ path }, ctx) {
+  async handler({ path, max_bytes: maxBytesArg }, ctx) {
     try {
+      const maxBytes = clampReadLimit(maxBytesArg);
+      const sizeError = await assertReadableFileSize(path, maxBytes, ctx);
+      if (sizeError) return sizeError;
+
       if (ctx?.agentId && !ctx?.agentUrl) {
         // Local browser mode: read from agent workspace
         const content = await readAgentFile(ctx.agentId, path);
@@ -175,9 +394,63 @@ registry.register({
       }
       // Remote sandbox mode
       const content = await readFileText(path, ctx.agentUrl);
+      const contentSize = new Blob([content]).size;
+      if (contentSize > maxBytes) {
+        return oversizedFileMessage(path, contentSize, maxBytes);
+      }
       return content;
     } catch (err) {
       return `Error reading file ${path}: ${err.message}`;
+    }
+  },
+});
+
+registry.register({
+  name: 'read_image_file',
+  schema: {
+    description:
+      'Read an image from the active agent file root, resize it to a vision-model-friendly size, and return a compact data URL with image metadata. Use this instead of read_file for png, jpg, jpeg, webp, gif, svg, or bmp files.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description: 'Path to the image file to read, relative to the agent file root',
+        },
+        max_dimension: {
+          type: 'number',
+          description: `Maximum width or height in pixels. Defaults to ${DEFAULT_IMAGE_MAX_DIMENSION} and is capped at ${ABSOLUTE_IMAGE_MAX_DIMENSION}.`,
+        },
+        quality: {
+          type: 'number',
+          description: `Encoding quality for jpeg/webp from 0.1 to 0.95. Defaults to ${DEFAULT_IMAGE_QUALITY}.`,
+        },
+        output_format: {
+          type: 'string',
+          enum: ['image/jpeg', 'image/png', 'image/webp'],
+          description: 'Output image MIME type. Defaults to image/jpeg.',
+        },
+        max_source_bytes: {
+          type: 'number',
+          description: `Maximum source file size to read. Defaults to ${DEFAULT_IMAGE_MAX_SOURCE_BYTES} bytes and is capped at ${ABSOLUTE_IMAGE_MAX_SOURCE_BYTES} bytes.`,
+        },
+      },
+      required: ['path'],
+      additionalProperties: false,
+    },
+  },
+  checkAvailable: (ctx) => !!ctx?.agentUrl || !!ctx?.agentId,
+  async handler({ path, max_dimension: maxDimension, quality, output_format: outputFormat, max_source_bytes: maxSourceBytes }, ctx) {
+    try {
+      const blob = await readAgentImageBlob(path, ctx);
+      return await readImageToolResult(path, blob, {
+        maxDimension,
+        quality,
+        outputFormat,
+        maxSourceBytes,
+      });
+    } catch (err) {
+      return `Error reading image file ${path}: ${err.message}`;
     }
   },
 });
@@ -299,26 +572,86 @@ registry.register({
           type: 'string',
           description: 'Path to the file (relative to OPFS root)',
         },
+        max_bytes: {
+          type: 'number',
+          description: `Maximum file size to read. Defaults to ${DEFAULT_READ_FILE_MAX_BYTES} bytes and is capped at ${ABSOLUTE_READ_FILE_MAX_BYTES} bytes.`,
+        },
       },
       required: ['path'],
       additionalProperties: false,
     },
   },
-  async handler({ path }, ctx) {
+  async handler({ path, max_bytes: maxBytesArg }, ctx) {
     try {
+      const maxBytes = clampReadLimit(maxBytesArg);
       if (ctx?.agentId) {
         // Agent workspace: read from agent's files dir
+        const fileInfo = await getAgentFileInfo(ctx.agentId, path).catch(() => null);
+        if (fileInfo?.size > maxBytes) {
+          return oversizedFileMessage(path, fileInfo.size, maxBytes);
+        }
         const content = await readAgentFile(ctx.agentId, path);
         return content ?? `File not found: ${path}`;
       }
       // Fall back to global files dir
-      const parts = path.split('/');
-      const fileName = parts.pop();
-      const dirName = parts.length > 0 ? parts.join('/') : undefined;
-      const content = await readFileContent(fileName, dirName);
-      return content;
+      const file = await readPathBlob(path);
+      if (file.size > maxBytes) {
+        return oversizedFileMessage(path, file.size, maxBytes);
+      }
+      return file.text();
     } catch (err) {
       return `Error reading local file ${path}: ${err.message}`;
+    }
+  },
+});
+
+registry.register({
+  name: 'read_local_image',
+  schema: {
+    description:
+      'Read an image stored in the browser (OPFS), resize it to a vision-model-friendly size, and return a compact data URL with image metadata. Use this instead of read_local_file for png, jpg, jpeg, webp, gif, svg, or bmp files.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description: 'Path to the image file relative to OPFS root',
+        },
+        max_dimension: {
+          type: 'number',
+          description: `Maximum width or height in pixels. Defaults to ${DEFAULT_IMAGE_MAX_DIMENSION} and is capped at ${ABSOLUTE_IMAGE_MAX_DIMENSION}.`,
+        },
+        quality: {
+          type: 'number',
+          description: `Encoding quality for jpeg/webp from 0.1 to 0.95. Defaults to ${DEFAULT_IMAGE_QUALITY}.`,
+        },
+        output_format: {
+          type: 'string',
+          enum: ['image/jpeg', 'image/png', 'image/webp'],
+          description: 'Output image MIME type. Defaults to image/jpeg.',
+        },
+        max_source_bytes: {
+          type: 'number',
+          description: `Maximum source file size to read. Defaults to ${DEFAULT_IMAGE_MAX_SOURCE_BYTES} bytes and is capped at ${ABSOLUTE_IMAGE_MAX_SOURCE_BYTES} bytes.`,
+        },
+      },
+      required: ['path'],
+      additionalProperties: false,
+    },
+  },
+  async handler({ path, max_dimension: maxDimension, quality, output_format: outputFormat, max_source_bytes: maxSourceBytes }, ctx) {
+    try {
+      const blob = ctx?.agentId
+        ? await readAgentFileBlob(ctx.agentId, path)
+        : await readPathBlob(path);
+      return await readImageToolResult(path, blob, {
+        maxDimension,
+        quality,
+        outputFormat,
+        maxSourceBytes,
+      });
+    } catch (err) {
+      return `Error reading local image ${path}: ${err.message}`;
     }
   },
 });

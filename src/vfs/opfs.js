@@ -433,12 +433,7 @@ export async function loadSessions() {
 export async function saveSessions(sessions) {
   const root = await getRootDir();
   const sessionDir = await getDirectory(SESSIONS_DIR);
-  const existingSessions = (await readJSON(root, SESSION_FILE)) || [];
   const nextSessionsById = new Map();
-
-  for (const session of existingSessions) {
-    if (session?.id != null) nextSessionsById.set(String(session.id), session);
-  }
 
   for (const session of sessions) {
     if (session?.id != null) {
@@ -1078,6 +1073,33 @@ export async function readAgentFile(agentId, path) {
     ? await getAgentDir(agentId, 'files', ...parts)
     : await getAgentFilesDir(agentId);
   return await readText(dir, fileName);
+}
+
+export async function readAgentFileBlob(agentId, path) {
+  const safePath = normalizeWorkspaceRelativePath(path);
+  const parts = pathParts(safePath);
+  const fileName = parts.pop();
+  const dir = parts.length > 0
+    ? await getAgentDir(agentId, 'files', ...parts)
+    : await getAgentFilesDir(agentId);
+  const fileHandle = await dir.getFileHandle(fileName);
+  return fileHandle.getFile();
+}
+
+export async function getAgentFileInfo(agentId, path) {
+  const safePath = normalizeWorkspaceRelativePath(path);
+  const parts = pathParts(safePath);
+  const fileName = parts.pop();
+  const dir = parts.length > 0
+    ? await getAgentDir(agentId, 'files', ...parts)
+    : await getAgentFilesDir(agentId);
+  const fileHandle = await dir.getFileHandle(fileName);
+  const file = await fileHandle.getFile();
+  return {
+    name: file.name,
+    size: file.size,
+    lastModified: file.lastModified,
+  };
 }
 
 export async function writeAgentFile(agentId, path, content) {
