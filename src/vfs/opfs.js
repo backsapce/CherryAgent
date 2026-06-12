@@ -669,6 +669,102 @@ export async function deleteFile(fileName, category, isDirectory = false) {
   notifyOpfsMutation(localPath, 'delete');
 }
 
+async function localEntryExists(dirHandle, name) {
+  try {
+    await dirHandle.getFileHandle(name);
+    return true;
+  } catch { /* ignore */ }
+
+  try {
+    await dirHandle.getDirectoryHandle(name);
+    return true;
+  } catch { /* ignore */ }
+
+  return false;
+}
+
+async function copyLocalDirectory(sourceDir, targetDir) {
+  for (const { name, kind } of await listEntries(sourceDir)) {
+    if (kind === 'directory') {
+      const sourceChild = await sourceDir.getDirectoryHandle(name);
+      const targetChild = await targetDir.getDirectoryHandle(name, { create: true });
+      await copyLocalDirectory(sourceChild, targetChild);
+      continue;
+    }
+
+    const file = await (await sourceDir.getFileHandle(name)).getFile();
+    await writeText(targetDir, name, file, { internal: true });
+  }
+}
+
+/**
+ * Move a file or directory to an existing target directory.
+ * @param {string} sourcePath - Path relative to OPFS root
+ * @param {string} targetDirName - Target directory path relative to OPFS root
+ * @param {boolean} isDirectory - Whether the source is a directory
+ * @returns {Promise<{success: boolean, message: string}>}
+ */
+export async function moveFile(sourcePath, targetDirName, isDirectory = false) {
+  const safeSourcePath = normalizeLocalPath(sourcePath);
+  const safeTargetDir = normalizeLocalPath(targetDirName);
+  const sourceParts = pathParts(safeSourcePath);
+  const sourceName = sourceParts.pop();
+
+  if (!sourceName) throw new Error('Source path is required');
+
+  const sourceParentPath = sourceParts.join('/');
+  if (sourceParentPath === safeTargetDir) {
+    return { success: true, message: 'Already in target directory' };
+  }
+
+  if (isDirectory && (safeTargetDir === safeSourcePath || safeTargetDir.startsWith(`${safeSourcePath}/`))) {
+    throw new Error('Cannot move a directory into itself');
+  }
+
+  const targetPath = normalizeLocalPath(safeTargetDir ? `${safeTargetDir}/${sourceName}` : sourceName);
+  if (targetPath === safeSourcePath) {
+    return { success: true, message: 'Already in target directory' };
+  }
+
+  const sourceParent = sourceParts.length > 0
+    ? await getExistingDirectory(...sourceParts)
+    : await getRootDir();
+  const targetParent = safeTargetDir
+    ? await getExistingDirectory(...pathParts(safeTargetDir))
+    : await getRootDir();
+
+  if (await localEntryExists(targetParent, sourceName)) {
+    throw new Error('Destination already exists');
+  }
+
+  let targetCreated = false;
+  try {
+    if (isDirectory) {
+      const sourceDir = await sourceParent.getDirectoryHandle(sourceName);
+      const targetDir = await targetParent.getDirectoryHandle(sourceName, { create: true });
+      targetCreated = true;
+      await copyLocalDirectory(sourceDir, targetDir);
+      await sourceParent.removeEntry(sourceName, { recursive: true });
+      notifyOpfsMutation(safeSourcePath, 'delete');
+      notifyOpfsMutation(targetPath, 'mkdir');
+      return { success: true, message: 'Directory moved' };
+    }
+
+    const file = await (await sourceParent.getFileHandle(sourceName)).getFile();
+    await writeText(targetParent, sourceName, file, { internal: true });
+    targetCreated = true;
+    await sourceParent.removeEntry(sourceName);
+    notifyOpfsMutation(safeSourcePath, 'delete');
+    notifyOpfsMutation(targetPath, 'write');
+    return { success: true, message: 'File moved' };
+  } catch (err) {
+    if (targetCreated) {
+      try { await targetParent.removeEntry(sourceName, { recursive: true }); } catch { /* ignore cleanup */ }
+    }
+    throw err;
+  }
+}
+
 /**
  * Get a file as Blob.
  * @param {string} fileName

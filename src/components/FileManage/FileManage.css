@@ -20,6 +20,10 @@
   opacity: 1;
 }
 
+.filemanage-panel.moving {
+  cursor: progress;
+}
+
 /* Mobile full overlay mode */
 @media (max-width: 768px) {
   .filemanage-panel.show {
@@ -336,6 +340,20 @@
   color: var(--color-text-heading, #222);
 }
 
+.tree-node.dragging > .tree-item {
+  opacity: 0.55;
+}
+
+.tree-node.drop-target > .tree-item {
+  background-color: color-mix(in srgb, var(--color-primary, #007bff) 12%, transparent);
+  outline: 1px dashed color-mix(in srgb, var(--color-primary, #007bff) 72%, transparent);
+  outline-offset: -2px;
+}
+
+.tree-node.drop-target > .tree-item .tree-label {
+  color: var(--color-text-heading, #222);
+}
+
 .tree-selected-badge {
   margin-left: 6px;
   font-size: 12px;
@@ -609,6 +627,14 @@
 }
 
 [data-theme="dark"] .tree-node.multi-selected > .tree-item .tree-label {
+  color: var(--color-text, #f2f2ff);
+}
+
+[data-theme="dark"] .tree-node.drop-target > .tree-item {
+  background-color: color-mix(in srgb, var(--color-primary, #7c7cff) 22%, transparent);
+}
+
+[data-theme="dark"] .tree-node.drop-target > .tree-item .tree-label {
   color: var(--color-text, #f2f2ff);
 }
 

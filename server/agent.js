@@ -24,7 +24,7 @@
 import { createServer } from 'node:http';
 import { exec, spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, mkdirSync, unlinkSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, mkdirSync, unlinkSync, rmSync, renameSync } from 'node:fs';
 import { isAbsolute, join, extname, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import process from 'node:process';
@@ -118,7 +118,7 @@ function corsHeaders(req) {
   const allowed = ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
   return {
     'Access-Control-Allow-Origin': allowed,
-    'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
   };
 }
@@ -213,6 +213,12 @@ function isSafePath(inputPath) {
   const compareA = process.platform === 'win32' ? resolvedPath.toLowerCase() : resolvedPath;
   const compareB = process.platform === 'win32' ? FILES_ROOT_DIR.toLowerCase() : FILES_ROOT_DIR;
   return compareA.startsWith(compareB + sep) || compareA === compareB;
+}
+
+function isSameOrChildResolvedPath(path, parentPath) {
+  const comparePath = process.platform === 'win32' ? path.toLowerCase() : path;
+  const compareParent = process.platform === 'win32' ? parentPath.toLowerCase() : parentPath;
+  return comparePath === compareParent || comparePath.startsWith(compareParent + sep);
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -667,6 +673,64 @@ const server = createServer(async (req, res) => {
     } catch (err) {
       console.error(`[agent] Error uploading file: ${err.message}`);
       return json(res, 500, { error: 'Failed to upload file' }, req);
+    }
+  }
+
+  // ── Move file/directory (requires auth) ───────────────────────────────
+  if (url.pathname === '/agent/files' && req.method === 'PATCH') {
+    if (!isAuthorized(req)) {
+      return json(res, 401, { error: 'Unauthorized.' }, req);
+    }
+
+    const body = await readBody(req);
+    let parsed;
+    try { parsed = JSON.parse(body); } catch {
+      return json(res, 400, { error: 'Invalid JSON body' }, req);
+    }
+
+    const { sourcePath, targetPath } = parsed;
+    if (!sourcePath || typeof sourcePath !== 'string' || !targetPath || typeof targetPath !== 'string') {
+      return json(res, 400, { error: 'Missing or invalid "sourcePath" or "targetPath" field' }, req);
+    }
+
+    if (!isSafePath(sourcePath) || !isSafePath(targetPath)) {
+      return json(res, 403, { error: 'Access denied: Path outside agent files root' }, req);
+    }
+
+    const normalizedSource = normalize(sourcePath);
+    const normalizedTarget = normalize(targetPath);
+    if (normalizedSource === normalizedTarget) {
+      return json(res, 200, { success: true, message: 'Already at target path' }, req);
+    }
+
+    try {
+      const resolvedSource = resolve(join(FILES_ROOT_DIR, normalizedSource));
+      const resolvedTarget = resolve(join(FILES_ROOT_DIR, normalizedTarget));
+
+      if (!existsSync(resolvedSource)) {
+        return json(res, 404, { error: 'Source file or directory not found' }, req);
+      }
+
+      if (existsSync(resolvedTarget)) {
+        return json(res, 409, { error: 'Destination already exists' }, req);
+      }
+
+      const stats = statSync(resolvedSource);
+      if (stats.isDirectory() && isSameOrChildResolvedPath(resolvedTarget, resolvedSource)) {
+        return json(res, 400, { error: 'Cannot move a directory into itself' }, req);
+      }
+
+      const targetParent = join(resolvedTarget, '..');
+      if (!existsSync(targetParent)) mkdirSync(targetParent, { recursive: true });
+      if (!statSync(targetParent).isDirectory()) {
+        return json(res, 400, { error: 'Target parent is not a directory' }, req);
+      }
+
+      renameSync(resolvedSource, resolvedTarget);
+      return json(res, 200, { success: true, message: 'Moved successfully' }, req);
+    } catch (err) {
+      console.error(`[agent] Error moving file: ${err.message}`);
+      return json(res, 500, { error: 'Failed to move file' }, req);
     }
   }
 

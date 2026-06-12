@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { useI18n } from '../../i18n/context';
-import { loadFiles, saveFile, createFile, createDirectory, deleteFile as deleteLocalFile, getFileBlob } from '../../vfs/opfs';
-import { listFiles, createFile as createRemoteFile, deleteFile as deleteRemoteFile, uploadFile as uploadRemoteFile, downloadFile as downloadRemoteFile } from '../../models/agent';
+import { loadFiles, saveFile, createFile, createDirectory, deleteFile as deleteLocalFile, moveFile as moveLocalFile, getFileBlob } from '../../vfs/opfs';
+import { listFiles, createFile as createRemoteFile, deleteFile as deleteRemoteFile, moveFile as moveRemoteFile, uploadFile as uploadRemoteFile, downloadFile as downloadRemoteFile } from '../../models/agent';
 import { ChevronRight, ChevronDown, Folder, File, FilePlus, FolderPlus, Refresh, X, Upload, Cloud, HardDrive, Trash, Download, FileEdit, Spinner, MultiSelect } from '../Icons/Icons';
 import FileEditor from './FileEditor';
 import { joinFileManagerPath, normalizeFileManagerPath } from './pathUtils';
@@ -11,6 +11,7 @@ import './FileManage.css';
 const MOBILE_BREAKPOINT = 768;
 
 const ROOT_ID = 'root';
+const FILE_MANAGER_DRAG_TYPE = 'application/x-vertex-filemanager-item';
 
 function getTreeItemPath(parentDir, name) {
   return joinFileManagerPath(parentDir, name);
@@ -29,6 +30,16 @@ function triggerDownload(blob, fileName) {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
+}
+
+function readDraggedTreeItem(dataTransfer) {
+  const raw = dataTransfer?.getData(FILE_MANAGER_DRAG_TYPE);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
 }
 
 const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange }) => {
@@ -59,6 +70,9 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange }) => 
   const [multiSelectMode, setMultiSelectMode] = useState(false);
   const [multiSelectedItems, setMultiSelectedItems] = useState(new Map());
   const [deletingSelected, setDeletingSelected] = useState(false);
+  const [movingItem, setMovingItem] = useState(false);
+  const [draggedItem, setDraggedItem] = useState(null);
+  const [dropTargetPath, setDropTargetPath] = useState(null);
   const fileInputRef = useRef(null);
   const dropZoneRef = useRef(null);
   const [editorOpen, setEditorOpen] = useState(false);
@@ -71,6 +85,7 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange }) => 
       createFile: (name, path) => createFile(name, path),
       createDir: (name, path) => createDirectory(name, path),
       delete: (name, path, isDir) => deleteLocalFile(name, path || null, isDir),
+      move: (item, targetPath) => moveLocalFile(item.path, targetPath, item.type === 'directory'),
       download: (name, path) => getFileBlob(name, path || null),
       upload: (name, blob, path) => saveFile(name, blob, path || null),
     } : {
@@ -80,6 +95,10 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange }) => 
       delete: (name, path) => {
         const fullPath = joinFileManagerPath(path, name);
         return deleteRemoteFile(fullPath);
+      },
+      move: (item, targetPath) => {
+        const fullTargetPath = joinFileManagerPath(targetPath, item.name);
+        return moveRemoteFile(item.path, fullTargetPath);
       },
       download: (name, path) => {
         const fullPath = joinFileManagerPath(path, name);
@@ -171,6 +190,8 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange }) => 
     setSelectedPath(null);
     setSelectedItemKey(null);
     setMultiSelectedItems(new Map());
+    setDraggedItem(null);
+    setDropTargetPath(null);
   }, [fileSource]);
 
   // Upload files (local or remote via adapter)
@@ -209,9 +230,23 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange }) => 
   useEffect(() => {
     const dropZone = dropZoneRef.current;
     if (!dropZone || !show) return;
-    const handleDragOver = (e) => { e.preventDefault(); dropZone.classList.add('drag-over'); };
-    const handleDragLeave = (e) => { e.preventDefault(); dropZone.classList.remove('drag-over'); };
-    const handleDrop = (e) => { e.preventDefault(); dropZone.classList.remove('drag-over'); handleFileUpload(e.dataTransfer.files); };
+    const isTreeDrag = (e) => Array.from(e.dataTransfer?.types || []).includes(FILE_MANAGER_DRAG_TYPE);
+    const handleDragOver = (e) => {
+      if (isTreeDrag(e)) return;
+      e.preventDefault();
+      dropZone.classList.add('drag-over');
+    };
+    const handleDragLeave = (e) => {
+      if (isTreeDrag(e)) return;
+      e.preventDefault();
+      dropZone.classList.remove('drag-over');
+    };
+    const handleDrop = (e) => {
+      if (isTreeDrag(e)) return;
+      e.preventDefault();
+      dropZone.classList.remove('drag-over');
+      handleFileUpload(e.dataTransfer.files);
+    };
     dropZone.addEventListener('dragover', handleDragOver);
     dropZone.addEventListener('dragleave', handleDragLeave);
     dropZone.addEventListener('drop', handleDrop);
@@ -317,6 +352,115 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange }) => 
   const handleEditorClose = useCallback(() => { setEditorOpen(false); setEditingFile(null); }, []);
   const handleEditorSave = useCallback(() => refreshTree(), [refreshTree]);
 
+  const canDropItemOnDirectory = useCallback((item, targetPath) => {
+    const targetDir = normalizeFileManagerPath(targetPath);
+    if (!item || item.source !== fileSource || !item.path) return false;
+
+    const sourcePath = normalizeFileManagerPath(item.path);
+    const sourceParent = normalizeFileManagerPath(item.parentDir);
+    if (!sourcePath || sourceParent === targetDir) return false;
+
+    if (item.type === 'directory' && (sourcePath === targetDir || targetDir.startsWith(`${sourcePath}/`))) {
+      return false;
+    }
+
+    return true;
+  }, [fileSource]);
+
+  const handleTreeDragStart = useCallback((e, item) => {
+    if (multiSelectMode || movingItem || !item.path) {
+      e.preventDefault();
+      return;
+    }
+
+    e.stopPropagation();
+    const dragItem = { ...item, source: fileSource };
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData(FILE_MANAGER_DRAG_TYPE, JSON.stringify(dragItem));
+    e.dataTransfer.setData('text/plain', dragItem.path);
+    setDraggedItem(dragItem);
+  }, [fileSource, movingItem, multiSelectMode]);
+
+  const handleTreeDragEnd = useCallback(() => {
+    setDraggedItem(null);
+    setDropTargetPath(null);
+  }, []);
+
+  const handleDirectoryDragOver = useCallback((e, targetPath) => {
+    if (movingItem) return;
+
+    const targetDir = normalizeFileManagerPath(targetPath);
+    const types = Array.from(e.dataTransfer?.types || []);
+
+    if (types.includes(FILE_MANAGER_DRAG_TYPE)) {
+      if (canDropItemOnDirectory(draggedItem, targetDir)) {
+        e.preventDefault();
+        e.stopPropagation();
+        e.dataTransfer.dropEffect = 'move';
+        setDropTargetPath(targetDir);
+      } else {
+        e.dataTransfer.dropEffect = 'none';
+        setDropTargetPath(null);
+      }
+      return;
+    }
+
+    if (types.includes('Files')) {
+      e.preventDefault();
+      e.stopPropagation();
+      e.dataTransfer.dropEffect = 'copy';
+      dropZoneRef.current?.classList.remove('drag-over');
+      setDropTargetPath(targetDir);
+    }
+  }, [canDropItemOnDirectory, draggedItem, movingItem]);
+
+  const handleDirectoryDragLeave = useCallback((e, targetPath) => {
+    if (e.currentTarget.contains(e.relatedTarget)) return;
+    const targetDir = normalizeFileManagerPath(targetPath);
+    setDropTargetPath((current) => current === targetDir ? null : current);
+  }, []);
+
+  const handleDirectoryDrop = useCallback(async (e, targetPath) => {
+    const targetDir = normalizeFileManagerPath(targetPath);
+    const transferItem = readDraggedTreeItem(e.dataTransfer) || draggedItem;
+    dropZoneRef.current?.classList.remove('drag-over');
+
+    if (transferItem) {
+      e.preventDefault();
+      e.stopPropagation();
+
+      if (!canDropItemOnDirectory(transferItem, targetDir)) {
+        setDraggedItem(null);
+        setDropTargetPath(null);
+        return;
+      }
+
+      setMovingItem(true);
+      try {
+        await fileOps.move(transferItem, targetDir);
+        setSelectedPath(null);
+        setSelectedItemKey(null);
+        setMultiSelectedItems(new Map());
+        await refreshTree();
+      } catch (err) {
+        console.warn(`Failed to move ${transferItem.path}:`, err);
+        alert(t('filemanage.moveFileError'));
+      } finally {
+        setMovingItem(false);
+        setDraggedItem(null);
+        setDropTargetPath(null);
+      }
+      return;
+    }
+
+    if (e.dataTransfer.files?.length) {
+      e.preventDefault();
+      e.stopPropagation();
+      setDropTargetPath(null);
+      await handleFileUpload(e.dataTransfer.files, targetDir);
+    }
+  }, [canDropItemOnDirectory, draggedItem, fileOps, handleFileUpload, refreshTree, t]);
+
   const handleSelectItem = useCallback((path, name, type) => {
     const normalized = getTreeItemPath(path, name);
     if (type === 'directory' && !normalized && name === '/') {
@@ -401,6 +545,8 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange }) => 
       const isSelected = selectedItemKey === itemKey;
       const isMultiSelectable = multiSelectMode && node.id !== ROOT_ID;
       const isMultiSelected = isMultiSelectable && multiSelectedItems.has(itemKey);
+      const isDropTarget = dropTargetPath === dirPath;
+      const isDragging = draggedItem?.key === itemKey;
       const selectableItem = {
         key: itemKey,
         name: node.name,
@@ -410,9 +556,15 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange }) => 
       };
 
       return (
-        <div key={node.id} className={`tree-node directory-node ${isSelected ? 'selected' : ''} ${isMultiSelectable ? 'multi-selectable' : ''} ${isMultiSelected ? 'multi-selected' : ''}`} style={{ paddingLeft: depth * 8 }}>
+        <div key={node.id} className={`tree-node directory-node ${isSelected ? 'selected' : ''} ${isMultiSelectable ? 'multi-selectable' : ''} ${isMultiSelected ? 'multi-selected' : ''} ${isDropTarget ? 'drop-target' : ''} ${isDragging ? 'dragging' : ''}`} style={{ paddingLeft: depth * 8 }}>
           <div
             className="tree-item"
+            draggable={!multiSelectMode && !movingItem && node.id !== ROOT_ID}
+            onDragStart={(e) => handleTreeDragStart(e, selectableItem)}
+            onDragEnd={handleTreeDragEnd}
+            onDragOver={(e) => handleDirectoryDragOver(e, dirPath)}
+            onDragLeave={(e) => handleDirectoryDragLeave(e, dirPath)}
+            onDrop={(e) => handleDirectoryDrop(e, dirPath)}
             onClick={(e) => {
               e.stopPropagation();
               if (isMultiSelectable) {
@@ -458,6 +610,7 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange }) => 
       const itemKey = getTreeItemKey('file', nodeParentDir, node.name);
       const isSelected = selectedItemKey === itemKey;
       const isMultiSelected = multiSelectMode && multiSelectedItems.has(itemKey);
+      const isDragging = draggedItem?.key === itemKey;
       const selectableItem = {
         key: itemKey,
         name: node.name,
@@ -466,9 +619,12 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange }) => 
         type: 'file',
       };
       return (
-        <div key={node.id} className={`tree-node file-node ${isSelected ? 'selected' : ''} ${multiSelectMode ? 'multi-selectable' : ''} ${isMultiSelected ? 'multi-selected' : ''}`} style={{ paddingLeft: depth * 8 }}>
+        <div key={node.id} className={`tree-node file-node ${isSelected ? 'selected' : ''} ${multiSelectMode ? 'multi-selectable' : ''} ${isMultiSelected ? 'multi-selected' : ''} ${isDragging ? 'dragging' : ''}`} style={{ paddingLeft: depth * 8 }}>
           <div
             className="tree-item file-item"
+            draggable={!multiSelectMode && !movingItem}
+            onDragStart={(e) => handleTreeDragStart(e, selectableItem)}
+            onDragEnd={handleTreeDragEnd}
             onClick={(e) => {
               e.stopPropagation();
               if (multiSelectMode) {
@@ -507,7 +663,7 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange }) => 
       {isMobile && (
         <div className="filemanage-backdrop show" onClick={onClose} />
       )}
-      <div ref={panelRef} className={`filemanage-panel ${show ? 'show' : ''} ${multiSelectMode ? 'multi-select-mode' : ''}`} style={{ '--panel-width': `${width}px` }}>
+      <div ref={panelRef} className={`filemanage-panel ${show ? 'show' : ''} ${multiSelectMode ? 'multi-select-mode' : ''} ${movingItem ? 'moving' : ''}`} style={{ '--panel-width': `${width}px` }}>
       <div className="filemanage-header">
         <div className="filemanage-header-left">
           <div className="filemanage-source-selector">
@@ -552,9 +708,9 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange }) => 
               </button>
             </div>
           )}
-          <button className="filemanage-upload-btn" onClick={() => fileInputRef.current?.click()} disabled={uploading}>
+          <button className="filemanage-upload-btn" onClick={() => fileInputRef.current?.click()} disabled={uploading || movingItem}>
             <Upload width={20} height={20} />
-            {uploading ? t('filemanage.uploading') : t('filemanage.upload')}
+            {uploading ? t('filemanage.uploading') : movingItem ? t('filemanage.moving') : t('filemanage.upload')}
           </button>
           <span className="filemanage-drop-hint">{t('filemanage.dropHint')}</span>
         </div>

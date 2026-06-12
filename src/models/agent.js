@@ -7,7 +7,7 @@
  */
 
 import config from '../config/config';
-import { initE2b, cleanupE2b, getSandboxStatus, executeInSandbox, stopSandbox, enableE2b, listE2bFiles, createE2bFile, createE2bDir, deleteE2bFile, uploadE2bFile, downloadE2bFile, readE2bFileText, writeE2bFileText } from './e2b';
+import { initE2b, cleanupE2b, getSandboxStatus, executeInSandbox, stopSandbox, enableE2b, listE2bFiles, createE2bFile, createE2bDir, deleteE2bFile, moveE2bFile, uploadE2bFile, downloadE2bFile, readE2bFileText, writeE2bFileText } from './e2b';
 
 const E2B_AGENT_ID = '__e2b__';
 
@@ -320,6 +320,32 @@ export async function deleteRemoteFile(path, url) {
 }
 
 /**
+ * Move a file or directory on the remote agent server.
+ * @param {string} sourcePath - Source path relative to files root
+ * @param {string} targetPath - Destination path relative to files root
+ * @param {string} [url] - agent host URL (optional, defaults to local /agent)
+ * @returns {Promise<{success: boolean, message: string}>}
+ */
+export async function moveRemoteFile(sourcePath, targetPath, url) {
+  const base = resolveAgentUrl(url);
+  const filesUrl = `${base}/files`;
+  const headers = { 'Content-Type': 'application/json' };
+  const token = getAgentToken(url);
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+
+  const res = await fetch(filesUrl, {
+    method: 'PATCH',
+    headers,
+    body: JSON.stringify({ sourcePath, targetPath }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Agent request failed' }));
+    throw new Error(err.error || `Agent returned ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
  * Upload a file to the remote agent server.
  * @param {string} path - Path relative to files root
  * @param {Blob|File} file - The file to upload
@@ -419,6 +445,20 @@ export async function deleteFile(path) {
     return deleteE2bFile(path);
   }
   return deleteRemoteFile(path, selected);
+}
+
+/**
+ * Move a file or directory on the active agent.
+ * @param {string} sourcePath - Source path relative to files root
+ * @param {string} targetPath - Destination path relative to files root
+ * @returns {Promise<{success: boolean, message: string}>}
+ */
+export async function moveFile(sourcePath, targetPath) {
+  const selected = getSelectedAgent();
+  if (selected === E2B_AGENT_ID) {
+    return moveE2bFile(sourcePath, targetPath);
+  }
+  return moveRemoteFile(sourcePath, targetPath, selected);
 }
 
 /**

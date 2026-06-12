@@ -222,6 +222,59 @@ function sandboxApiPath(path, options) {
   return safePath ? `/${safePath}` : '/';
 }
 
+function joinSandboxRelativePath(...parts) {
+  return sandboxRelativePath(
+    parts
+      .filter((part) => part !== null && part !== undefined && String(part).length > 0)
+      .join('/'),
+    { allowEmpty: true }
+  );
+}
+
+function splitSandboxRelativePath(path) {
+  const safePath = sandboxRelativePath(path);
+  const parts = safePath.split('/');
+  const name = parts.pop();
+  return { dir: parts.join('/'), name };
+}
+
+function isE2bDirectoryEntry(entry) {
+  return entry?.type === 'dir' || entry?.type === 'directory';
+}
+
+async function getE2bEntry(path) {
+  const { dir, name } = splitSandboxRelativePath(path);
+  try {
+    const entries = await _sandbox.files.list(sandboxApiPath(dir, { allowEmpty: true }));
+    return entries.find((entry) => entry.name === name) || null;
+  } catch {
+    return null;
+  }
+}
+
+async function copyE2bFile(sourcePath, targetPath) {
+  const content = await _sandbox.files.read(sandboxApiPath(sourcePath), { format: 'blob' });
+  const payload = content && typeof content.arrayBuffer === 'function'
+    ? await content.arrayBuffer()
+    : content;
+  await _sandbox.files.write(sandboxApiPath(targetPath), payload);
+}
+
+async function copyE2bDirectory(sourcePath, targetPath) {
+  await _sandbox.files.makeDir(sandboxApiPath(targetPath), { force: true });
+  const entries = await _sandbox.files.list(sandboxApiPath(sourcePath));
+
+  for (const entry of entries) {
+    const childSource = joinSandboxRelativePath(sourcePath, entry.name);
+    const childTarget = joinSandboxRelativePath(targetPath, entry.name);
+    if (isE2bDirectoryEntry(entry)) {
+      await copyE2bDirectory(childSource, childTarget);
+    } else {
+      await copyE2bFile(childSource, childTarget);
+    }
+  }
+}
+
 /**
  * List files/directories in the E2B sandbox.
  * @param {string} [path] - Directory path (empty for root)
@@ -237,9 +290,9 @@ export async function listE2bFiles(path = '') {
     name: '/',
     type: 'directory',
     children: entries.map((entry) => ({
-      id: `${entry.type === 'directory' ? 'dir' : 'file'}-${entry.path}`,
+      id: `${isE2bDirectoryEntry(entry) ? 'dir' : 'file'}-${entry.path}`,
       name: entry.name,
-      type: entry.type === 'dir' ? 'directory' : 'file',
+      type: isE2bDirectoryEntry(entry) ? 'directory' : 'file',
       size: entry.type === 'file' ? (entry.size || 0) : 0,
       path: entry.path,
       parentDir,
@@ -279,6 +332,55 @@ export async function deleteE2bFile(path) {
   await ensureSandbox();
   await _sandbox.files.remove(sandboxApiPath(path));
   return { success: true, message: 'Deleted successfully' };
+}
+
+/**
+ * Move a file or directory in the E2B sandbox.
+ * @param {string} sourcePath - Source path
+ * @param {string} targetPath - Destination path
+ * @returns {Promise<{success: boolean, message: string}>}
+ */
+export async function moveE2bFile(sourcePath, targetPath) {
+  await ensureSandbox();
+  const safeSourcePath = sandboxRelativePath(sourcePath);
+  const safeTargetPath = sandboxRelativePath(targetPath);
+
+  if (safeSourcePath === safeTargetPath) {
+    return { success: true, message: 'Already at target path' };
+  }
+
+  const sourceEntry = await getE2bEntry(safeSourcePath);
+  if (!sourceEntry) throw new Error('Source file or directory not found');
+
+  const targetEntry = await getE2bEntry(safeTargetPath);
+  if (targetEntry) throw new Error('Destination already exists');
+
+  if (isE2bDirectoryEntry(sourceEntry) && safeTargetPath.startsWith(`${safeSourcePath}/`)) {
+    throw new Error('Cannot move a directory into itself');
+  }
+
+  const { dir: targetParent } = splitSandboxRelativePath(safeTargetPath);
+  if (targetParent) {
+    await _sandbox.files.makeDir(sandboxApiPath(targetParent), { force: true });
+  }
+
+  let targetCreated = false;
+  try {
+    if (isE2bDirectoryEntry(sourceEntry)) {
+      targetCreated = true;
+      await copyE2bDirectory(safeSourcePath, safeTargetPath);
+    } else {
+      await copyE2bFile(safeSourcePath, safeTargetPath);
+      targetCreated = true;
+    }
+    await _sandbox.files.remove(sandboxApiPath(safeSourcePath));
+    return { success: true, message: 'Moved successfully' };
+  } catch (err) {
+    if (targetCreated) {
+      try { await _sandbox.files.remove(sandboxApiPath(safeTargetPath)); } catch { /* ignore cleanup */ }
+    }
+    throw err;
+  }
 }
 
 /**
