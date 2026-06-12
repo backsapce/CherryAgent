@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from 'react';
 import { checkAgentAvailable, connectAgent } from '../../models/agent';
 import { exportToZip, importFromZip } from '../../vfs/opfs';
 import config from '../../config/config';
-import { pullSync, pushSync, syncNow, testSyncConnection } from '../../sync/syncManager';
+import { pullSync, pushSync, syncNow, syncResultChangedLocal, testSyncConnection } from '../../sync/syncManager';
 import { useI18n } from '../../i18n/context';
 import { SUPPORTED_LOCALES } from '../../i18n/locales';
 import { X, Lock, Plug, Sun, Moon, Monitor, UploadCloud, DownloadCloud, AlertTriangle, Globe, ChevronDown, User, Cloud, Layers, Refresh, Upload, Download } from '../Icons/Icons';
@@ -563,7 +563,7 @@ const Settings = ({
       const next = syncConfigFromForm();
       await config.set('sync', next);
       const result = await fn(next);
-      await onStorageRestored?.();
+      if (syncResultChangedLocal(result)) await onStorageRestored?.();
       setSyncMessage({ type: 'success', text: t(`syncSettings.${action}Success`, { summary: JSON.stringify(result) }) });
     } catch (err) {
       setSyncMessage({ type: 'error', text: t('syncSettings.actionFailed', { error: err.message }) });

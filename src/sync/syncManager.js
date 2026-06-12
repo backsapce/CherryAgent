@@ -33,6 +33,22 @@ let pendingAutoSync = false;
 let autoRefreshCallback = null;
 let deleteStateWrite = Promise.resolve();
 
+function statsChangedLocal(stats) {
+  return Boolean(stats && (
+    stats.downloaded > 0 ||
+    stats.merged > 0 ||
+    stats.deleted > 0
+  ));
+}
+
+export function syncResultChangedLocal(result) {
+  if (!result || result === true) return false;
+  if (result.pulled || result.pushed) {
+    return statsChangedLocal(result.pulled) || statsChangedLocal(result.pushed);
+  }
+  return statsChangedLocal(result);
+}
+
 function encodePath(path) {
   return btoa(unescape(encodeURIComponent(path))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
 }
@@ -641,7 +657,9 @@ async function runExclusive(fn) {
         const syncConfig = getSyncConfig();
         if (syncConfig.enabled) {
           syncNow(syncConfig)
-            .then(() => autoRefreshCallback?.())
+            .then((result) => {
+              if (syncResultChangedLocal(result)) autoRefreshCallback?.();
+            })
             .catch((err) => console.warn('Queued auto sync failed:', err));
         }
       });
@@ -688,7 +706,9 @@ function scheduleAutoSync(onStorageRestored, event) {
       return;
     }
     syncNow(syncConfig)
-      .then(() => onStorageRestored?.())
+      .then((result) => {
+        if (syncResultChangedLocal(result)) onStorageRestored?.();
+      })
       .catch((err) => console.warn('Auto sync failed:', err));
   }, AUTO_DEBOUNCE_MS);
 }
@@ -708,7 +728,9 @@ export function configureAutoSync(onStorageRestored, options = {}) {
 
   if (syncConfig.autoOnStart && options.runStartup !== false) {
     syncNow(syncConfig)
-      .then(() => onStorageRestored?.())
+      .then((result) => {
+        if (syncResultChangedLocal(result)) onStorageRestored?.();
+      })
       .catch((err) => console.warn('Startup sync failed:', err));
   }
 
@@ -716,7 +738,9 @@ export function configureAutoSync(onStorageRestored, options = {}) {
   if (Number.isFinite(minutes) && minutes > 0) {
     intervalId = setInterval(() => {
       syncNow(getSyncConfig())
-        .then(() => onStorageRestored?.())
+        .then((result) => {
+          if (syncResultChangedLocal(result)) onStorageRestored?.();
+        })
         .catch((err) => console.warn('Periodic sync failed:', err));
     }, Math.max(1, minutes) * 60 * 1000);
   }

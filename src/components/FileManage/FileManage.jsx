@@ -4,6 +4,7 @@ import { loadFiles, saveFile, createFile, createDirectory, deleteFile as deleteL
 import { listFiles, createFile as createRemoteFile, deleteFile as deleteRemoteFile, uploadFile as uploadRemoteFile, downloadFile as downloadRemoteFile } from '../../models/agent';
 import { ChevronRight, ChevronDown, Folder, File, FilePlus, FolderPlus, Refresh, X, Upload, Cloud, HardDrive, Trash, Download, FileEdit, Spinner } from '../Icons/Icons';
 import FileEditor from './FileEditor';
+import { joinFileManagerPath, normalizeFileManagerPath } from './pathUtils';
 import './FileManage.css';
 
 // Breakpoint for mobile/tablet
@@ -63,27 +64,28 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange }) => 
       upload: (name, blob, path) => saveFile(name, blob, path ?? null),
     } : {
       list: () => listFiles(''),
-      createFile: (name, path) => createRemoteFile(path ? `${path}/${name}` : name, '', false),
-      createDir: (name, path) => createRemoteFile(path ? `${path}/${name}` : name, '', true),
+      createFile: (name, path) => createRemoteFile(joinFileManagerPath(path, name), '', false),
+      createDir: (name, path) => createRemoteFile(joinFileManagerPath(path, name), '', true),
       delete: (name, path) => {
-        const fullPath = path ? `${path}/${name}` : name;
+        const fullPath = joinFileManagerPath(path, name);
         return deleteRemoteFile(fullPath);
       },
       download: (name, path) => {
-        const fullPath = path ? `${path}/${name}` : name;
+        const fullPath = joinFileManagerPath(path, name);
         return downloadRemoteFile(fullPath);
       },
       upload: (name, file, path) => {
-        const fullPath = path ? `${path}/${name}` : name;
+        const fullPath = joinFileManagerPath(path, name);
         return uploadRemoteFile(fullPath, file);
       },
     };
   }, [fileSource]);
 
   const listDirectoryChildren = useCallback(async (path) => {
+    const dirPath = normalizeFileManagerPath(path);
     let children = fileSource === 'local'
-      ? await loadFiles(path)
-      : await listFiles(path);
+      ? await loadFiles(dirPath)
+      : await listFiles(dirPath);
     if (!Array.isArray(children) && children?.children) children = children.children;
     return Array.isArray(children) ? children : [];
   }, [fileSource]);
@@ -95,10 +97,9 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange }) => 
       if (node.type !== 'directory') return node;
 
       existingDirIds.add(node.id);
-      const rawPath = parentDir ? `${parentDir}/${node.name}` : node.name;
       const dirPath = node.id === ROOT_ID
         ? ''
-        : rawPath.replace(/^\/+/, '').replace(/\/+/g, '/').replace(/\/+$/, '');
+        : joinFileManagerPath(parentDir, node.name);
       let children = Array.isArray(node.children) ? node.children : [];
 
       if (node.id !== ROOT_ID && expandedIds.has(node.id)) {
@@ -235,8 +236,7 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange }) => 
 
     if (!isCurrentlyExpanded) {
       setLoadingDirs((prev) => new Set(prev).add(dirId));
-      const rawPath = parentDir ? `${parentDir}/${dirName}` : dirName;
-      const path = rawPath.replace(/^\/+/, '').replace(/\/+/g, '/').replace(/\/+$/, '');
+      const path = joinFileManagerPath(parentDir, dirName);
       try {
         const children = await listDirectoryChildren(path);
         setFileTree((prevTree) => {
@@ -302,8 +302,7 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange }) => 
 
   const handleSelectItem = useCallback((path, name, type) => {
     if (type === 'directory') {
-      const rawPath = path ? `${path}/${name}` : name;
-      const normalized = rawPath.replace(/^\/+/, '').replace(/\/+/g, '/').replace(/\/+$/, '');
+      const normalized = joinFileManagerPath(path, name);
       setSelectedPath(normalized || null);
     } else {
       setSelectedPath(null);
@@ -322,7 +321,8 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange }) => 
   const renderTreeNode = (node, depth = 0, parentDir = '') => {
     if (node.type === 'directory') {
       const isExpanded = expandedDirs.has(node.id);
-      const dirPath = parentDir ? `${parentDir}/${node.name}` : node.name;
+      const nodeParentDir = normalizeFileManagerPath(parentDir || node.parentDir || '');
+      const dirPath = node.id === ROOT_ID ? '' : joinFileManagerPath(nodeParentDir, node.name);
       const isSelected = selectedPath === dirPath && selectedName === node.name;
 
       return (
@@ -331,10 +331,10 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange }) => 
             className="tree-item"
             onClick={(e) => {
               e.stopPropagation();
-              handleSelectItem(parentDir || '', node.name, 'directory');
-              toggleDirectory(node.id, node.name, parentDir || node.parentDir);
+              handleSelectItem(nodeParentDir, node.name, 'directory');
+              toggleDirectory(node.id, node.name, nodeParentDir);
             }}
-            onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); handleSelectItem(parentDir || '', node.name, 'directory'); }}
+            onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); handleSelectItem(nodeParentDir, node.name, 'directory'); }}
           >
             {isExpanded ? <ChevronDown className="tree-chevron" width={12} height={12} /> : <ChevronRight className="tree-chevron" width={12} height={12} />}
             <Folder className="tree-icon folder-icon" width={18} height={18} />
@@ -344,7 +344,7 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange }) => 
             {isSelected && <span className="tree-selected-badge">✓</span>}
             {node.id !== 'root' && (
               <div className="file-actions">
-                <button className="file-action-btn delete-btn" onClick={(e) => { e.stopPropagation(); handleDeleteFile(node.name, parentDir || node.parentDir, true); }} title={t('filemanage.delete')}><Trash width={16} height={16} /></button>
+                <button className="file-action-btn delete-btn" onClick={(e) => { e.stopPropagation(); handleDeleteFile(node.name, nodeParentDir, true); }} title={t('filemanage.delete')}><Trash width={16} height={16} /></button>
               </div>
             )}
           </div>
@@ -356,20 +356,21 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange }) => 
         </div>
       );
     } else {
-      const filePath = node.parentDir ? `${node.parentDir}/${node.name}` : node.name;
+      const nodeParentDir = normalizeFileManagerPath(parentDir || node.parentDir || '');
+      const filePath = joinFileManagerPath(nodeParentDir, node.name);
       const isSelected = selectedPath === filePath && selectedName === node.name;
       return (
         <div key={node.id} className={`tree-node file-node ${isSelected ? 'selected' : ''}`} style={{ paddingLeft: depth * 8 }}>
-          <div className="tree-item file-item" onClick={(e) => { e.stopPropagation(); handleSelectItem(node.parentDir || '', node.name, 'file'); }} onDoubleClick={(e) => { e.stopPropagation(); handleEditFile(node.name, node.parentDir); }} onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); handleSelectItem(node.parentDir || '', node.name, 'file'); }}>
+          <div className="tree-item file-item" onClick={(e) => { e.stopPropagation(); handleSelectItem(nodeParentDir, node.name, 'file'); }} onDoubleClick={(e) => { e.stopPropagation(); handleEditFile(node.name, nodeParentDir); }} onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); handleSelectItem(nodeParentDir, node.name, 'file'); }}>
             <span className="tree-icon-spacer" />
             <File className="tree-icon file-icon" width={18} height={18} />
             <span className="tree-label">{node.name}</span>
             {node.size && <span className="tree-size">{formatFileSize(node.size)}</span>}
             {isSelected && <span className="tree-selected-badge">✓</span>}
             <div className="file-actions">
-              <button className="file-action-btn" onClick={(e) => { e.stopPropagation(); handleEditFile(node.name, node.parentDir); }} title={t('filemanage.edit')}><FileEdit width={16} height={16} /></button>
-              <button className="file-action-btn" onClick={(e) => { e.stopPropagation(); handleDownloadFile(node.name, node.parentDir); }} title={t('filemanage.download')}><Download width={16} height={16} /></button>
-              <button className="file-action-btn delete-btn" onClick={(e) => { e.stopPropagation(); handleDeleteFile(node.name, node.parentDir, false); }} title={t('filemanage.delete')}><Trash width={16} height={16} /></button>
+              <button className="file-action-btn" onClick={(e) => { e.stopPropagation(); handleEditFile(node.name, nodeParentDir); }} title={t('filemanage.edit')}><FileEdit width={16} height={16} /></button>
+              <button className="file-action-btn" onClick={(e) => { e.stopPropagation(); handleDownloadFile(node.name, nodeParentDir); }} title={t('filemanage.download')}><Download width={16} height={16} /></button>
+              <button className="file-action-btn delete-btn" onClick={(e) => { e.stopPropagation(); handleDeleteFile(node.name, nodeParentDir, false); }} title={t('filemanage.delete')}><Trash width={16} height={16} /></button>
             </div>
           </div>
         </div>

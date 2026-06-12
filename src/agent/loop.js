@@ -33,7 +33,7 @@ import { buildSkillsSection } from './skills.js';
 import { readAgentAgentsFile } from '../vfs/opfs.js';
 import { getAgent, getWorkspaceDirName } from '../agents/agents.js';
 
-const DEFAULT_MAX_ROUNDS = 10;
+const DEFAULT_MAX_ROUNDS = 1000;
 const MAX_CONTINUATION_GUARDS = 2;
 
 const CONTINUATION_INTENT_RE =
