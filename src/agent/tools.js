@@ -17,15 +17,21 @@ import {
   upsertMemoryEntry,
 } from './memory.js';
 import {
-  createSkill,
-  deleteSkill,
   getSkill,
   searchSkills,
-  updateSkill,
-  writeSkillReference,
 } from './skills.js';
 import { downloadE2bFile, downloadRemoteFile, executeCommand, listFiles, readFileText, writeFile } from '../models/agent';
-import { getAgentFileInfo, listAgentFiles, readAgentFile, readAgentFileBlob, writeAgentFile } from '../vfs/opfs';
+import {
+  getAgentFileInfo,
+  getAgentSkillFileInfo,
+  listAgentFiles,
+  listAgentSkillFiles,
+  readAgentFile,
+  readAgentFileBlob,
+  readAgentSkillPath,
+  writeAgentFile,
+  writeAgentSkillPath,
+} from '../vfs/opfs';
 import config from '../config/config';
 import { getAgent, listAgents, updateAgentConfig } from '../agents/agents.js';
 
@@ -272,6 +278,17 @@ async function assertBrowserReadableFileSize(path, maxBytes, ctx) {
   if (entry.type === 'directory') return `Cannot read ${path}: it is a directory.`;
   if (Number.isFinite(entry.size) && entry.size > maxBytes) {
     return oversizedFileMessage(path, entry.size, maxBytes, 'read_browser_file', 'list_browser_files');
+  }
+  return null;
+}
+
+async function assertSkillReadableFileSize(path, maxBytes, ctx) {
+  const entry = await getAgentSkillFileInfo(ctx.agentId, path).catch(() => null);
+
+  if (!entry) return null;
+  if (entry.type === 'directory') return `Cannot read ${path}: it is a directory.`;
+  if (Number.isFinite(entry.size) && entry.size > maxBytes) {
+    return oversizedFileMessage(path, entry.size, maxBytes, 'read_skill_file', 'list_skill_files');
   }
   return null;
 }
@@ -616,6 +633,108 @@ registry.register({
 });
 
 registry.register({
+  name: 'list_skill_files',
+  category: 'skills',
+  readOnly: true,
+  parallelSafe: true,
+  schema: {
+    description:
+      'List files in the active agent skill directory: workspace/<active-agent>/skills/. Use this for explicit skill file editing. Skill files are browser OPFS files, not sandbox files and not workspace/<active-agent>/files/.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description: 'Directory path relative to workspace/<active-agent>/skills/. Empty means the skills root.',
+        },
+      },
+      required: [],
+      additionalProperties: false,
+    },
+  },
+  checkAvailable: (ctx) => !!ctx?.agentId,
+  async handler({ path = '' }, ctx) {
+    try {
+      const result = await listAgentSkillFiles(ctx.agentId, path);
+      return formatFileTree(result, 0);
+    } catch (err) {
+      return `Error listing skill files: ${err.message}`;
+    }
+  },
+});
+
+registry.register({
+  name: 'read_skill_file',
+  category: 'skills',
+  readOnly: true,
+  parallelSafe: true,
+  schema: {
+    description:
+      'Read a text file from workspace/<active-agent>/skills/ in browser OPFS. Use the skill tool for the enabled skill catalog, and this tool only when direct skill file content is needed.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description: 'File path relative to workspace/<active-agent>/skills/, such as my-skill/SKILL.md or my-skill/references/example.md.',
+        },
+        max_bytes: {
+          type: 'number',
+          description: `Maximum file size to read. Defaults to ${DEFAULT_READ_FILE_MAX_BYTES} bytes and is capped at ${ABSOLUTE_READ_FILE_MAX_BYTES} bytes.`,
+        },
+      },
+      required: ['path'],
+      additionalProperties: false,
+    },
+  },
+  checkAvailable: (ctx) => !!ctx?.agentId,
+  async handler({ path, max_bytes: maxBytesArg }, ctx) {
+    try {
+      const maxBytes = clampReadLimit(maxBytesArg);
+      const sizeError = await assertSkillReadableFileSize(path, maxBytes, ctx);
+      if (sizeError) return sizeError;
+      const content = await readAgentSkillPath(ctx.agentId, path);
+      return content ?? `Skill file not found: ${path}`;
+    } catch (err) {
+      return `Error reading skill file ${path}: ${err.message}`;
+    }
+  },
+});
+
+registry.register({
+  name: 'write_skill_file',
+  category: 'skills',
+  schema: {
+    description:
+      'Write a text file under workspace/<active-agent>/skills/ in browser OPFS. To create a skill, write <skill-name>/SKILL.md. To add references, write <skill-name>/references/<file>. Parent directories are created automatically.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description: 'File path relative to workspace/<active-agent>/skills/.',
+        },
+        content: {
+          type: 'string',
+          description: 'The content to write.',
+        },
+      },
+      required: ['path', 'content'],
+      additionalProperties: false,
+    },
+  },
+  checkAvailable: (ctx) => !!ctx?.agentId,
+  async handler({ path, content }, ctx) {
+    try {
+      await writeAgentSkillPath(ctx.agentId, path, content);
+      return `Successfully wrote skill file ${path}`;
+    } catch (err) {
+      return `Error writing skill file ${path}: ${err.message}`;
+    }
+  },
+});
+
+registry.register({
   name: 'list_sandbox_files',
   category: 'sandbox-files',
   readOnly: true,
@@ -883,34 +1002,30 @@ registry.register({
 registry.register({
   name: 'skill',
   category: 'skills',
-  readOnly: false,
-  parallelSafe: false,
+  readOnly: true,
+  parallelSafe: true,
   schema: {
     description:
-      'Search, read, and manage progressive skills stored in browser OPFS. Skills are not files in the sandbox runtime and not files under workspace/<active-agent>/files/. Read a skill before following its detailed procedure; read references by name only when needed.',
+      'List, search, and read progressive skills stored in browser OPFS. This tool does not create, update, or delete skills. To create or edit an active-agent skill, write files under workspace/<active-agent>/skills/ with write_skill_file. Global skills are read-only to AI tools. Skills are not files in the sandbox runtime and not files under workspace/<active-agent>/files/. Read a skill before following its detailed procedure; read references by name only when needed.',
     parameters: {
       type: 'object',
       properties: {
         action: {
           type: 'string',
-          enum: ['list', 'search', 'read', 'upsert', 'delete', 'write_reference'],
+          enum: ['list', 'search', 'read'],
           description: 'Skill operation.',
         },
         name: {
           type: 'string',
-          description: 'Skill name for read/upsert/delete/write_reference.',
+          description: 'Skill name for read.',
         },
         query: {
           type: 'string',
           description: 'Search query.',
         },
-        content: {
-          type: 'string',
-          description: 'Full SKILL.md content for upsert, or reference content for write_reference.',
-        },
         reference_name: {
           type: 'string',
-          description: 'Reference file name to read or write.',
+          description: 'Reference file name to read.',
         },
         include_references: {
           type: 'boolean',
@@ -939,26 +1054,6 @@ registry.register({
           includeReferences: args.include_references,
         });
         return skill ? skill.content : `Skill or reference not found: ${args.name}${args.reference_name ? `/${args.reference_name}` : ''}`;
-      }
-      if (args.action === 'upsert') {
-        if (!args.name || !args.content) return 'Skill error: name and content are required for upsert.';
-        const existing = await getSkill(args.name, agentId);
-        const savedName = existing
-          ? await updateSkill(args.name, args.content, agentId)
-          : await createSkill(args.name, args.content, agentId);
-        return `Skill "${savedName}" ${existing ? 'updated' : 'created'}.`;
-      }
-      if (args.action === 'write_reference') {
-        if (!args.name || !args.reference_name || !args.content) {
-          return 'Skill error: name, reference_name, and content are required for write_reference.';
-        }
-        const refName = await writeSkillReference(args.name, args.reference_name, args.content, agentId);
-        return `Reference "${refName}" saved for skill "${args.name}".`;
-      }
-      if (args.action === 'delete') {
-        if (!args.name) return 'Skill error: name is required for delete.';
-        await deleteSkill(args.name, agentId);
-        return `Skill "${args.name}" deleted.`;
       }
       return `Unknown skill action: ${args.action}`;
     } catch (err) {
@@ -1100,6 +1195,7 @@ Work on the assigned task independently and return a concise final report with:
 Filesystem model:
 - Browser OPFS is the durable agent storage backend, but browser file tools can only access workspace/<active-agent>/files/.
 - Browser file tools cannot access OPFS root, other agents, AGENTS.md, memory, or skills by path.
+- Use the skill tool for catalog/read operations, and skill file tools for explicit edits under workspace/<active-agent>/skills/.
 - The sandbox filesystem is only the runtime workdir for execute_command.
 - Use browser file tools for persistent files under workspace/<active-agent>/files/ and sandbox file tools for command-runtime files.
 

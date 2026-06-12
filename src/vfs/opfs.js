@@ -1020,6 +1020,11 @@ export async function getAgentDir(agentId, ...pathParts) {
   return getDirectory(WORKSPACE_DIR, name, ...pathParts);
 }
 
+async function getExistingAgentDir(agentId, ...pathParts) {
+  const name = await resolveWorkspaceName(agentId);
+  return getExistingDirectory(WORKSPACE_DIR, name, ...pathParts);
+}
+
 /**
  * Get the memory directory for an agent.
  * @param {string} agentId
@@ -1184,6 +1189,71 @@ export async function writeAgentSkillRef(agentId, skillName, filename, content) 
   const refsDir = await skillDir.getDirectoryHandle('references', { create: true });
   const name = await resolveWorkspaceName(agentId);
   await writeText(refsDir, filename, content, { localPath: `${WORKSPACE_DIR}/${name}/skills/${skillName}/references/${filename}` });
+}
+
+export async function listAgentSkillFiles(agentId, path = '') {
+  const safePath = normalizeWorkspaceRelativePath(path, { allowEmpty: true });
+  const dir = safePath
+    ? await getExistingAgentDir(agentId, 'skills', ...pathParts(safePath))
+    : await getExistingAgentDir(agentId, 'skills');
+  const children = [];
+  for (const { name, kind } of await listEntries(dir)) {
+    if (kind === 'file') {
+      const file = await (await dir.getFileHandle(name)).getFile();
+      children.push({
+        id: `skill-file-${agentId}-${safePath ? `${safePath}/` : ''}${name}`,
+        name,
+        type: 'file',
+        size: file.size,
+        lastModified: file.lastModified,
+      });
+    } else {
+      children.push({
+        id: `skill-dir-${agentId}-${safePath ? `${safePath}/` : ''}${name}`,
+        name,
+        type: 'directory',
+        children: [],
+      });
+    }
+  }
+  return children;
+}
+
+export async function readAgentSkillPath(agentId, path) {
+  const safePath = normalizeWorkspaceRelativePath(path);
+  const parts = pathParts(safePath);
+  const fileName = parts.pop();
+  const dir = parts.length > 0
+    ? await getExistingAgentDir(agentId, 'skills', ...parts)
+    : await getExistingAgentDir(agentId, 'skills');
+  return await readText(dir, fileName);
+}
+
+export async function getAgentSkillFileInfo(agentId, path) {
+  const safePath = normalizeWorkspaceRelativePath(path);
+  const parts = pathParts(safePath);
+  const fileName = parts.pop();
+  const dir = parts.length > 0
+    ? await getExistingAgentDir(agentId, 'skills', ...parts)
+    : await getExistingAgentDir(agentId, 'skills');
+  const fileHandle = await dir.getFileHandle(fileName);
+  const file = await fileHandle.getFile();
+  return {
+    name: file.name,
+    size: file.size,
+    lastModified: file.lastModified,
+  };
+}
+
+export async function writeAgentSkillPath(agentId, path, content) {
+  const safePath = normalizeWorkspaceRelativePath(path);
+  const parts = pathParts(safePath);
+  const fileName = parts.pop();
+  const dir = parts.length > 0
+    ? await getAgentDir(agentId, 'skills', ...parts)
+    : await getAgentSkillsDir(agentId);
+  const name = await resolveWorkspaceName(agentId);
+  await writeText(dir, fileName, content, { localPath: `${WORKSPACE_DIR}/${name}/skills/${safePath}` });
 }
 
 // Agent-scoped file operations

@@ -11,10 +11,8 @@ import {
   listSkillDirs,
   readSkillFile,
   writeSkillFile,
-  deleteSkillDir,
   listSkillRefs,
   readSkillRef,
-  writeSkillRef,
   listAgentSkillDirs,
   readAgentSkillFile,
   writeAgentSkillFile,
@@ -74,7 +72,7 @@ version: 1.0.0
 2. Draft frontmatter with a trigger-oriented description.
 3. Write the shortest complete procedure.
 4. Add reference files only when details are too large or optional.
-5. Use the skill tool to upsert the SKILL.md and any references.
+5. Create or update the skill by writing files under workspace/<active-agent>/skills/: write <skill-name>/SKILL.md for the skill and <skill-name>/references/<file> for optional references.
 `,
   },
 ];
@@ -85,7 +83,10 @@ export async function ensureDefaultSkills() {
   const existing = await listSkillDirs();
   const existingNames = new Set(existing.map((dir) => dir.name));
   for (const skill of DEFAULT_SKILLS) {
-    if (!existingNames.has(skill.name)) {
+    const existingContent = existingNames.has(skill.name)
+      ? await readSkillFile(skill.name, 'SKILL.md')
+      : null;
+    if (!existingContent || existingContent.includes('Use the skill tool to upsert the SKILL.md')) {
       await writeSkillFile(skill.name, 'SKILL.md', skill.content);
     }
   }
@@ -179,8 +180,8 @@ export async function getSkill(name, agentId, options = {}) {
 export async function createSkill(name, content, agentId) {
   const sanitized = normalizeSkillName(name);
   validateSkillContent(sanitized, content);
-  if (agentId) await writeAgentSkillFile(agentId, sanitized, 'SKILL.md', content);
-  else await writeSkillFile(sanitized, 'SKILL.md', content);
+  requireAgentSkillWorkspace(agentId);
+  await writeAgentSkillFile(agentId, sanitized, 'SKILL.md', content);
   return sanitized;
 }
 
@@ -193,8 +194,8 @@ export async function createSkill(name, content, agentId) {
 export async function updateSkill(name, content, agentId) {
   const sanitized = normalizeSkillName(name);
   validateSkillContent(sanitized, content);
-  if (agentId) await writeAgentSkillFile(agentId, sanitized, 'SKILL.md', content);
-  else await writeSkillFile(sanitized, 'SKILL.md', content);
+  requireAgentSkillWorkspace(agentId);
+  await writeAgentSkillFile(agentId, sanitized, 'SKILL.md', content);
   return sanitized;
 }
 
@@ -210,8 +211,9 @@ export async function writeSkillReference(name, referenceName, content, agentId)
   const refName = normalizeReferenceName(referenceName);
   const safeContent = truncateText(String(content || ''), MAX_REFERENCE_CHARS);
   if (!safeContent.trim()) throw new Error('Reference content is required.');
-  if (agentId) await writeAgentSkillRef(agentId, skillName, refName, safeContent);
-  else await writeSkillRef(skillName, refName, safeContent);
+  requireAgentSkillWorkspace(agentId);
+  await ensureAgentSkillExists(agentId, skillName);
+  await writeAgentSkillRef(agentId, skillName, refName, safeContent);
   return refName;
 }
 
@@ -222,8 +224,8 @@ export async function writeSkillReference(name, referenceName, content, agentId)
  */
 export async function deleteSkill(name, agentId) {
   const sanitized = normalizeSkillName(name);
-  if (agentId) await deleteAgentSkillDir(agentId, sanitized);
-  else await deleteSkillDir(sanitized);
+  requireAgentSkillWorkspace(agentId);
+  await deleteAgentSkillDir(agentId, sanitized);
 }
 
 export async function getDisabledSkills() {
@@ -272,7 +274,7 @@ export async function buildSkillsSection(agentId) {
 
   return [
     '<skill_catalog>',
-    'Available skills are listed below. Skills are stored in browser OPFS, not in the sandbox runtime and not inside workspace/<active-agent>/files/. Use the `skill` tool with action "read" before applying detailed skill instructions.',
+    'Available skills are listed below. Skills are stored in browser OPFS, not in the sandbox runtime and not inside workspace/<active-agent>/files/. Global skills are read-only to AI tools. Use the `skill` tool with action "read" before applying detailed skill instructions; create or edit active-agent skills only by writing files under workspace/<active-agent>/skills/.',
     list,
     '</skill_catalog>',
   ].join('\n');
@@ -366,6 +368,27 @@ async function readReference(resolved, referenceName) {
     return readAgentSkillRef(resolved.agentId, resolved.skill.name, safeName);
   }
   return readSkillRef(resolved.skill.name, safeName);
+}
+
+function requireAgentSkillWorkspace(agentId) {
+  if (!agentId) {
+    throw new Error('Skill modifications require an active agent workspace. Global skills are read-only to AI tools.');
+  }
+}
+
+async function ensureAgentSkillExists(agentId, skillName) {
+  const agentContent = await readAgentSkillFile(agentId, skillName, 'SKILL.md');
+  if (agentContent) return;
+
+  const globalContent = await readSkillFile(skillName, 'SKILL.md');
+  if (!globalContent) {
+    throw new Error(`Skill "${skillName}" does not exist. Upsert SKILL.md before writing references.`);
+  }
+  await writeAgentSkillFile(agentId, skillName, 'SKILL.md', globalContent);
+  for (const ref of await listSkillRefs(skillName)) {
+    const content = await readSkillRef(skillName, ref.name);
+    if (content != null) await writeAgentSkillRef(agentId, skillName, ref.name, content);
+  }
 }
 
 function buildSkillRecord({ dirName, source, content, meta, refs }) {

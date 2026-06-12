@@ -89,9 +89,11 @@ const AGENT_SYSTEM_PROMPT = `You have access to commands, browser-workspace file
 Filesystem model:
 - VertexAgent state lives in browser OPFS, but browser file tools do NOT expose the OPFS root.
 - Browser file tools can read/write only the active agent's own persistent files area: workspace/<active-agent>/files/.
-- Browser file tools cannot access other agents, OPFS root files, AGENTS.md, memory files, or skill files by path. Use the provided identity, memory, and skill tools for those systems.
+- Browser file tools cannot access other agents, OPFS root files, AGENTS.md, memory files, or skill files by path.
+- Use the skill tool for catalog/read operations, and skill file tools for explicit edits under workspace/<active-agent>/skills/.
 - The sandbox filesystem is only the runtime workdir for execute_command. It is separate from browser OPFS and does not automatically contain AGENTS.md, memory, skills, or browser workspace files.
 - Use browser file tools only for persistent files in the active agent's files area: list_browser_files, read_browser_file, read_browser_image, write_browser_file.
+- Use skill file tools only for active-agent skills: list_skill_files, read_skill_file, write_skill_file.
 - Use sandbox file tools only for files created or needed inside the command runtime: list_sandbox_files, read_sandbox_file, read_sandbox_image, write_sandbox_file.
 - If data must move between the active agent files area and sandbox runtime, explicitly read from one side and write to the other side.
 
@@ -103,24 +105,65 @@ Work rules:
 - When tools fail, use the error output to choose the next useful step.`;
 
 const FILE_CONTEXT_MARKER = 'Selected browser files from workspace/<active-agent>/files/:';
+const TOOL_HISTORY_MARKER = 'Tool calls performed during this assistant turn:';
+const TOOL_HISTORY_RESULT_MAX_CHARS = 4000;
 
 function contextFilePromptPath(file) {
   if (file?.relativePath) return file.relativePath;
   return String(file?.displayPath || '').replace(/^\/workspace\/[^/]+\//, '');
 }
 
+function truncateForPrompt(text, maxChars) {
+  const value = String(text || '');
+  if (value.length <= maxChars) return value;
+  return `${value.slice(0, maxChars)}\n[truncated ${value.length - maxChars} chars]`;
+}
+
+function appendPromptSection(content, marker, body) {
+  if (!body) return content || '';
+  return `${content || ''}\n\n${marker}\n${body}`.trim();
+}
+
+function toolCallPromptAttr(value) {
+  return String(value || '').replace(/"/g, '&quot;');
+}
+
+function formatToolCallsForLlm(toolCalls) {
+  if (!toolCalls?.length) return '';
+  return toolCalls
+    .map((tc, index) => {
+      const lines = [
+        `<tool_call index="${index + 1}" name="${toolCallPromptAttr(tc.name)}" status="${toolCallPromptAttr(tc.status || 'unknown')}">`,
+      ];
+      if (tc.command) lines.push(`command: ${tc.command}`);
+      if (tc.summary) lines.push(`summary: ${tc.summary}`);
+      if (tc.result) lines.push(`result:\n${truncateForPrompt(tc.result, TOOL_HISTORY_RESULT_MAX_CHARS)}`);
+      lines.push('</tool_call>');
+      return lines.join('\n');
+    })
+    .join('\n\n');
+}
+
 function expandMessagesForLlm(messages) {
   return messages.map((message) => {
-    const { contextFiles, ...rest } = message;
-    if (!contextFiles?.length) return rest;
+    const { contextFiles, toolCalls, usage: _usage, ...rest } = message;
+    let content = message.content || '';
 
-    const fileBlocks = contextFiles
-      .map((file) => `<file path="${contextFilePromptPath(file)}">\n${file.content}\n</file>`)
-      .join('\n\n');
+    if (contextFiles?.length) {
+      const fileBlocks = contextFiles
+        .map((file) => `<file path="${contextFilePromptPath(file)}">\n${file.content}\n</file>`)
+        .join('\n\n');
+      content = appendPromptSection(content, FILE_CONTEXT_MARKER, fileBlocks);
+    }
+
+    const toolHistory = formatToolCallsForLlm(toolCalls);
+    if (toolHistory) {
+      content = appendPromptSection(content, TOOL_HISTORY_MARKER, toolHistory);
+    }
 
     return {
       ...rest,
-      content: `${message.content || ''}\n\n${FILE_CONTEXT_MARKER}\n${fileBlocks}`.trim(),
+      content,
     };
   });
 }

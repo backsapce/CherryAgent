@@ -85,6 +85,30 @@ function isPathOrChild(path, parentPath) {
   return path === parentPath || path.startsWith(`${parentPath}/`);
 }
 
+function normalizeSyncPath(path) {
+  return String(path || '').split('/').filter(Boolean).join('/');
+}
+
+function restoredPathCandidates(path) {
+  const parts = normalizeSyncPath(path).split('/').filter(Boolean);
+  const candidates = [];
+  for (let i = 1; i <= parts.length; i += 1) {
+    candidates.push(parts.slice(0, i).join('/'));
+  }
+  return candidates;
+}
+
+function clearDeletedPathCandidates(files = {}, path) {
+  let changed = false;
+  for (const candidate of restoredPathCandidates(path)) {
+    if (files[candidate]?.deleted) {
+      delete files[candidate];
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 function hasDeletedAncestor(files = {}, path) {
   for (const [deletedPath, entry] of Object.entries(files || {})) {
     if (!entry?.deleted || deletedPath === path) continue;
@@ -297,6 +321,45 @@ function rememberDeletedPaths(paths) {
   return deleteStateWrite;
 }
 
+function rememberRestoredPaths(paths) {
+  deleteStateWrite = deleteStateWrite
+    .catch(() => {})
+    .then(async () => {
+      const state = await loadState();
+      let changed = false;
+      for (const path of paths || []) {
+        changed = clearDeletedPathCandidates(state.files, path) || changed;
+      }
+      if (changed) await saveState(state);
+    })
+    .catch((err) => console.warn('Failed to record local restore for sync:', err));
+  return deleteStateWrite;
+}
+
+function shouldRestoreLocalOverDeletedAncestor(localEntry, previous) {
+  if (!localEntry) return false;
+  if (!previous || previous.deleted) return true;
+  return Boolean(previous.hash && previous.hash !== localEntry.hash);
+}
+
+function restoreLocalChangedPathsOverDeletedAncestors(stateFiles = {}, manifestFiles = {}, local = new Map()) {
+  let changed = false;
+  for (const [path, localEntry] of local) {
+    const previous = stateFiles[path];
+    const hasLocalDeletedAncestor = hasDeletedAncestor(stateFiles, path);
+    const hasRemoteDeletedAncestor = hasDeletedAncestor(manifestFiles, path);
+    const restoreRemote = hasRemoteDeletedAncestor && shouldRestoreLocalOverDeletedAncestor(localEntry, previous);
+
+    if (!hasLocalDeletedAncestor && !restoreRemote) continue;
+
+    changed = clearDeletedPathCandidates(stateFiles, path) || changed;
+    if (restoreRemote) {
+      changed = clearDeletedPathCandidates(manifestFiles, path) || changed;
+    }
+  }
+  return changed;
+}
+
 async function localFileMap() {
   const entries = await listOpfsFiles({ hash: true });
   return new Map(entries.map((entry) => [entry.path, entry]));
@@ -490,6 +553,7 @@ async function pushInternal(syncConfig) {
   const state = await loadState();
   const local = await localFileMap();
   const stats = { uploaded: 0, merged: 0, deleted: 0, skipped: 0 };
+  restoreLocalChangedPathsOverDeletedAncestors(state.files, manifest.files, local);
 
   for (const [path, previous] of Object.entries(state.files || {})) {
     if (previous.deleted) {
@@ -695,10 +759,14 @@ export async function syncNow(syncConfig = getSyncConfig()) {
 }
 
 function scheduleAutoSync(onStorageRestored, event) {
-  const deleteWrite = event?.type === 'delete' ? rememberDeletedPaths(event.paths) : Promise.resolve();
+  const stateWrite = event?.type === 'delete'
+    ? rememberDeletedPaths(event.paths)
+    : (event?.type === 'write' || event?.type === 'mkdir')
+      ? rememberRestoredPaths(event.paths)
+      : Promise.resolve();
   clearTimeout(debounceId);
   debounceId = setTimeout(async () => {
-    await deleteWrite;
+    await stateWrite;
     const syncConfig = getSyncConfig();
     if (!syncConfig.enabled) return;
     if (activeRun) {
@@ -760,4 +828,6 @@ export const __syncInternals = {
   hasDeletedAncestor,
   mergeSets,
   pruneDeletedRecords,
+  restoredPathCandidates,
+  restoreLocalChangedPathsOverDeletedAncestors,
 };

@@ -26,7 +26,8 @@ const AGENT_RUNTIME_PROMPT = `You are VertexAgent, an autonomous coding and brow
 Filesystem model:
 - Browser OPFS is the durable VertexAgent storage backend, but browser file tools do NOT expose the OPFS root.
 - Browser file tools can read/write only the active agent's own files area: workspace/<active-agent>/files/.
-- Browser file tools cannot access other agents, OPFS root files, AGENTS.md, memory files, or skill files by path. Use the injected agent identity plus the memory and skill tools for those systems.
+- Browser file tools cannot access other agents, OPFS root files, AGENTS.md, memory files, or skill files by path.
+- Use the skill tool for the enabled skill catalog and skill reads. When explicitly creating or editing a skill, use skill file tools under workspace/<active-agent>/skills/.
 - The sandbox filesystem is a separate runtime workdir for execute_command. It is useful for running commands, builds, tests, and temporary generated files.
 - Active agent files and sandbox workdir files do not automatically sync. Choose browser file tools for workspace/<active-agent>/files/, sandbox file tools for command-runtime files, and explicitly copy content between them when needed.
 - Never infer that a path seen in the sandbox exists in the active agent files area, or that an active agent file path exists in the sandbox.

@@ -87,6 +87,8 @@ export async function runAgentLoop(opts) {
   let summaryState = { content: '', coveredUntil: 0 };
   let finalContent = '';
   let finalThinking = '';
+  let displayContent = '';
+  let displayThinking = '';
   let continuationGuardCount = 0;
   let completed = false;
   let exhaustedRounds = false;
@@ -111,11 +113,19 @@ export async function runAgentLoop(opts) {
       packed.apiMessages,
       packed.systemPrompt,
       toolSchemas,
-      { signal, onUpdate, llmProfileId: opts.llmProfileId }
+      {
+        signal,
+        onUpdate,
+        llmProfileId: opts.llmProfileId,
+        displayContent,
+        displayThinking,
+      }
     );
 
-    finalContent = response.content;
-    finalThinking = response.thinking;
+    displayContent = appendDisplaySegment(displayContent, response.content);
+    displayThinking = appendDisplaySegment(displayThinking, response.thinking);
+    finalContent = displayContent;
+    finalThinking = displayThinking;
     usageTotals = addUsage(usageTotals, response.usage);
 
     if (!response.toolCalls?.length) {
@@ -141,19 +151,19 @@ export async function runAgentLoop(opts) {
 
     continuationGuardCount = 0;
     registerToolCalls(response.toolCalls, allToolCalls);
-    onUpdate({ content: response.content, thinking: response.thinking, toolCalls: Object.values(allToolCalls) });
+    onUpdate({ content: displayContent, thinking: displayThinking, toolCalls: Object.values(allToolCalls) });
 
     const toolResults = await executeToolCalls(response.toolCalls, {
       allToolCalls,
-      content: response.content,
-      thinking: response.thinking,
+      content: displayContent,
+      thinking: displayThinking,
       onUpdate,
       toolContext,
     });
 
     history.push(buildAssistantMessage(response.content, response.thinking, response.toolCalls));
     history.push(...toolResults);
-    onUpdate({ content: response.content, thinking: response.thinking, toolCalls: Object.values(allToolCalls) });
+    onUpdate({ content: displayContent, thinking: displayThinking, toolCalls: Object.values(allToolCalls) });
   }
 
   if (!completed) {
@@ -178,10 +188,18 @@ export async function runAgentLoop(opts) {
       packed.apiMessages,
       packed.systemPrompt,
       [],
-      { signal, onUpdate, llmProfileId: opts.llmProfileId }
+      {
+        signal,
+        onUpdate,
+        llmProfileId: opts.llmProfileId,
+        displayContent,
+        displayThinking,
+      }
     );
-    finalContent = response.content || finalContent;
-    finalThinking = response.thinking || finalThinking;
+    displayContent = appendDisplaySegment(displayContent, response.content);
+    displayThinking = appendDisplaySegment(displayThinking, response.thinking);
+    finalContent = displayContent || finalContent;
+    finalThinking = displayThinking || finalThinking;
     usageTotals = addUsage(usageTotals, response.usage);
   }
 
@@ -226,8 +244,8 @@ async function streamAndCollect(apiMessages, systemPrompt, toolSchemas, opts) {
         }
       }
       opts.onUpdate?.({
-        content,
-        thinking,
+        content: appendDisplaySegment(opts.displayContent, content),
+        thinking: appendDisplaySegment(opts.displayThinking, thinking),
         toolCalls: previewToolFragments(toolCallFragments),
       });
     }
@@ -246,6 +264,15 @@ async function streamAndCollect(apiMessages, systemPrompt, toolSchemas, opts) {
     }
     throw err;
   }
+}
+
+function appendDisplaySegment(existing, segment) {
+  const base = String(existing || '');
+  const text = String(segment || '');
+  if (!text) return base;
+  if (!base) return text;
+  const separator = base.endsWith('\n') || text.startsWith('\n') ? '' : '\n\n';
+  return `${base}${separator}${text}`;
 }
 
 function mergeToolFragment(accumulator, fragment) {
@@ -422,7 +449,9 @@ function shouldContinueWithoutToolCall({
 }
 
 function getInitialToolStatus(name) {
-  return name === 'write_browser_file' || name === 'write_sandbox_file' ? 'writing' : 'running';
+  return name === 'write_browser_file' || name === 'write_sandbox_file' || name === 'write_skill_file'
+    ? 'writing'
+    : 'running';
 }
 
 function getToolCallCommand(toolCall) {
@@ -433,10 +462,12 @@ function getToolCallCommand(toolCall) {
 
 function formatToolCallSummary(toolCall, result = '') {
   const args = toolCall.parsedArgs || {};
-  if (toolCall.name === 'write_browser_file' || toolCall.name === 'write_sandbox_file') {
+  if (toolCall.name === 'write_browser_file' || toolCall.name === 'write_sandbox_file' || toolCall.name === 'write_skill_file') {
     const path = typeof args.path === 'string' && args.path.trim() ? args.path : 'file';
     const contentSize = typeof args.content === 'string' ? ` (${formatBytes(args.content.length)})` : '';
-    const target = toolCall.name === 'write_browser_file' ? 'browser' : 'sandbox';
+    let target = 'sandbox';
+    if (toolCall.name === 'write_browser_file') target = 'browser';
+    if (toolCall.name === 'write_skill_file') target = 'skill';
     return `${target}: ${path}${contentSize}`;
   }
   if (toolCall.name === 'memory') {

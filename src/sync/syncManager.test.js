@@ -8,6 +8,8 @@ const {
   hasDeletedAncestor,
   mergeSets,
   pruneDeletedRecords,
+  restoredPathCandidates,
+  restoreLocalChangedPathsOverDeletedAncestors,
 } = __syncInternals;
 
 test('deleted session ids include local tombstones', () => {
@@ -44,4 +46,45 @@ test('session index is pruned by tombstoned session ids', () => {
     pruneDeletedRecords('session.json', sessions, new Set(['s2']), new Set()),
     [{ id: 's1', title: 'Keep' }]
   );
+});
+
+test('restored file paths include deleted directory ancestors', () => {
+  assert.deepEqual(
+    restoredPathCandidates('workspace/agent-a/skills/demo/SKILL.md'),
+    [
+      'workspace',
+      'workspace/agent-a',
+      'workspace/agent-a/skills',
+      'workspace/agent-a/skills/demo',
+      'workspace/agent-a/skills/demo/SKILL.md',
+    ]
+  );
+});
+
+test('changed local skill files clear remote deleted parent tombstones before push', () => {
+  const stateFiles = {};
+  const manifestFiles = {
+    'workspace/agent-a/skills/demo': { deleted: true, deletedAt: '2026-01-01T00:00:00.000Z' },
+  };
+  const local = new Map([
+    ['workspace/agent-a/skills/demo/SKILL.md', { hash: 'new-skill-hash' }],
+  ]);
+
+  assert.equal(restoreLocalChangedPathsOverDeletedAncestors(stateFiles, manifestFiles, local), true);
+  assert.equal(manifestFiles['workspace/agent-a/skills/demo'], undefined);
+});
+
+test('unchanged local children do not clear remote deleted parent tombstones', () => {
+  const stateFiles = {
+    'workspace/agent-a/skills/demo/SKILL.md': { hash: 'old-skill-hash', deleted: false },
+  };
+  const manifestFiles = {
+    'workspace/agent-a/skills/demo': { deleted: true, deletedAt: '2026-01-01T00:00:00.000Z' },
+  };
+  const local = new Map([
+    ['workspace/agent-a/skills/demo/SKILL.md', { hash: 'old-skill-hash' }],
+  ]);
+
+  assert.equal(restoreLocalChangedPathsOverDeletedAncestors(stateFiles, manifestFiles, local), false);
+  assert.equal(manifestFiles['workspace/agent-a/skills/demo'].deleted, true);
 });

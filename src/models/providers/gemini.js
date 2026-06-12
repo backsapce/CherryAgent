@@ -118,10 +118,11 @@ export default {
  * Yields: { content, reasoning, toolCalls }
  * When usageMetadata is present in a chunk, yields { usage: usageMetadata }.
  */
-async function* readGeminiSSE(body) {
+export async function* readGeminiSSE(body) {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
+  let functionCallIndex = 0;
 
   try {
     while (true) {
@@ -145,26 +146,27 @@ async function* readGeminiSSE(body) {
             yield { usage: json.usageMetadata };
           }
 
-          const part = json.candidates?.[0]?.content?.parts?.[0];
-          if (!part) continue;
-
-          const isThought = part.thought === true;
-          if (isThought && part.text) {
-            yield { content: null, reasoning: part.text, toolCalls: null };
-          } else if (part.text) {
-            yield { content: part.text, reasoning: null, toolCalls: null };
-          } else if (part.functionCall) {
-            // Function call from Gemini
-            yield {
-              content: null,
-              reasoning: null,
-              toolCalls: [{
-                index: 0,
-                id: part.functionCall.name,
-                name: part.functionCall.name,
-                arguments: JSON.stringify(part.functionCall.args),
-              }],
-            };
+          const parts = json.candidates?.[0]?.content?.parts || [];
+          for (const part of parts) {
+            const isThought = part.thought === true;
+            if (isThought && part.text) {
+              yield { content: null, reasoning: part.text, toolCalls: null };
+            } else if (part.text) {
+              yield { content: part.text, reasoning: null, toolCalls: null };
+            } else if (part.functionCall) {
+              const index = functionCallIndex;
+              functionCallIndex += 1;
+              yield {
+                content: null,
+                reasoning: null,
+                toolCalls: [{
+                  index,
+                  id: `gemini-${index}-${part.functionCall.name}`,
+                  name: part.functionCall.name,
+                  arguments: JSON.stringify(part.functionCall.args || {}),
+                }],
+              };
+            }
           }
         } catch {
           // skip
