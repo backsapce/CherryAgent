@@ -2,7 +2,7 @@
   "name": "vertex-agent",
   "description": "AI agent running purely in the browser",
   "private": true,
-  "version": "0.0.13",
+  "version": "0.0.14",
   "type": "module",
   "bin": {
     "vertex-sandbox": "./bin/vertex-sandbox.js",
