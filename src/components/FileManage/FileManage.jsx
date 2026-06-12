@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { useI18n } from '../../i18n/context';
 import { loadFiles, saveFile, createFile, createDirectory, deleteFile as deleteLocalFile, getFileBlob } from '../../vfs/opfs';
 import { listFiles, createFile as createRemoteFile, deleteFile as deleteRemoteFile, uploadFile as uploadRemoteFile, downloadFile as downloadRemoteFile } from '../../models/agent';
-import { ChevronRight, ChevronDown, Folder, File, FilePlus, FolderPlus, Refresh, X, Upload, Cloud, HardDrive, Trash, Download, FileEdit, Spinner } from '../Icons/Icons';
+import { ChevronRight, ChevronDown, Folder, File, FilePlus, FolderPlus, Refresh, X, Upload, Cloud, HardDrive, Trash, Download, FileEdit, Spinner, MultiSelect } from '../Icons/Icons';
 import FileEditor from './FileEditor';
 import { joinFileManagerPath, normalizeFileManagerPath } from './pathUtils';
 import './FileManage.css';
@@ -11,6 +11,14 @@ import './FileManage.css';
 const MOBILE_BREAKPOINT = 768;
 
 const ROOT_ID = 'root';
+
+function getTreeItemPath(parentDir, name) {
+  return joinFileManagerPath(parentDir, name);
+}
+
+function getTreeItemKey(type, parentDir, name) {
+  return `${type}:${getTreeItemPath(parentDir, name)}`;
+}
 
 function triggerDownload(blob, fileName) {
   const url = URL.createObjectURL(blob);
@@ -47,7 +55,10 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange }) => 
   const [isResizing, setIsResizing] = useState(false);
   const [error, setError] = useState(null);
   const [selectedPath, setSelectedPath] = useState(null);
-  const [selectedName, setSelectedName] = useState(null);
+  const [selectedItemKey, setSelectedItemKey] = useState(null);
+  const [multiSelectMode, setMultiSelectMode] = useState(false);
+  const [multiSelectedItems, setMultiSelectedItems] = useState(new Map());
+  const [deletingSelected, setDeletingSelected] = useState(false);
   const fileInputRef = useRef(null);
   const dropZoneRef = useRef(null);
   const [editorOpen, setEditorOpen] = useState(false);
@@ -59,9 +70,9 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange }) => 
       list: () => loadFiles(),
       createFile: (name, path) => createFile(name, path),
       createDir: (name, path) => createDirectory(name, path),
-      delete: (name, path, isDir) => deleteLocalFile(name, path ?? null, isDir),
-      download: (name, path) => getFileBlob(name, path ?? null),
-      upload: (name, blob, path) => saveFile(name, blob, path ?? null),
+      delete: (name, path, isDir) => deleteLocalFile(name, path || null, isDir),
+      download: (name, path) => getFileBlob(name, path || null),
+      upload: (name, blob, path) => saveFile(name, blob, path || null),
     } : {
       list: () => listFiles(''),
       createFile: (name, path) => createRemoteFile(joinFileManagerPath(path, name), '', false),
@@ -155,6 +166,12 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange }) => 
 
   // Keep ref in sync with state
   useEffect(() => { expandedDirsRef.current = expandedDirs; }, [expandedDirs]);
+
+  useEffect(() => {
+    setSelectedPath(null);
+    setSelectedItemKey(null);
+    setMultiSelectedItems(new Map());
+  }, [fileSource]);
 
   // Upload files (local or remote via adapter)
   const handleFileUpload = useCallback(async (files, targetPath) => {
@@ -301,14 +318,71 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange }) => 
   const handleEditorSave = useCallback(() => refreshTree(), [refreshTree]);
 
   const handleSelectItem = useCallback((path, name, type) => {
+    const normalized = getTreeItemPath(path, name);
+    if (type === 'directory' && !normalized && name === '/') {
+      setSelectedPath(null);
+      setSelectedItemKey(null);
+      return;
+    }
+
     if (type === 'directory') {
-      const normalized = joinFileManagerPath(path, name);
       setSelectedPath(normalized || null);
     } else {
       setSelectedPath(null);
     }
-    setSelectedName(name);
+    setSelectedItemKey(`${type}:${normalized}`);
   }, []);
+
+  const handleToggleMultiSelectMode = useCallback(() => {
+    setMultiSelectMode((enabled) => !enabled);
+    setMultiSelectedItems(new Map());
+    setSelectedPath(null);
+    setSelectedItemKey(null);
+  }, []);
+
+  const toggleMultiSelectedItem = useCallback((item) => {
+    if (!item.path) return;
+    setMultiSelectedItems((prev) => {
+      const next = new Map(prev);
+      if (next.has(item.key)) next.delete(item.key);
+      else next.set(item.key, item);
+      return next;
+    });
+  }, []);
+
+  const handleDeleteSelected = useCallback(async () => {
+    const items = Array.from(multiSelectedItems.values());
+    if (items.length === 0) return;
+
+    const confirmMsg = t('filemanage.confirmDeleteSelected').replace('{count}', items.length);
+    if (!window.confirm(confirmMsg)) return;
+
+    setDeletingSelected(true);
+    let failCount = 0;
+    const itemsDeepestFirst = [...items].sort((a, b) => b.path.split('/').length - a.path.split('/').length);
+
+    try {
+      for (const item of itemsDeepestFirst) {
+        try {
+          await fileOps.delete(item.name, item.parentDir, item.type === 'directory');
+        } catch (err) {
+          console.warn(`Failed to delete ${item.path}:`, err);
+          failCount++;
+        }
+      }
+
+      setMultiSelectedItems(new Map());
+      setSelectedPath(null);
+      setSelectedItemKey(null);
+      await refreshTree();
+
+      if (failCount > 0) {
+        alert(t('filemanage.deleteSelectedPartialError').replace('{count}', failCount));
+      }
+    } finally {
+      setDeletingSelected(false);
+    }
+  }, [fileOps, multiSelectedItems, refreshTree, t]);
 
   const formatFileSize = (bytes) => {
     if (bytes === 0) return '0 B';
@@ -323,27 +397,50 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange }) => 
       const isExpanded = expandedDirs.has(node.id);
       const nodeParentDir = normalizeFileManagerPath(parentDir || node.parentDir || '');
       const dirPath = node.id === ROOT_ID ? '' : joinFileManagerPath(nodeParentDir, node.name);
-      const isSelected = selectedPath === dirPath && selectedName === node.name;
+      const itemKey = getTreeItemKey('directory', nodeParentDir, node.name);
+      const isSelected = selectedItemKey === itemKey;
+      const isMultiSelectable = multiSelectMode && node.id !== ROOT_ID;
+      const isMultiSelected = isMultiSelectable && multiSelectedItems.has(itemKey);
+      const selectableItem = {
+        key: itemKey,
+        name: node.name,
+        parentDir: nodeParentDir,
+        path: dirPath,
+        type: 'directory',
+      };
 
       return (
-        <div key={node.id} className={`tree-node directory-node ${isSelected ? 'selected' : ''}`} style={{ paddingLeft: depth * 8 }}>
+        <div key={node.id} className={`tree-node directory-node ${isSelected ? 'selected' : ''} ${isMultiSelectable ? 'multi-selectable' : ''} ${isMultiSelected ? 'multi-selected' : ''}`} style={{ paddingLeft: depth * 8 }}>
           <div
             className="tree-item"
             onClick={(e) => {
               e.stopPropagation();
+              if (isMultiSelectable) {
+                toggleMultiSelectedItem(selectableItem);
+                return;
+              }
               handleSelectItem(nodeParentDir, node.name, 'directory');
               toggleDirectory(node.id, node.name, nodeParentDir);
             }}
             onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); handleSelectItem(nodeParentDir, node.name, 'directory'); }}
           >
-            {isExpanded ? <ChevronDown className="tree-chevron" width={12} height={12} /> : <ChevronRight className="tree-chevron" width={12} height={12} />}
+            <button
+              className="tree-chevron-btn"
+              onClick={(e) => {
+                e.stopPropagation();
+                toggleDirectory(node.id, node.name, nodeParentDir);
+              }}
+              title={isExpanded ? t('filemanage.collapse') : t('filemanage.expand')}
+            >
+              {isExpanded ? <ChevronDown className="tree-chevron" width={12} height={12} /> : <ChevronRight className="tree-chevron" width={12} height={12} />}
+            </button>
             <Folder className="tree-icon folder-icon" width={18} height={18} />
             {loadingDirs.has(node.id) && <Spinner className="tree-icon tree-spinner" width={18} height={18} />}
             <span className="tree-label">{node.name}</span>
             {isExpanded && node.children?.length > 0 && <span className="tree-count">({node.children.length})</span>}
-            {isSelected && <span className="tree-selected-badge">✓</span>}
+            {(isSelected || isMultiSelected) && <span className="tree-selected-badge">✓</span>}
             {node.id !== 'root' && (
-              <div className="file-actions">
+              <div className={`file-actions ${multiSelectMode ? 'multi-hidden' : ''}`} aria-hidden={multiSelectMode}>
                 <button className="file-action-btn delete-btn" onClick={(e) => { e.stopPropagation(); handleDeleteFile(node.name, nodeParentDir, true); }} title={t('filemanage.delete')}><Trash width={16} height={16} /></button>
               </div>
             )}
@@ -358,16 +455,40 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange }) => 
     } else {
       const nodeParentDir = normalizeFileManagerPath(parentDir || node.parentDir || '');
       const filePath = joinFileManagerPath(nodeParentDir, node.name);
-      const isSelected = selectedPath === filePath && selectedName === node.name;
+      const itemKey = getTreeItemKey('file', nodeParentDir, node.name);
+      const isSelected = selectedItemKey === itemKey;
+      const isMultiSelected = multiSelectMode && multiSelectedItems.has(itemKey);
+      const selectableItem = {
+        key: itemKey,
+        name: node.name,
+        parentDir: nodeParentDir,
+        path: filePath,
+        type: 'file',
+      };
       return (
-        <div key={node.id} className={`tree-node file-node ${isSelected ? 'selected' : ''}`} style={{ paddingLeft: depth * 8 }}>
-          <div className="tree-item file-item" onClick={(e) => { e.stopPropagation(); handleSelectItem(nodeParentDir, node.name, 'file'); }} onDoubleClick={(e) => { e.stopPropagation(); handleEditFile(node.name, nodeParentDir); }} onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); handleSelectItem(nodeParentDir, node.name, 'file'); }}>
+        <div key={node.id} className={`tree-node file-node ${isSelected ? 'selected' : ''} ${multiSelectMode ? 'multi-selectable' : ''} ${isMultiSelected ? 'multi-selected' : ''}`} style={{ paddingLeft: depth * 8 }}>
+          <div
+            className="tree-item file-item"
+            onClick={(e) => {
+              e.stopPropagation();
+              if (multiSelectMode) {
+                toggleMultiSelectedItem(selectableItem);
+                return;
+              }
+              handleSelectItem(nodeParentDir, node.name, 'file');
+            }}
+            onDoubleClick={(e) => {
+              e.stopPropagation();
+              if (!multiSelectMode) handleEditFile(node.name, nodeParentDir);
+            }}
+            onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); handleSelectItem(nodeParentDir, node.name, 'file'); }}
+          >
             <span className="tree-icon-spacer" />
             <File className="tree-icon file-icon" width={18} height={18} />
             <span className="tree-label">{node.name}</span>
             {node.size && <span className="tree-size">{formatFileSize(node.size)}</span>}
-            {isSelected && <span className="tree-selected-badge">✓</span>}
-            <div className="file-actions">
+            {(isSelected || isMultiSelected) && <span className="tree-selected-badge">✓</span>}
+            <div className={`file-actions ${multiSelectMode ? 'multi-hidden' : ''}`} aria-hidden={multiSelectMode}>
               <button className="file-action-btn" onClick={(e) => { e.stopPropagation(); handleEditFile(node.name, nodeParentDir); }} title={t('filemanage.edit')}><FileEdit width={16} height={16} /></button>
               <button className="file-action-btn" onClick={(e) => { e.stopPropagation(); handleDownloadFile(node.name, nodeParentDir); }} title={t('filemanage.download')}><Download width={16} height={16} /></button>
               <button className="file-action-btn delete-btn" onClick={(e) => { e.stopPropagation(); handleDeleteFile(node.name, nodeParentDir, false); }} title={t('filemanage.delete')}><Trash width={16} height={16} /></button>
@@ -386,7 +507,7 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange }) => 
       {isMobile && (
         <div className="filemanage-backdrop show" onClick={onClose} />
       )}
-      <div ref={panelRef} className={`filemanage-panel ${show ? 'show' : ''}`} style={{ '--panel-width': `${width}px` }}>
+      <div ref={panelRef} className={`filemanage-panel ${show ? 'show' : ''} ${multiSelectMode ? 'multi-select-mode' : ''}`} style={{ '--panel-width': `${width}px` }}>
       <div className="filemanage-header">
         <div className="filemanage-header-left">
           <div className="filemanage-source-selector">
@@ -397,6 +518,7 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange }) => 
         <div className="filemanage-header-buttons">
           <button className="filemanage-header-btn" onClick={handleNewFile} title={t('filemanage.newFile')}><FilePlus width={18} height={18} /></button>
           <button className="filemanage-header-btn" onClick={handleNewDir} title={t('filemanage.newDir')}><FolderPlus width={18} height={18} /></button>
+          <button className={`filemanage-header-btn ${multiSelectMode ? 'active' : ''}`} onClick={handleToggleMultiSelectMode} title={t('filemanage.multiSelect')}><MultiSelect width={18} height={18} /></button>
           <button className="filemanage-header-btn" onClick={refreshTree} title={t('filemanage.refresh')}><Refresh width={18} height={18} /></button>
           <button className="filemanage-close-btn" onClick={onClose}><X width={18} height={18} /></button>
         </div>
@@ -417,12 +539,24 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange }) => 
 
         <div className="filemanage-upload-zone">
           <input ref={fileInputRef} type="file" multiple style={{ display: 'none' }} onChange={handleFileInputChange} />
+          {multiSelectMode && (
+            <div className="filemanage-batch-actions">
+              <button
+                className="filemanage-batch-delete-btn"
+                onClick={handleDeleteSelected}
+                disabled={multiSelectedItems.size === 0 || deletingSelected}
+                title={t('filemanage.deleteSelected')}
+              >
+                <Trash width={18} height={18} />
+                {deletingSelected ? t('filemanage.deleting') : t('filemanage.delete')}
+              </button>
+            </div>
+          )}
           <button className="filemanage-upload-btn" onClick={() => fileInputRef.current?.click()} disabled={uploading}>
             <Upload width={20} height={20} />
             {uploading ? t('filemanage.uploading') : t('filemanage.upload')}
           </button>
           <span className="filemanage-drop-hint">{t('filemanage.dropHint')}</span>
-          {selectedName && <span className="filemanage-selected-hint">{t('filemanage.selectedHint').replace('{name}', selectedName)}</span>}
         </div>
       </div>
 

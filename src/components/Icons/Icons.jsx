@@ -130,6 +130,15 @@ export const Trash = ({ width = 18, height = 18, className = '' }) => (
   </IconBase>
 );
 
+export const MultiSelect = ({ width = 18, height = 18, className = '' }) => (
+  <IconBase width={width} height={height} viewBox="0 0 24 24" className={className}>
+    <rect x="3" y="3" width="7" height="7" rx="1.5" />
+    <rect x="14" y="3" width="7" height="7" rx="1.5" />
+    <rect x="3" y="14" width="7" height="7" rx="1.5" />
+    <path d="M15 17.5l2 2 4-5" />
+  </IconBase>
+);
+
 // Settings & Configuration Icons
 export const Settings = ({ width = 18, height = 18, className = '' }) => (
   <IconBase width={width} height={height} viewBox="0 0 24 24" className={className}>

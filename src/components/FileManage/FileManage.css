@@ -151,6 +151,12 @@
   border-color: var(--color-border-subtle, #ddd);
 }
 
+.filemanage-header-btn.active {
+  background-color: color-mix(in srgb, var(--color-primary, #007bff) 12%, transparent);
+  border-color: color-mix(in srgb, var(--color-primary, #007bff) 38%, transparent);
+  color: var(--color-primary, #007bff);
+}
+
 .filemanage-header-btn svg {
   display: block;
 }
@@ -232,10 +238,28 @@
   background-color: var(--color-surface-alt, #f0f0f0);
 }
 
-.tree-chevron {
+.tree-chevron-btn {
   flex-shrink: 0;
+  width: 16px;
+  height: 18px;
   margin-right: 4px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   color: var(--text-secondary, #666);
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.tree-chevron-btn:hover {
+  background-color: color-mix(in srgb, var(--color-text-secondary, #666) 10%, transparent);
+}
+
+.tree-chevron {
+  display: block;
 }
 
 .tree-icon {
@@ -299,6 +323,19 @@
   box-shadow: inset 3px 0 0 var(--color-accent-strong, var(--color-primary));
 }
 
+.tree-node.multi-selectable > .tree-item {
+  cursor: pointer;
+}
+
+.tree-node.multi-selected > .tree-item {
+  background-color: color-mix(in srgb, var(--color-primary, #007bff) 14%, transparent);
+  box-shadow: inset 3px 0 0 var(--color-primary, #007bff);
+}
+
+.tree-node.multi-selected > .tree-item .tree-label {
+  color: var(--color-text-heading, #222);
+}
+
 .tree-selected-badge {
   margin-left: 6px;
   font-size: 12px;
@@ -323,6 +360,12 @@
   gap: 4px;
   opacity: 0;
   transition: opacity 0.15s ease;
+}
+
+.file-actions.multi-hidden {
+  opacity: 0 !important;
+  pointer-events: none;
+  visibility: hidden;
 }
 
 .file-item:hover .file-actions,
@@ -378,6 +421,36 @@
   flex-direction: column;
   align-items: center;
   gap: 8px;
+}
+
+.filemanage-batch-actions {
+  display: flex;
+  justify-content: center;
+  width: 100%;
+}
+
+.filemanage-batch-delete-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 14px;
+  background-color: color-mix(in srgb, var(--color-error, #d32f2f) 10%, transparent);
+  color: var(--color-error, #d32f2f);
+  border: 1px solid color-mix(in srgb, var(--color-error, #d32f2f) 28%, transparent);
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: all 0.15s ease;
+}
+
+.filemanage-batch-delete-btn:hover:not(:disabled) {
+  background-color: color-mix(in srgb, var(--color-error, #d32f2f) 16%, transparent);
+  border-color: color-mix(in srgb, var(--color-error, #d32f2f) 44%, transparent);
+}
+
+.filemanage-batch-delete-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 /* Upload Target Display */
@@ -508,6 +581,12 @@
   color: var(--color-text, #e0e0e0);
 }
 
+[data-theme="dark"] .filemanage-header-btn.active {
+  background-color: color-mix(in srgb, var(--color-primary, #7c7cff) 18%, transparent);
+  border-color: color-mix(in srgb, var(--color-primary, #7c7cff) 40%, transparent);
+  color: var(--color-primary, #7c7cff);
+}
+
 [data-theme="dark"] .filemanage-close-btn {
   color: var(--text-secondary, #aaa);
 }
@@ -523,6 +602,14 @@
 
 [data-theme="dark"] .tree-node.selected > .tree-item {
   background-color: var(--color-accent, #333);
+}
+
+[data-theme="dark"] .tree-node.multi-selected > .tree-item {
+  background-color: color-mix(in srgb, var(--color-primary, #7c7cff) 20%, transparent);
+}
+
+[data-theme="dark"] .tree-node.multi-selected > .tree-item .tree-label {
+  color: var(--color-text, #f2f2ff);
 }
 
 [data-theme="dark"] .tree-label {
