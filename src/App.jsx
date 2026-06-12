@@ -84,16 +84,25 @@ function mergeStoredSessions(savedSessions, currentSessions) {
   };
 }
 
-const AGENT_SYSTEM_PROMPT = `You are a helpful assistant with access to tools for executing commands, reading/writing files, managing the filesystem, and delegating focused tasks to sub-agents. Use these tools to help the user accomplish their tasks.
+const AGENT_SYSTEM_PROMPT = `You have access to commands, browser-workspace files, sandbox-runtime files, memory, skills, and focused sub-agent delegation.
 
-Rules:
-- Always explain what you're doing before and after using tools.
-- Spawn a sub-agent only for a bounded task that can be handled independently.
-- Use workspace-relative file paths only; do not use absolute host paths.
-- Be careful with destructive operations — confirm with the user first.
-- If a tool fails, explain the error and suggest alternatives.`;
+Filesystem model:
+- VertexAgent state lives in browser OPFS, but browser file tools do NOT expose the OPFS root.
+- Browser file tools can read/write only the active agent's own persistent files area: workspace/<active-agent>/files/.
+- Browser file tools cannot access other agents, OPFS root files, AGENTS.md, memory files, or skill files by path. Use the provided identity, memory, and skill tools for those systems.
+- The sandbox filesystem is only the runtime workdir for execute_command. It is separate from browser OPFS and does not automatically contain AGENTS.md, memory, skills, or browser workspace files.
+- Use browser file tools only for persistent files in the active agent's files area: list_browser_files, read_browser_file, read_browser_image, write_browser_file.
+- Use sandbox file tools only for files created or needed inside the command runtime: list_sandbox_files, read_sandbox_file, read_sandbox_image, write_sandbox_file.
+- If data must move between the active agent files area and sandbox runtime, explicitly read from one side and write to the other side.
 
-const FILE_CONTEXT_MARKER = 'Selected local files from the active agent workspace:';
+Work rules:
+- Inspect the correct filesystem before editing when current state matters.
+- Do not answer with a promise like "I will inspect/read/create/run". If the next step needs a tool, call the tool in the same response.
+- Be careful with destructive actions and ask before irreversible operations.
+- Use sub-agents only for bounded independent work.
+- When tools fail, use the error output to choose the next useful step.`;
+
+const FILE_CONTEXT_MARKER = 'Selected browser files from workspace/<active-agent>/files/:';
 
 function contextFilePromptPath(file) {
   if (file?.relativePath) return file.relativePath;

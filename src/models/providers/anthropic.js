@@ -43,7 +43,14 @@ export default {
     const apiMessages = [];
     for (const msg of messages) {
       if (msg.role === 'system') {
-        system = msg.content;
+        system = system ? `${system}\n\n${msg.content}` : msg.content;
+      } else if (msg.role === 'tool') {
+        appendAnthropicToolResult(apiMessages, msg);
+      } else if (msg.tool_calls?.length) {
+        apiMessages.push({
+          role: 'assistant',
+          content: formatAnthropicToolUse(msg),
+        });
       } else if (msg.images?.length) {
         const parts = msg.images.map((img) => {
           const [header, data] = img.dataUrl.split(',');
@@ -51,9 +58,12 @@ export default {
           return { type: 'image', source: { type: 'base64', media_type: mediaType, data } };
         });
         if (msg.content) parts.push({ type: 'text', text: msg.content });
-        apiMessages.push({ role: msg.role, content: parts });
+        apiMessages.push({ role: msg.role === 'assistant' ? 'assistant' : 'user', content: parts });
       } else {
-        apiMessages.push({ role: msg.role, content: msg.content });
+        apiMessages.push({
+          role: msg.role === 'assistant' ? 'assistant' : 'user',
+          content: msg.content || '',
+        });
       }
     }
 
@@ -96,6 +106,46 @@ export default {
     yield* readAnthropicSSE(res.body);
   },
 };
+
+function formatAnthropicToolUse(msg) {
+  const blocks = [];
+  if (msg.content) blocks.push({ type: 'text', text: msg.content });
+  for (const tc of msg.tool_calls) {
+    blocks.push({
+      type: 'tool_use',
+      id: tc.id,
+      name: tc.name,
+      input: safeParseToolArgs(tc.arguments),
+    });
+  }
+  return blocks.length ? blocks : [{ type: 'text', text: '' }];
+}
+
+function appendAnthropicToolResult(apiMessages, msg) {
+  const block = {
+    type: 'tool_result',
+    tool_use_id: msg.tool_call_id,
+    content: msg.content || '',
+  };
+  const last = apiMessages[apiMessages.length - 1];
+  if (
+    last?.role === 'user'
+    && Array.isArray(last.content)
+    && last.content.every((part) => part.type === 'tool_result')
+  ) {
+    last.content.push(block);
+    return;
+  }
+  apiMessages.push({ role: 'user', content: [block] });
+}
+
+function safeParseToolArgs(args) {
+  try {
+    return args ? JSON.parse(args) : {};
+  } catch {
+    return {};
+  }
+}
 
 /**
  * Parse Anthropic SSE stream.

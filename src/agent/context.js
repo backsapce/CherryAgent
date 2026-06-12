@@ -1,253 +1,339 @@
 /**
- * Context Assembly — sliding window + summary for conversation context.
+ * Context assembly for the agent loop.
  *
- * Inspired by Hermes Agent's ContextCompressor.
- *
- * Strategy:
- * - Head protection: always keep system prompt + first 2 user/assistant exchanges
- * - Sliding window: keep the most recent N messages (default ~20)
- * - Summary injection: if messages were dropped between head and tail,
- *   call llm.completeSession() to generate a summary, inject before tail
- *
- * Usage:
- *   import { buildContext } from './agent/context';
- *   const { messages, systemPrompt } = await buildContext({
- *     messages: sessionMessages,
- *     systemPrompt: baseSystemPrompt,
- *     memorySnapshot: { memory, user },
- *     skillsList: '...',
- *   });
+ * The packer keeps a small stable head, a compact summary of the older middle,
+ * and the freshest tail that fits the model budget. Unlike the previous
+ * sliding window, the summary is actually generated and tracked by message
+ * index so the same turns are not summarized repeatedly.
  */
 
 import llm from '../models/llm';
+import { buildMemorySection } from './memory.js';
 
-// ─── Configuration ───────────────────────────────────────────────────────────
+const CONTEXT_WINDOW_FALLBACK = 128_000;
+const PACKING_THRESHOLD_RATIO = 0.72;
+const HEAD_PROTECT = 4;
+const MIN_TAIL_KEEP = 8;
+const PREFERRED_TAIL_KEEP = 36;
+const RESPONSE_RESERVE_RATIO = 0.14;
+const MIN_RESPONSE_RESERVE = 4096;
+const MAX_RESPONSE_RESERVE = 24_000;
+const TOKENS_PER_CHAR = 4;
+const MAX_SUMMARY_SOURCE_CHARS = 80_000;
 
-const CONTEXT_WINDOW_FALLBACK = 128_000; // fallback if model unknown
-const COMPRESSION_THRESHOLD_RATIO = 0.5; // compress when over 50% of window
-const HEAD_PROTECT = 4; // protect first 4 messages (system + first 2 exchanges)
-const TAIL_KEEP = 20; // keep last 20 messages in the tail
-const TOKENS_PER_CHAR = 4; // rough char-to-token ratio
+const AGENT_RUNTIME_PROMPT = `You are VertexAgent, an autonomous coding and browser-work agent.
+
+Filesystem model:
+- Browser OPFS is the durable VertexAgent storage backend, but browser file tools do NOT expose the OPFS root.
+- Browser file tools can read/write only the active agent's own files area: workspace/<active-agent>/files/.
+- Browser file tools cannot access other agents, OPFS root files, AGENTS.md, memory files, or skill files by path. Use the injected agent identity plus the memory and skill tools for those systems.
+- The sandbox filesystem is a separate runtime workdir for execute_command. It is useful for running commands, builds, tests, and temporary generated files.
+- Active agent files and sandbox workdir files do not automatically sync. Choose browser file tools for workspace/<active-agent>/files/, sandbox file tools for command-runtime files, and explicitly copy content between them when needed.
+- Never infer that a path seen in the sandbox exists in the active agent files area, or that an active agent file path exists in the sandbox.
+
+Operating rules:
+- Work from evidence. Inspect files, command output, tool results, and provided context before making risky changes.
+- Keep going until the user's request is genuinely handled or a real blocker requires user input.
+- Do not answer with a promise like "I will inspect/read/create/run". If the next step needs a tool, call the tool in the same response.
+- Prefer small, reversible edits and clear verification. Do not hide failures; use them to choose the next step.
+- Use memory only for durable facts, preferences, and project conventions that are likely to matter in future sessions.
+- Use skills as just-in-time procedures: list/search when needed, read the relevant skill before relying on it, and avoid loading unrelated references.
+- Treat tool output as authoritative over assumptions. If context is summarized, rely on the live tail for the latest state.`;
 
 /**
- * Build the API messages and system prompt with context management.
- *
- * @param {Object} opts
- * @param {Array} opts.messages - Full conversation history
- * @param {string} opts.systemPrompt - Base system prompt (core instructions)
- * @param {{ memory: string|null, user: string|null }} [opts.memorySnapshot]
- * @param {string} [opts.skillsList] - Pre-built skills section
- * @param {string} [opts.agentIdentity] - AGENTS.md content for agent identity
- * @param {number} [opts.contextWindow] - Model context window size
- * @param {boolean} [opts.forceCompress] - Force compression regardless of token count
- * @returns {Promise<{ messages: Array, systemPrompt: string, compressed: boolean }>}
+ * Backward-compatible helper. Returns packed messages and system prompt.
  */
 export async function buildContext(opts) {
+  const result = await assembleApiMessages(opts);
+  return {
+    messages: result.apiMessages,
+    systemPrompt: result.systemPrompt,
+    compressed: result.compressed,
+    summaryState: result.summaryState,
+  };
+}
+
+/**
+ * Build provider-safe messages plus the full system prompt.
+ *
+ * @param {Object} opts
+ * @param {Array} opts.messages
+ * @param {string} opts.systemPrompt
+ * @param {{ memory: string|null, user: string|null }} [opts.memorySnapshot]
+ * @param {string} [opts.skillsList]
+ * @param {string} [opts.agentIdentity]
+ * @param {number} [opts.contextWindow]
+ * @param {{ content?: string, coveredUntil?: number }} [opts.summaryState]
+ * @param {string} [opts.summary] Legacy summary text.
+ * @param {string} [opts.llmProfileId]
+ * @param {AbortSignal} [opts.signal]
+ * @param {boolean} [opts.autoSummarize=true]
+ * @returns {Promise<{ apiMessages: Array, systemPrompt: string, compressed: boolean, summaryState: Object, estimatedTokens: number }>}
+ */
+export async function assembleApiMessages(opts) {
   const {
-    messages,
+    messages = [],
     systemPrompt = '',
     memorySnapshot,
     skillsList = '',
     agentIdentity = null,
     contextWindow = CONTEXT_WINDOW_FALLBACK,
-    forceCompress = false,
+    llmProfileId,
+    signal,
+    autoSummarize = true,
   } = opts;
 
-  // Build full system prompt
-  let fullSystemPrompt = systemPrompt;
-  if (agentIdentity) fullSystemPrompt += '\n\n' + buildAgentIdentitySection(agentIdentity);
-  if (memorySnapshot) {
-    const memorySection = buildMemorySection(memorySnapshot);
-    if (memorySection) fullSystemPrompt += '\n\n' + memorySection;
+  const fullSystemPrompt = buildSystemPrompt({
+    systemPrompt,
+    memorySnapshot,
+    skillsList,
+    agentIdentity,
+  });
+  let summaryState = normalizeSummaryState(opts.summaryState, opts.summary);
+  let packed = packMessages(messages, fullSystemPrompt, contextWindow, summaryState);
+
+  let summaryPasses = 0;
+  while (autoSummarize && packed.needsSummary && summaryPasses < 3) {
+    summaryPasses += 1;
+    const start = Math.max(packed.summaryStart, summaryState.coveredUntil || packed.summaryStart);
+    const end = packed.summaryEnd;
+    const newMessages = messages.slice(start, end);
+    if (newMessages.length === 0) break;
+    const summary = await summarizeMiddle(newMessages, summaryState.content, {
+      llmProfileId,
+      signal,
+    });
+    summaryState = {
+      content: summary,
+      coveredUntil: end,
+    };
+    packed = packMessages(messages, fullSystemPrompt, contextWindow, summaryState);
   }
-  if (skillsList) fullSystemPrompt += skillsList;
 
-  // Estimate token usage
-  const estimatedTokens = estimateTokens(messages, fullSystemPrompt);
-  const threshold = Math.floor(contextWindow * COMPRESSION_THRESHOLD_RATIO);
-
-  if (!forceCompress && estimatedTokens < threshold) {
-    // No compression needed — just pass through
-    return { messages, systemPrompt: fullSystemPrompt, compressed: false };
-  }
-
-  // Compress: head + summary + tail
-  const result = compress(messages, fullSystemPrompt);
   return {
-    messages: result.messages,
-    systemPrompt: result.systemPrompt,
-    compressed: true,
+    apiMessages: packed.apiMessages,
+    systemPrompt: fullSystemPrompt,
+    compressed: packed.compressed,
+    summaryState,
+    estimatedTokens: packed.estimatedTokens,
   };
 }
 
 /**
- * Compress messages using sliding window + summary.
- */
-function compress(messages, systemPrompt) {
-  if (messages.length <= HEAD_PROTECT + TAIL_KEEP) {
-    return { messages, systemPrompt, compressed: false };
-  }
-
-  // Head: first HEAD_PROTECT messages
-  const head = messages.slice(0, HEAD_PROTECT);
-  // Tail: last TAIL_KEEP messages
-  const tail = messages.slice(-TAIL_KEEP);
-  // Middle: everything between head and tail
-  const middle = messages.slice(HEAD_PROTECT, -TAIL_KEEP);
-
-  // Mark the middle for summary
-  const compressedMessages = [...head, ...tail];
-
-  // Annotate the system prompt with a note about compression
-  const compressionNote =
-    '\n\n[Context note: Earlier conversation turns have been summarized. ' +
-    `The following ${middle.length} turns were compressed to manage context.]`;
-
-  return {
-    messages: compressedMessages,
-    systemPrompt: systemPrompt + compressionNote,
-    compressed: true,
-    middle,
-  };
-}
-
-/**
- * Generate a summary of dropped messages and inject it into the conversation.
- * This should be called after compress() to fill in the middle summary.
+ * Summarize dropped messages and merge into an existing running summary.
  *
- * @param {Array} middleMessages - Messages to summarize
- * @param {string} existingSummary - Previous summary (for update mode)
+ * @param {Array} middleMessages
+ * @param {string} existingSummary
+ * @param {{ llmProfileId?: string, signal?: AbortSignal }} [opts]
  * @returns {Promise<string>}
  */
-export async function summarizeMiddle(middleMessages, existingSummary) {
-  if (middleMessages.length === 0) return '';
+export async function summarizeMiddle(middleMessages, existingSummary = '', opts = {}) {
+  if (!middleMessages?.length) return existingSummary || '';
 
+  const formatted = truncateText(formatMessages(middleMessages), MAX_SUMMARY_SOURCE_CHARS);
   const prompt = existingSummary
-    ? `You previously summarized this conversation:\n${existingSummary}\n\n` +
-      `UPDATE this summary with the following additional turns. ` +
-      `Focus on: active tasks, key decisions, resolved items, pending user asks. ` +
-      `Keep it concise.\n\nNew turns:\n${formatMessages(middleMessages)}`
-    : `Summarize the following conversation turns in a concise format. ` +
-      `Include: active task, completed actions, key decisions, pending items. ` +
-      `Keep it to 1-2 short paragraphs.\n\n` +
-      formatMessages(middleMessages);
+    ? [
+      'Update the running conversation summary for an autonomous agent.',
+      'Preserve only durable state: user requests, completed work, files touched, tool findings, decisions, blockers, and remaining TODOs.',
+      'Do not include generic chit-chat. Keep it concise but specific enough to resume work.',
+      '',
+      '<existing_summary>',
+      existingSummary,
+      '</existing_summary>',
+      '',
+      '<new_turns>',
+      formatted,
+      '</new_turns>',
+    ].join('\n')
+    : [
+      'Summarize these earlier conversation turns for an autonomous agent.',
+      'Include: the active task, completed actions, important files/commands/results, decisions, blockers, and pending work.',
+      'Keep it concise, factual, and ordered from oldest to newest where useful.',
+      '',
+      '<turns>',
+      formatted,
+      '</turns>',
+    ].join('\n');
 
   try {
     const summary = await llm.completeSession(
       [{ role: 'user', content: prompt }],
-      { maxTokens: 300 }
+      {
+        llmProfileId: opts.llmProfileId,
+        signal: opts.signal,
+        maxTokens: 700,
+      }
     );
     return summary.trim();
   } catch (err) {
-    console.warn('Context summar failed:', err.message);
-    return `[${middleMessages.length} turns summarized: see earlier conversation for details]`;
+    if (err.name === 'AbortError') throw err;
+    console.warn('Context summary failed:', err.message);
+    const fallback = `[${middleMessages.length} earlier turns were compressed; summary generation failed: ${err.message}]`;
+    return existingSummary ? `${existingSummary}\n${fallback}` : fallback;
   }
 }
 
-/**
- * Build a context-aware message list for the LLM API.
- * Combines context assembly with tool schemas and memory injection.
- *
- * @param {Object} opts
- * @param {Array} opts.messages - Full conversation history
- * @param {string} opts.systemPrompt - Base system prompt
- * @param {string} [opts.summary] - Pre-computed summary of dropped messages
- * @param {{ memory: string|null, user: string|null }} [opts.memorySnapshot]
- * @param {string} [opts.skillsList]
- * @param {string} [opts.agentIdentity] - AGENTS.md content for agent identity
- * @param {number} [opts.contextWindow]
- * @returns {Promise<{ apiMessages: Array, systemPrompt: string }>}
- */
-export async function assembleApiMessages(opts) {
-  const {
-    messages,
-    systemPrompt,
-    summary,
-    memorySnapshot,
-    skillsList,
-    agentIdentity = null,
-    contextWindow,
-  } = opts;
+// ─── Packing ────────────────────────────────────────────────────────────────
 
-  // Build full system prompt
-  let fullSystemPrompt = systemPrompt;
-  if (agentIdentity) fullSystemPrompt += '\n\n' + buildAgentIdentitySection(agentIdentity);
-  if (memorySnapshot) {
-    const memorySection = buildMemorySection(memorySnapshot);
-    if (memorySection) fullSystemPrompt += '\n\n' + memorySection;
-  }
-  if (skillsList) fullSystemPrompt += skillsList;
-
-  // Estimate and decide on compression
-  const estimatedTokens = estimateTokens(messages, fullSystemPrompt);
-  const threshold = Math.floor(
-    (contextWindow || CONTEXT_WINDOW_FALLBACK) * COMPRESSION_THRESHOLD_RATIO
-  );
-
-  if (estimatedTokens < threshold) {
-    return { apiMessages: [...messages], systemPrompt: fullSystemPrompt };
+function packMessages(messages, systemPrompt, contextWindow, summaryState) {
+  const estimatedTokens = estimateTokens(messages, systemPrompt);
+  const threshold = Math.floor((contextWindow || CONTEXT_WINDOW_FALLBACK) * PACKING_THRESHOLD_RATIO);
+  if (estimatedTokens <= threshold) {
+    return {
+      apiMessages: [...messages],
+      compressed: false,
+      needsSummary: false,
+      summaryStart: 0,
+      summaryEnd: 0,
+      estimatedTokens,
+    };
   }
 
-  // Compress: head + tail
   const headCount = Math.min(HEAD_PROTECT, messages.length);
   const head = messages.slice(0, headCount);
-  const tailCount = Math.min(TAIL_KEEP, messages.length - headCount);
-  const tail = messages.slice(-tailCount);
+  const summaryMessage = summaryState.content ? buildSummaryMessage(summaryState.content) : null;
+  const responseReserve = clampNumber(
+    Math.floor((contextWindow || CONTEXT_WINDOW_FALLBACK) * RESPONSE_RESERVE_RATIO),
+    MIN_RESPONSE_RESERVE,
+    MAX_RESPONSE_RESERVE
+  );
+  const targetBudget = Math.max(
+    2048,
+    threshold - responseReserve - estimateTokens(head, systemPrompt) - estimateTokens(summaryMessage ? [summaryMessage] : [], '')
+  );
 
-  let apiMessages = [...head, ...tail];
-
-  // Inject summary if available
-  if (summary) {
-    const summaryMsg = {
-      role: 'system',
-      content: `[Conversation Summary]\n${summary}`,
-    };
-    // Insert between head and tail
-    apiMessages = [...head, summaryMsg, ...tail];
+  let tailStart = chooseTailStart(messages, headCount, targetBudget);
+  if (summaryState.content && summaryState.coveredUntil > tailStart) {
+    tailStart = Math.min(messages.length, summaryState.coveredUntil);
   }
+  tailStart = Math.max(headCount, tailStart);
 
-  return { apiMessages, systemPrompt: fullSystemPrompt };
+  const tail = messages.slice(tailStart);
+  const apiMessages = [
+    ...head,
+    ...(summaryMessage ? [summaryMessage] : []),
+    ...tail,
+  ];
+  const summaryStart = headCount;
+  const summaryEnd = tailStart;
+
+  return {
+    apiMessages,
+    compressed: true,
+    needsSummary: summaryEnd > Math.max(summaryStart, summaryState.coveredUntil || 0),
+    summaryStart,
+    summaryEnd,
+    estimatedTokens: estimateTokens(apiMessages, systemPrompt),
+  };
 }
 
-// ─── Internal helpers ─────────────────────────────────────────────────────────
+function chooseTailStart(messages, headCount, tokenBudget) {
+  let tokens = 0;
+  let kept = 0;
+  let tailStart = messages.length;
 
-/** Estimate tokens from character count. */
-function estimateTokens(messages, systemPrompt) {
-  let total = systemPrompt ? systemPrompt.length : 0;
-  for (const msg of messages) {
-    if (msg.content) total += msg.content.length;
-    if (msg.thinking) total += msg.thinking.length;
-    if (msg.reasoning_content) total += msg.reasoning_content.length;
-    if (msg.tool_calls) total += JSON.stringify(msg.tool_calls).length;
-    if (msg.name) total += msg.name.length;
+  for (let index = messages.length - 1; index >= headCount; index -= 1) {
+    const messageTokens = estimateMessageTokens(messages[index]);
+    const mustKeep = kept < MIN_TAIL_KEEP;
+    const preferred = kept < PREFERRED_TAIL_KEEP;
+    if (!mustKeep && (!preferred || tokens + messageTokens > tokenBudget)) break;
+    tokens += messageTokens;
+    kept += 1;
+    tailStart = index;
   }
-  return Math.floor(total / TOKENS_PER_CHAR);
+
+  return tailStart;
 }
 
-/** Format messages as a readable string for summarization. */
-function formatMessages(messages) {
-  return messages
-    .map((m) => {
-      const role = m.role || m.tool_call_id ? 'tool' : m.role;
-      return `[${role}] ${m.content || ''}`;
-    })
-    .join('\n');
+function buildSummaryMessage(summary) {
+  return {
+    role: 'user',
+    content: [
+      '<conversation_summary>',
+      'The following is a compact summary of earlier turns. Do not answer this message directly; use it only as background context.',
+      summary,
+      '</conversation_summary>',
+    ].join('\n'),
+  };
 }
 
-/** Build the memory section for system prompt injection. */
-function buildMemorySection(snapshot) {
-  if (!snapshot) return '';
-  let out = '';
-  if (snapshot.memory) {
-    out += `<memory_notes>\n${snapshot.memory}\n</memory_notes>\n\n`;
-  }
-  if (snapshot.user) {
-    out += `<user_profile>\n${snapshot.user}\n</user_profile>\n\n`;
-  }
-  return out;
+// ─── Prompt assembly ────────────────────────────────────────────────────────
+
+function buildSystemPrompt({ systemPrompt, memorySnapshot, skillsList, agentIdentity }) {
+  const sections = [];
+  if (systemPrompt?.trim()) sections.push(systemPrompt.trim());
+  sections.push(AGENT_RUNTIME_PROMPT);
+  if (agentIdentity) sections.push(buildAgentIdentitySection(agentIdentity));
+  const memorySection = buildMemorySection(memorySnapshot);
+  if (memorySection) sections.push(memorySection);
+  if (skillsList) sections.push(skillsList.trim());
+  return sections.filter(Boolean).join('\n\n');
 }
 
-/** Build the agent identity section from AGENTS.md content. */
 function buildAgentIdentitySection(content) {
   return `<agent_identity>\n${content.trim()}\n</agent_identity>`;
+}
+
+// ─── Token estimation and formatting ────────────────────────────────────────
+
+export function estimateTokens(messages, systemPrompt = '') {
+  let total = systemPrompt ? systemPrompt.length : 0;
+  for (const msg of messages || []) {
+    total += estimateMessageChars(msg);
+  }
+  return Math.max(1, Math.floor(total / TOKENS_PER_CHAR));
+}
+
+function estimateMessageTokens(message) {
+  return Math.max(1, Math.floor(estimateMessageChars(message) / TOKENS_PER_CHAR));
+}
+
+function estimateMessageChars(message) {
+  if (!message) return 0;
+  let total = String(message.role || '').length + String(message.name || '').length;
+  if (typeof message.content === 'string') total += message.content.length;
+  else if (message.content != null) total += JSON.stringify(message.content).length;
+  if (message.thinking) total += String(message.thinking).length;
+  if (message.reasoning_content) total += String(message.reasoning_content).length;
+  if (message.tool_calls) total += JSON.stringify(message.tool_calls).length;
+  if (message.tool_call_id) total += String(message.tool_call_id).length;
+  if (message.images?.length) total += message.images.reduce((sum, img) => sum + String(img.dataUrl || '').length, 0);
+  return total;
+}
+
+function formatMessages(messages) {
+  return messages
+    .map((message, index) => {
+      const role = message.role || (message.tool_call_id ? 'tool' : 'unknown');
+      const parts = [`[${index + 1}] ${role}`];
+      if (message.name) parts.push(`name=${message.name}`);
+      if (message.tool_call_id) parts.push(`tool_call_id=${message.tool_call_id}`);
+      if (message.tool_calls?.length) {
+        parts.push(`tool_calls=${JSON.stringify(message.tool_calls)}`);
+      }
+      const content = typeof message.content === 'string'
+        ? message.content
+        : JSON.stringify(message.content || '');
+      return `${parts.join(' ')}\n${truncateText(content, 4000)}`;
+    })
+    .join('\n\n');
+}
+
+function normalizeSummaryState(summaryState, legacySummary) {
+  return {
+    content: String(summaryState?.content || legacySummary || '').trim(),
+    coveredUntil: Number.isFinite(summaryState?.coveredUntil) ? summaryState.coveredUntil : 0,
+  };
+}
+
+function truncateText(text, maxChars) {
+  const value = String(text || '');
+  if (value.length <= maxChars) return value;
+  return `${value.slice(0, maxChars)}\n[truncated ${value.length - maxChars} chars]`;
+}
+
+function clampNumber(value, min, max) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return min;
+  return Math.min(Math.max(parsed, min), max);
 }

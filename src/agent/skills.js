@@ -1,22 +1,12 @@
 /**
- * Skill System — file-based skills in OPFS with progressive disclosure.
+ * Skills are progressive instructions stored as Markdown.
  *
- * Inspired by Hermes Agent's SKILL.md pattern.
- * Each skill is a directory under OPFS `skills/` containing a SKILL.md file
- * with YAML frontmatter and optional reference files.
- *
- * Three-tier progressive disclosure:
- *   Tier 1: skills_list tool returns only name + description (in system prompt)
- *   Tier 2: skill_view loads the full SKILL.md content on demand
- *   Tier 3: skill_view can also load reference files within a skill's directory
- *
- * Usage:
- *   import { listSkills, getSkill, createSkill } from './agent/skills';
- *   const skills = await listSkills();
- *   const skill = await getSkill('research');
- *   await createSkill('research', '---\nname: research\n...\n');
+ * Tier 1: the system prompt gets a compact catalog.
+ * Tier 2: the `skill` tool reads one SKILL.md when it is relevant.
+ * Tier 3: references are read by name instead of dumping every file.
  */
 
+import yaml from 'js-yaml';
 import {
   listSkillDirs,
   readSkillFile,
@@ -24,136 +14,275 @@ import {
   deleteSkillDir,
   listSkillRefs,
   readSkillRef,
+  writeSkillRef,
   listAgentSkillDirs,
   readAgentSkillFile,
   writeAgentSkillFile,
   deleteAgentSkillDir,
+  listAgentSkillRefs,
+  readAgentSkillRef,
+  writeAgentSkillRef,
 } from '../vfs/opfs';
 import config from '../config/config';
 
-// ─── Default Skills ───────────────────────────────────────────────────────────
+const MAX_SKILL_CONTENT_CHARS = 60_000;
+const MAX_REFERENCE_CHARS = 80_000;
 
 const DEFAULT_SKILLS = [
   {
     name: 'skill-creator',
     content: `---
 name: skill-creator
-description: Guide for creating new skills. Use this when the user wants to add a new skill or asks how to create one.
-version: 1.0.0
+description: Use when creating or improving VertexAgent skills. Helps write concise trigger descriptions, progressive instructions, and optional reference files.
+version: 2.0.0
 ---
 
 # Skill Creator
 
-This skill guides you through creating a new skill for this agent system.
+Use this skill when the user asks to create, revise, or organize a skill.
 
-## What is a Skill
+## Principles
 
-A skill is a directory under the OPFS \`skills/\` folder containing a \`SKILL.md\` file with YAML frontmatter. Skills provide) are progressively disclosed to the LLM — only name and description appear in the system prompt until the LLM requests the full content.
+- A skill is a reusable procedure for a specific class of tasks.
+- The description is the trigger. Write it so the agent knows exactly when to load the skill.
+- Keep SKILL.md focused on the workflow. Put long examples, schemas, and templates in references.
+- Skills should tell the agent what to do, what to avoid, and what final output shape is expected.
 
-## Skill Structure
-
-Each skill lives in its own directory:
-
-\`\`\`
-skills/
-  my-skill/
-    SKILL.md          # Required — frontmatter + instructions
-    references/       # Optional — supplementary files
-      example.md
-      template.txt
-\`\`\`
-
-## SKILL.md Format
+## Recommended Structure
 
 \`\`\`markdown
 ---
-name: my-skill
-description: A brief description of what this skill does and when to use it.
+name: concise-skill-name
+description: Use when ...
 version: 1.0.0
 ---
 
-# My Skill
+# Concise Skill Name
 
-Detailed instructions for the LLM on how to use this skill.
-Be specific about:
-- When to activate this skill
-- What steps to follow
-- What output format to produce
-- Any constraints or edge cases
+## When To Use
+
+## Workflow
+
+## Output
+
+## Constraints
 \`\`\`
 
-### Frontmatter fields
+## Workflow
 
-- **name** (required): Unique identifier, lowercase, hyphens, no spaces.
-- **description** (required): Short summary shown in the system prompt. Write it so the LLM knows *when* to load this skill.
-- **version** (required): Semantic version string.
-
-## Creating a Skill
-
-When the user wants to create a skill, follow these steps:
-
-1. **Determine the skill name** — lowercase, hyphens allowed, e.g. \`code-reviewer\`, \`data-analyst\`.
-2. **Write the frontmatter** — name, description, version.
-3. **Write the SKILL.md body** — clear instructions for the LLM, including triggers, steps, and output format.
-4. **Optionally add reference files** — place them in \`references/\` within the skill directory.
-5. **Call the \`create_skill\` tool** with the name and full content.
-
-## Reference Files
-
-Use the \`references/\` subdirectory for:
-- Templates the LLM should fill in
-- Detailed API docs or schema definitions
-- Large configuration examples
-- Any content too verbose to include in SKILL.md itself
-
-Reference files are only loaded when the LLM explicitly views the skill. Keep SKILL.md concise.
-
-## Best Practices
-
-- **Be specific in the description** — this is the only thing the LLM sees before deciding whether to load the skill. Include trigger phrases like "when the user asks about X" or "for Y workflows".
-- **Write SKILL.md as instructions to the LLM**, not as user-facing documentation.
-- **Keep SKILL.md under ~200 lines** — move details to reference files.
-- **Test the skill** by creating it and verifying it appears in the system prompt.
+1. Choose a lowercase hyphenated name.
+2. Draft frontmatter with a trigger-oriented description.
+3. Write the shortest complete procedure.
+4. Add reference files only when details are too large or optional.
+5. Use the skill tool to upsert the SKILL.md and any references.
 `,
   },
 ];
 
-// ─── Public API ───────────────────────────────────────────────────────────────
+// ─── Public API ─────────────────────────────────────────────────────────────
 
-/**
- * Ensure all default skills exist in OPFS, creating any that are missing.
- * Safe to call multiple times — only creates missing skills.
- */
 export async function ensureDefaultSkills() {
   const existing = await listSkillDirs();
-  const existingNames = new Set(existing.map((d) => d.name));
-  for (const def of DEFAULT_SKILLS) {
-    if (!existingNames.has(def.name)) {
-      await writeSkillFile(def.name, 'SKILL.md', def.content);
+  const existingNames = new Set(existing.map((dir) => dir.name));
+  for (const skill of DEFAULT_SKILLS) {
+    if (!existingNames.has(skill.name)) {
+      await writeSkillFile(skill.name, 'SKILL.md', skill.content);
     }
   }
 }
 
 /**
- * List all available skills with their metadata.
- * @param {string} [agentId] — if provided, combines global + agent skills
- * @returns {Promise<Array<{ name: string, description: string, version: string }>>}
+ * List all skills. Agent-local skills override global skills with the same name.
+ * @param {string} [agentId]
  */
 export async function listSkills(agentId) {
   await ensureDefaultSkills();
-  const skills = await listSkillsFromGlobal();
-
+  const merged = new Map();
+  for (const skill of await listSkillsFromGlobal()) {
+    merged.set(skill.name, skill);
+  }
   if (agentId) {
-    const agentSkills = await listSkillsFromAgent(agentId);
-    // Agent skills with the same name override global skills
-    const globalNames = new Set(skills.map((s) => s.name));
-    for (const as of agentSkills) {
-      if (!globalNames.has(as.name)) {
-        skills.push(as);
+    for (const skill of await listSkillsFromAgent(agentId)) {
+      merged.set(skill.name, skill);
+    }
+  }
+  return Array.from(merged.values()).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * Search skills by query.
+ * @param {string} query
+ * @param {string} [agentId]
+ */
+export async function searchSkills(query, agentId) {
+  const terms = String(query || '').toLowerCase().split(/\s+/).filter(Boolean);
+  const skills = await listEnabledSkills(agentId);
+  if (!terms.length) return skills;
+  return skills
+    .map((skill) => ({ skill, score: scoreSkill(skill, terms) }))
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score || a.skill.name.localeCompare(b.skill.name))
+    .map((item) => item.skill);
+}
+
+/**
+ * Load a skill. References are listed by default and loaded only when requested.
+ * @param {string} name
+ * @param {string} [agentId]
+ * @param {{ includeReferences?: boolean, referenceName?: string }} [options]
+ */
+export async function getSkill(name, agentId, options = {}) {
+  const resolved = await resolveSkill(name, agentId);
+  if (!resolved) return null;
+
+  if (options.referenceName) {
+    const content = await readReference(resolved, options.referenceName);
+    if (content == null) return null;
+    return {
+      ...resolved.skill,
+      content: formatReferenceContent(resolved.skill.name, options.referenceName, content),
+      referenceName: options.referenceName,
+    };
+  }
+
+  let content = truncateText(resolved.content, MAX_SKILL_CONTENT_CHARS);
+  if (resolved.skill.references.length > 0) {
+    content += `\n\n## Available References\n${resolved.skill.references.map((ref) => `- ${ref.name}`).join('\n')}`;
+  }
+
+  if (options.includeReferences) {
+    const refs = [];
+    for (const ref of resolved.skill.references) {
+      const refContent = await readReference(resolved, ref.name);
+      if (refContent != null) refs.push({ name: ref.name, content: truncateText(refContent, MAX_REFERENCE_CHARS) });
+    }
+    if (refs.length) {
+      content += '\n\n## Reference Files\n';
+      for (const ref of refs) {
+        content += `\n### ${ref.name}\n${ref.content}\n`;
       }
     }
   }
-  return skills;
+
+  return {
+    ...resolved.skill,
+    content,
+  };
+}
+
+/**
+ * Create a skill.
+ * @param {string} name
+ * @param {string} content
+ * @param {string} [agentId]
+ */
+export async function createSkill(name, content, agentId) {
+  const sanitized = normalizeSkillName(name);
+  validateSkillContent(sanitized, content);
+  if (agentId) await writeAgentSkillFile(agentId, sanitized, 'SKILL.md', content);
+  else await writeSkillFile(sanitized, 'SKILL.md', content);
+  return sanitized;
+}
+
+/**
+ * Update a skill.
+ * @param {string} name
+ * @param {string} content
+ * @param {string} [agentId]
+ */
+export async function updateSkill(name, content, agentId) {
+  const sanitized = normalizeSkillName(name);
+  validateSkillContent(sanitized, content);
+  if (agentId) await writeAgentSkillFile(agentId, sanitized, 'SKILL.md', content);
+  else await writeSkillFile(sanitized, 'SKILL.md', content);
+  return sanitized;
+}
+
+/**
+ * Upsert one reference file for a skill.
+ * @param {string} name
+ * @param {string} referenceName
+ * @param {string} content
+ * @param {string} [agentId]
+ */
+export async function writeSkillReference(name, referenceName, content, agentId) {
+  const skillName = normalizeSkillName(name);
+  const refName = normalizeReferenceName(referenceName);
+  const safeContent = truncateText(String(content || ''), MAX_REFERENCE_CHARS);
+  if (!safeContent.trim()) throw new Error('Reference content is required.');
+  if (agentId) await writeAgentSkillRef(agentId, skillName, refName, safeContent);
+  else await writeSkillRef(skillName, refName, safeContent);
+  return refName;
+}
+
+/**
+ * Delete a skill.
+ * @param {string} name
+ * @param {string} [agentId]
+ */
+export async function deleteSkill(name, agentId) {
+  const sanitized = normalizeSkillName(name);
+  if (agentId) await deleteAgentSkillDir(agentId, sanitized);
+  else await deleteSkillDir(sanitized);
+}
+
+export async function getDisabledSkills() {
+  const disabled = config.get('skills.disabled') || [];
+  return new Set(disabled);
+}
+
+export async function setSkillEnabled(name, enabled) {
+  const disabledSet = await getDisabledSkills();
+  if (enabled) disabledSet.delete(name);
+  else disabledSet.add(name);
+  await config.set('skills.disabled', Array.from(disabledSet).sort());
+}
+
+export async function isSkillEnabled(name) {
+  return !(await getDisabledSkills()).has(name);
+}
+
+export async function listAllSkills(includeDisabled = true, agentId) {
+  const skills = await listSkills(agentId);
+  const disabledSet = await getDisabledSkills();
+  return skills
+    .filter((skill) => includeDisabled || !disabledSet.has(skill.name))
+    .map((skill) => ({
+      ...skill,
+      enabled: !disabledSet.has(skill.name),
+    }));
+}
+
+/**
+ * Build the prompt catalog for enabled skills.
+ * @param {string} [agentId]
+ */
+export async function buildSkillsSection(agentId) {
+  const skills = await listEnabledSkills(agentId);
+  if (!skills.length) return '';
+
+  const list = skills
+    .map((skill) => {
+      const refs = skill.references?.length
+        ? ` refs=[${skill.references.map((ref) => ref.name).join(', ')}]`
+        : '';
+      return `- ${skill.name}: ${skill.description}${refs}`;
+    })
+    .join('\n');
+
+  return [
+    '<skill_catalog>',
+    'Available skills are listed below. Skills are stored in browser OPFS, not in the sandbox runtime and not inside workspace/<active-agent>/files/. Use the `skill` tool with action "read" before applying detailed skill instructions.',
+    list,
+    '</skill_catalog>',
+  ].join('\n');
+}
+
+// ─── Internal loading ───────────────────────────────────────────────────────
+
+async function listEnabledSkills(agentId) {
+  const disabledSet = await getDisabledSkills();
+  return (await listSkills(agentId)).filter((skill) => !disabledSet.has(skill.name));
 }
 
 async function listSkillsFromGlobal() {
@@ -162,12 +291,15 @@ async function listSkillsFromGlobal() {
   for (const dir of dirs) {
     const content = await readSkillFile(dir.name, 'SKILL.md');
     if (!content) continue;
-    const { name, description, version } = parseFrontmatter(content);
-    skills.push({
-      name: name || dir.name,
-      description: description || 'No description provided',
-      version: version || '1.0.0',
-    });
+    const meta = parseFrontmatter(content);
+    const refs = await listSkillRefs(dir.name);
+    skills.push(buildSkillRecord({
+      dirName: dir.name,
+      source: 'global',
+      content,
+      meta,
+      refs,
+    }));
   }
   return skills;
 }
@@ -178,189 +310,158 @@ async function listSkillsFromAgent(agentId) {
   for (const dir of dirs) {
     const content = await readAgentSkillFile(agentId, dir.name, 'SKILL.md');
     if (!content) continue;
-    const { name, description, version } = parseFrontmatter(content);
-    skills.push({
-      name: name || dir.name,
-      description: description || 'No description provided',
-      version: version || '1.0.0',
-    });
+    const meta = parseFrontmatter(content);
+    const refs = await listAgentSkillRefs(agentId, dir.name);
+    skills.push(buildSkillRecord({
+      dirName: dir.name,
+      source: 'agent',
+      content,
+      meta,
+      refs,
+    }));
   }
   return skills;
 }
 
-/**
- * Load the full skill content including references if available.
- * Checks agent-specific skills first, then falls back to global.
- * @param {string} name - Skill name (exact match)
- * @param {string} [agentId] — if provided, checks agent skills first
- * @returns {Promise<{ name: string, content: string, refs?: Array<{name, content}> }|null>}
- */
-export async function getSkill(name, agentId) {
-  // Check agent-specific skills first
+async function resolveSkill(name, agentId) {
+  const skillName = normalizeSkillName(name);
   if (agentId) {
-    const agentContent = await readAgentSkillFile(agentId, name, 'SKILL.md');
+    const agentContent = await readAgentSkillFile(agentId, skillName, 'SKILL.md');
     if (agentContent) {
-      return { name, content: agentContent };
+      const refs = await listAgentSkillRefs(agentId, skillName);
+      return {
+        content: agentContent,
+        source: 'agent',
+        agentId,
+        skill: buildSkillRecord({
+          dirName: skillName,
+          source: 'agent',
+          content: agentContent,
+          meta: parseFrontmatter(agentContent),
+          refs,
+        }),
+      };
     }
   }
 
-  // Fall back to global skills
-  const content = await readSkillFile(name, 'SKILL.md');
+  const content = await readSkillFile(skillName, 'SKILL.md');
   if (!content) return null;
+  const refs = await listSkillRefs(skillName);
+  return {
+    content,
+    source: 'global',
+    skill: buildSkillRecord({
+      dirName: skillName,
+      source: 'global',
+      content,
+      meta: parseFrontmatter(content),
+      refs,
+    }),
+  };
+}
 
-  const refs = await listSkillRefs(name);
-  const refContents = [];
-  for (const ref of refs) {
-    const refContent = await readSkillRef(name, ref.name);
-    if (refContent) refContents.push({ name: ref.name, content: refContent });
+async function readReference(resolved, referenceName) {
+  const safeName = normalizeReferenceName(referenceName);
+  if (resolved.source === 'agent') {
+    return readAgentSkillRef(resolved.agentId, resolved.skill.name, safeName);
   }
-
-  let fullContent = content;
-  if (refContents.length > 0) {
-    fullContent += '\n\n=== Reference Files ===\n';
-    for (const ref of refContents) {
-      fullContent += `\n--- ${ref.name} ---\n${ref.content}\n`;
-    }
-  }
-
-  return { name, content: fullContent };
+  return readSkillRef(resolved.skill.name, safeName);
 }
 
-/**
- * Create a new skill.
- * @param {string} name - Skill identifier (no spaces)
- * @param {string} content - Full SKILL.md content with YAML frontmatter
- * @param {string} [agentId] — if provided, creates in agent workspace
- */
-export async function createSkill(name, content, agentId) {
-  const sanitized = name.replace(/[^a-zA-Z0-9_-]/g, '_').toLowerCase();
-  if (agentId) {
-    await writeAgentSkillFile(agentId, sanitized, 'SKILL.md', content);
-  } else {
-    await writeSkillFile(sanitized, 'SKILL.md', content);
-  }
+function buildSkillRecord({ dirName, source, content, meta, refs }) {
+  const name = normalizeSkillName(meta.name || dirName);
+  return {
+    name,
+    description: String(meta.description || 'No description provided').trim(),
+    version: String(meta.version || '1.0.0').trim(),
+    source,
+    references: (refs || []).map((ref) => ({ name: ref.name })).sort((a, b) => a.name.localeCompare(b.name)),
+    contentLength: content.length,
+  };
 }
 
-/**
- * Update an existing skill's content.
- * @param {string} name
- * @param {string} content
- * @param {string} [agentId] — if provided, updates agent skill
- */
-export async function updateSkill(name, content, agentId) {
-  if (agentId) {
-    await writeAgentSkillFile(agentId, name, 'SKILL.md', content);
-  } else {
-    await writeSkillFile(name, 'SKILL.md', content);
-  }
-}
+// ─── Frontmatter and validation ─────────────────────────────────────────────
 
-/**
- * Delete a skill.
- * @param {string} name
- * @param {string} [agentId] — if provided, deletes from agent workspace
- */
-export async function deleteSkill(name, agentId) {
-  if (agentId) {
-    await deleteAgentSkillDir(agentId, name);
-  } else {
-    await deleteSkillDir(name);
-  }
-}
-
-/**
- * Get the set of disabled skill names.
- * @returns {Promise<Set<string>>}
- */
-export async function getDisabledSkills() {
-  const disabled = config.get('skills.disabled') || [];
-  return new Set(disabled);
-}
-
-/**
- * Toggle a skill's enabled/disabled state.
- * @param {string} name - Skill name
- * @param {boolean} enabled - true to enable, false to disable
- */
-export async function setSkillEnabled(name, enabled) {
-  const disabled = config.get('skills.disabled') || [];
-  const disabledSet = new Set(disabled);
-  if (enabled) {
-    disabledSet.delete(name);
-  } else {
-    disabledSet.add(name);
-  }
-  await config.set('skills.disabled', Array.from(disabledSet));
-}
-
-/**
- * Check if a skill is enabled.
- * @param {string} name - Skill name
- * @returns {Promise<boolean>}
- */
-export async function isSkillEnabled(name) {
-  const disabled = config.get('skills.disabled') || [];
-  return !disabled.includes(name);
-}
-
-/**
- * List all available skills with their metadata and enabled state.
- * @param {boolean} [includeDisabled=true] - Whether to include disabled skills
- * @param {string} [agentId] — if provided, combines global + agent skills
- * @returns {Promise<Array<{ name: string, description: string, version: string, enabled: boolean }>>}
- */
-export async function listAllSkills(includeDisabled = true, agentId) {
-  const skills = await listSkills(agentId);
-  const disabledSet = includeDisabled ? await getDisabledSkills() : new Set();
-  return skills.map((s) => ({
-    ...s,
-    enabled: !disabledSet.has(s.name),
-  }));
-}
-
-/**
- * Build the available skills section for the system prompt.
- * Only includes enabled skills. Combines global and agent skills.
- * @param {string} [agentId] — if provided, combines global + agent skills
- * @returns {Promise<string>}
- */
-export async function buildSkillsSection(agentId) {
-  await ensureDefaultSkills();
-  const disabledSet = await getDisabledSkills();
-  const allSkills = await listSkills(agentId);
-  const skills = [];
-
-  for (const s of allSkills) {
-    if (disabledSet.has(s.name)) continue;
-    skills.push({ name: s.name, description: s.description });
-  }
-
-  if (skills.length === 0) return '';
-  const list = skills.map((s) => `- ${s.name}: ${s.description}`).join('\n');
-  return `<available_skills>\n${list}\n</available_skills>\n\n`;
-}
-
-// ─── Internal helpers ─────────────────────────────────────────────────────────
-
-/**
- * Parse YAML frontmatter from SKILL.md content.
- * Supports a minimal parser for the common fields: name, description, version.
- */
 function parseFrontmatter(content) {
-  const result = { name: null, description: null, version: null };
-  const match = content.match(/^---\s*\n([\s\S]*?)\n---/);
-  if (!match) return result;
+  const match = String(content || '').match(/^---\s*\n([\s\S]*?)\n---/);
+  if (!match) return {};
+  try {
+    const parsed = yaml.load(match[1]);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return parseSimpleFrontmatter(match[1]);
+  }
+}
 
-  const frontmatter = match[1];
+function parseSimpleFrontmatter(frontmatter) {
+  const result = {};
   for (const line of frontmatter.split('\n')) {
-    const trimmed = line.trim();
-    if (trimmed.startsWith('name:')) {
-      result.name = trimmed.slice(5).trim().replace(/^["']|["']$/g, '');
-    } else if (trimmed.startsWith('description:')) {
-      result.description = trimmed.slice(12).trim().replace(/^["']|["']$/g, '');
-    } else if (trimmed.startsWith('version:')) {
-      result.version = trimmed.slice(8).trim().replace(/^["']|["']$/g, '');
-    }
+    const separator = line.indexOf(':');
+    if (separator <= 0) continue;
+    const key = line.slice(0, separator).trim();
+    const value = line.slice(separator + 1).trim().replace(/^["']|["']$/g, '');
+    result[key] = value;
   }
   return result;
+}
+
+function validateSkillContent(name, content) {
+  const text = String(content || '').trim();
+  if (!text) throw new Error('Skill content is required.');
+  if (text.length > MAX_SKILL_CONTENT_CHARS) {
+    throw new Error(`Skill content is too large (${text.length}/${MAX_SKILL_CONTENT_CHARS} chars). Move details into references.`);
+  }
+  const meta = parseFrontmatter(text);
+  if (!meta.name || !meta.description) {
+    throw new Error('Skill content must include YAML frontmatter with name and description.');
+  }
+  if (normalizeSkillName(meta.name) !== name) {
+    throw new Error(`Skill frontmatter name "${meta.name}" must match "${name}".`);
+  }
+}
+
+function normalizeSkillName(name) {
+  const normalized = String(name || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  if (!normalized) throw new Error('Skill name is required.');
+  return normalized.slice(0, 80);
+}
+
+function normalizeReferenceName(name) {
+  const normalized = String(name || '')
+    .trim()
+    .replace(/\\/g, '/')
+    .split('/')
+    .filter(Boolean)
+    .join('/');
+  if (!normalized || normalized.includes('..')) throw new Error('Reference name is invalid.');
+  return normalized.slice(0, 160);
+}
+
+function scoreSkill(skill, terms) {
+  const haystack = `${skill.name} ${skill.description} ${skill.references?.map((ref) => ref.name).join(' ')}`.toLowerCase();
+  let score = 0;
+  for (const term of terms) {
+    if (skill.name.toLowerCase() === term) score += 8;
+    if (skill.name.toLowerCase().includes(term)) score += 4;
+    if (haystack.includes(term)) score += 1;
+  }
+  return score;
+}
+
+function formatReferenceContent(skillName, referenceName, content) {
+  return [
+    `# Reference: ${skillName}/${referenceName}`,
+    '',
+    truncateText(content, MAX_REFERENCE_CHARS),
+  ].join('\n');
+}
+
+function truncateText(text, maxChars) {
+  const value = String(text || '');
+  if (value.length <= maxChars) return value;
+  return `${value.slice(0, maxChars)}\n[truncated ${value.length - maxChars} chars]`;
 }

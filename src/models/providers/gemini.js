@@ -54,7 +54,7 @@ export default {
         contents.push({
           role: 'model',
           parts: msg.tool_calls.map((tc) => ({
-            functionCall: { name: tc.name, args: JSON.parse(tc.arguments || '{}') },
+            functionCall: { name: tc.name, args: safeParseToolArgs(tc.arguments) },
           })),
         });
       } else {
@@ -173,5 +173,13 @@ async function* readGeminiSSE(body) {
     }
   } finally {
     reader.releaseLock();
+  }
+}
+
+function safeParseToolArgs(args) {
+  try {
+    return args ? JSON.parse(args) : {};
+  } catch {
+    return {};
   }
 }

@@ -981,6 +981,17 @@ export async function readSkillRef(skillName, filename) {
   }
 }
 
+/**
+ * Write a reference file in a skill.
+ * @param {string} skillName
+ * @param {string} filename
+ * @param {string} content
+ */
+export async function writeSkillRef(skillName, filename, content) {
+  const dir = await getDirectory(SKILLS_DIR, skillName, 'references');
+  await writeText(dir, filename, content, { localPath: `${SKILLS_DIR}/${skillName}/references/${filename}` });
+}
+
 // ─── Agent Workspace Operations ───────────────────────────────────────────────
 
 const WORKSPACE_DIR = 'workspace';
@@ -1097,7 +1108,17 @@ export async function listAgentSkillDirs(agentId) {
     const dir = await getAgentSkillsDir(agentId);
     const skills = [];
     for (const { name, kind } of await listEntries(dir)) {
-      if (kind === 'directory') skills.push({ name, hasReferences: false });
+      if (kind === 'directory') {
+        const skillDir = await dir.getDirectoryHandle(name);
+        let hasReferences = false;
+        for (const entry of await listEntries(skillDir)) {
+          if (entry.name === 'references' && entry.kind === 'directory') {
+            hasReferences = true;
+            break;
+          }
+        }
+        skills.push({ name, hasReferences });
+      }
     }
     return skills;
   } catch {
@@ -1129,6 +1150,40 @@ export async function deleteAgentSkillDir(agentId, skillName) {
     const name = await resolveWorkspaceName(agentId);
     notifyOpfsMutation(`${WORKSPACE_DIR}/${name}/skills/${skillName}`, 'delete');
   } catch { /* ignore */ }
+}
+
+export async function listAgentSkillRefs(agentId, skillName) {
+  try {
+    const dir = await getAgentSkillsDir(agentId);
+    const skillDir = await dir.getDirectoryHandle(skillName);
+    const refsDir = await skillDir.getDirectoryHandle('references');
+    const refs = [];
+    for (const { name, kind } of await listEntries(refsDir)) {
+      if (kind === 'file') refs.push({ name });
+    }
+    return refs;
+  } catch {
+    return [];
+  }
+}
+
+export async function readAgentSkillRef(agentId, skillName, filename) {
+  try {
+    const dir = await getAgentSkillsDir(agentId);
+    const skillDir = await dir.getDirectoryHandle(skillName);
+    const refsDir = await skillDir.getDirectoryHandle('references');
+    return await readText(refsDir, filename);
+  } catch {
+    return null;
+  }
+}
+
+export async function writeAgentSkillRef(agentId, skillName, filename, content) {
+  const dir = await getAgentSkillsDir(agentId);
+  const skillDir = await dir.getDirectoryHandle(skillName, { create: true });
+  const refsDir = await skillDir.getDirectoryHandle('references', { create: true });
+  const name = await resolveWorkspaceName(agentId);
+  await writeText(refsDir, filename, content, { localPath: `${WORKSPACE_DIR}/${name}/skills/${skillName}/references/${filename}` });
 }
 
 // Agent-scoped file operations
