@@ -104,13 +104,21 @@ Work rules:
 - Use sub-agents only for bounded independent work.
 - When tools fail, use the error output to choose the next useful step.`;
 
-const FILE_CONTEXT_MARKER = 'Selected browser files from workspace/<active-agent>/files/:';
+const FILE_CONTEXT_MARKER = 'Selected file context:';
 const TOOL_HISTORY_MARKER = 'Tool calls performed during this assistant turn:';
 const TOOL_HISTORY_RESULT_MAX_CHARS = 4000;
 
 function contextFilePromptPath(file) {
   if (file?.relativePath) return file.relativePath;
   return String(file?.displayPath || '').replace(/^\/workspace\/[^/]+\//, '');
+}
+
+function promptAttr(value) {
+  return String(value || '').replace(/"/g, '&quot;');
+}
+
+function contextFilePromptSource(file) {
+  return file?.source === 'sandbox' ? 'sandbox' : 'browser';
 }
 
 function truncateForPrompt(text, maxChars) {
@@ -151,7 +159,7 @@ function expandMessagesForLlm(messages) {
 
     if (contextFiles?.length) {
       const fileBlocks = contextFiles
-        .map((file) => `<file path="${contextFilePromptPath(file)}">\n${file.content}\n</file>`)
+        .map((file) => `<file source="${contextFilePromptSource(file)}" path="${promptAttr(contextFilePromptPath(file))}">\n${file.content}\n</file>`)
         .join('\n\n');
       content = appendPromptSection(content, FILE_CONTEXT_MARKER, fileBlocks);
     }

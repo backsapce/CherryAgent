@@ -1,6 +1,7 @@
 import { forwardRef, lazy, Suspense, useImperativeHandle, useState, useRef, useEffect, useLayoutEffect, useMemo } from 'react';
 import { useI18n } from '../../i18n/context';
 import { getAgentDir, normalizeWorkspaceRelativePath } from '../../vfs/opfs';
+import { listFiles, readFileText } from '../../models/agent';
 import { ChevronRight, Settings as SettingsIcon, Folder, File, FileEdit, MessageSquare, Plus, X, Send, Stop, Plug, PieChart, Cloud, User, ImageGenerate } from '../Icons/Icons';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -18,6 +19,24 @@ const MESSAGE_HISTORY_PAGE_SIZE = 100;
 const AUTO_SCROLL_BOTTOM_THRESHOLD = 48;
 const LOAD_HISTORY_TOP_THRESHOLD = 24;
 const SCROLL_DIRECTION_EPSILON = 2;
+const CONTEXT_SOURCE_BROWSER = 'browser';
+const CONTEXT_SOURCE_SANDBOX = 'sandbox';
+
+function contextSourceLabel(source) {
+  return source === CONTEXT_SOURCE_SANDBOX ? 'sandbox' : 'workspace';
+}
+
+function contextFileKey(file) {
+  return `${file?.source || CONTEXT_SOURCE_BROWSER}:${file?.relativePath || file?.displayPath || ''}`;
+}
+
+function normalizeMentionPath(path) {
+  return String(path || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+}
+
+function joinMentionPath(...parts) {
+  return normalizeMentionPath(parts.filter(Boolean).join('/'));
+}
 
 function resetEmptyTextareaCaret(textarea) {
   if (!textarea || textarea.value) return;
@@ -68,6 +87,7 @@ async function collectAgentWorkspaceFiles(agentId) {
       } else {
         const file = await handle.getFile();
         files.push({
+          source: CONTEXT_SOURCE_BROWSER,
           name,
           relativePath,
           displayPath: relativePath,
@@ -79,6 +99,43 @@ async function collectAgentWorkspaceFiles(agentId) {
   }
 
   await walk(root);
+  return files.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
+}
+
+async function collectSandboxFiles(sandboxUrl) {
+  if (!sandboxUrl) return [];
+  const files = [];
+  const visitedDirs = new Set();
+
+  async function walk(dir = '') {
+    const safeDir = normalizeMentionPath(dir);
+    if (visitedDirs.has(safeDir)) return;
+    visitedDirs.add(safeDir);
+
+    const listing = await listFiles(safeDir, sandboxUrl);
+    const entries = Array.isArray(listing) ? listing : listing?.children;
+    if (!Array.isArray(entries)) return;
+
+    for (const entry of entries) {
+      const entryPath = normalizeMentionPath(entry.path || joinMentionPath(safeDir, entry.name));
+      if (!entryPath) continue;
+      if (entry.type === 'directory') {
+        await walk(entryPath);
+      } else {
+        files.push({
+          source: CONTEXT_SOURCE_SANDBOX,
+          sandboxUrl,
+          name: entry.name,
+          relativePath: entryPath,
+          displayPath: `sandbox/${entryPath}`,
+          size: entry.size || 0,
+          lastModified: entry.lastModified,
+        });
+      }
+    }
+  }
+
+  await walk('');
   return files.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
 }
 
@@ -96,7 +153,7 @@ function buildDisplayMessageWithFileRefs(text, files) {
   if (!files.length) return text;
   const totalTokens = files.reduce((sum, file) => sum + estimateTokensFromText(file.content), 0);
   const refs = files
-    .map((file) => `- ${file.relativePath || file.displayPath} (${formatBytes(file.size)}, ~${estimateTokensFromText(file.content)} tokens)`)
+    .map((file) => `- [${contextSourceLabel(file.source)}] ${file.relativePath || file.displayPath} (${formatBytes(file.size)}, ~${estimateTokensFromText(file.content)} tokens)`)
     .join('\n');
   return `${text}\n\nReferenced files: ${files.length} (~${totalTokens} tokens)\n${refs}`.trim();
 }
@@ -501,6 +558,12 @@ const MessagePanel = forwardRef(({
   const selectedLlmProviderLabel = selectedProvider?.name || selectedLlmProfile?.provider || t('message.noProviderConfigured');
   const selectedLlmModelLabel = selectedLlmProfile?.model || selectedLlmProfile?.name || '';
   const showCenteredInput = !activeSessionId || messages.length === 0;
+  const activeSandbox = useMemo(
+    () => (agents || []).find((agent) => agent.url === selectedAgentUrl && agent.status === 'connected') || null,
+    [agents, selectedAgentUrl]
+  );
+  const activeSandboxUrl = activeSandbox?.url || null;
+  const mentionScopeLabel = activeSandboxUrl ? 'workspace + sandbox' : 'workspace';
   const visibleMessages = useMemo(() => {
     const start = Math.max(messages.length - visibleMessageCount, 0);
     return messages.slice(start);
@@ -579,8 +642,8 @@ const MessagePanel = forwardRef(({
   useEffect(() => {
     let cancelled = false;
 
-    async function loadWorkspaceFiles() {
-      if (!mentionOpen || !agentId) {
+    async function loadMentionFiles() {
+      if (!mentionOpen) {
         if (!cancelled) {
           setMentionFiles([]);
           setMentionLoading(false);
@@ -592,8 +655,33 @@ const MessagePanel = forwardRef(({
       setMentionLoading(true);
       setMentionError('');
       try {
-        const files = await collectAgentWorkspaceFiles(agentId);
-        if (!cancelled) setMentionFiles(files);
+        const sources = [];
+        if (agentId) sources.push(collectAgentWorkspaceFiles(agentId));
+        if (activeSandboxUrl) sources.push(collectSandboxFiles(activeSandboxUrl));
+
+        if (sources.length === 0) {
+          if (!cancelled) {
+            setMentionFiles([]);
+            setMentionError('');
+          }
+          return;
+        }
+
+        const results = await Promise.allSettled(sources);
+        const files = results
+          .filter((result) => result.status === 'fulfilled')
+          .flatMap((result) => result.value);
+        const errors = results
+          .filter((result) => result.status === 'rejected')
+          .map((result) => result.reason?.message || 'Unable to search files');
+
+        if (!cancelled) {
+          setMentionFiles(files.sort((a, b) => {
+            if ((a.source || '') !== (b.source || '')) return (a.source || '').localeCompare(b.source || '');
+            return a.relativePath.localeCompare(b.relativePath);
+          }));
+          setMentionError(errors.join(' · '));
+        }
       } catch (err) {
         if (!cancelled) {
           setMentionFiles([]);
@@ -604,19 +692,19 @@ const MessagePanel = forwardRef(({
       }
     }
 
-    loadWorkspaceFiles();
+    loadMentionFiles();
 
     return () => {
       cancelled = true;
     };
-  }, [mentionOpen, agentId]);
+  }, [mentionOpen, agentId, activeSandboxUrl]);
 
   const filteredMentionFiles = useMemo(() => {
     const query = mentionQuery.trim().toLowerCase();
-    const selected = new Set(pendingContextFiles.map((file) => file.relativePath));
+    const selected = new Set(pendingContextFiles.map((file) => contextFileKey(file)));
     return mentionFiles
-      .filter((file) => !selected.has(file.relativePath))
-      .filter((file) => !query || file.relativePath.toLowerCase().includes(query))
+      .filter((file) => !selected.has(contextFileKey(file)))
+      .filter((file) => !query || `${contextSourceLabel(file.source)} ${file.relativePath}`.toLowerCase().includes(query))
       .slice(0, 12);
   }, [mentionFiles, mentionQuery, pendingContextFiles]);
   const safeMentionActiveIndex = Math.min(mentionActiveIndex, Math.max(filteredMentionFiles.length - 1, 0));
@@ -708,8 +796,8 @@ const MessagePanel = forwardRef(({
     setPendingImages((prev) => prev.filter((_, i) => i !== index));
   };
 
-  const removeContextFile = (relativePath) => {
-    setPendingContextFiles((prev) => prev.filter((file) => file.relativePath !== relativePath));
+  const removeContextFile = (key) => {
+    setPendingContextFiles((prev) => prev.filter((file) => contextFileKey(file) !== key));
   };
 
   const closeMentionSelector = () => {
@@ -720,12 +808,18 @@ const MessagePanel = forwardRef(({
   };
 
   const selectMentionFile = async (file) => {
-    if (!agentId || !file) return;
+    if (!file) return;
     try {
-      const content = await readAgentWorkspaceFile(agentId, file.relativePath);
+      const source = file.source || CONTEXT_SOURCE_BROWSER;
+      if (source === CONTEXT_SOURCE_BROWSER && !agentId) throw new Error('Select an agent first');
+      if (source === CONTEXT_SOURCE_SANDBOX && !(file.sandboxUrl || activeSandboxUrl)) throw new Error('Select a sandbox first');
+      const content = source === CONTEXT_SOURCE_SANDBOX
+        ? await readFileText(file.relativePath, file.sandboxUrl || activeSandboxUrl)
+        : await readAgentWorkspaceFile(agentId, file.relativePath);
       setPendingContextFiles((prev) => {
-        if (prev.some((item) => item.relativePath === file.relativePath)) return prev;
-        return [...prev, { ...file, content }];
+        const key = contextFileKey(file);
+        if (prev.some((item) => contextFileKey(item) === key)) return prev;
+        return [...prev, { ...file, source, content }];
       });
       if (mentionRange) {
         const nextInput = input.slice(0, mentionRange.start) + input.slice(mentionRange.end);
@@ -1038,20 +1132,24 @@ const MessagePanel = forwardRef(({
         )}
         {pendingContextFiles.length > 0 && (
           <div className="file-context-strip">
-            {pendingContextFiles.map((file) => (
-              <div key={file.relativePath} className="file-context-chip" title={file.displayPath}>
-                <File width={14} height={14} />
-                <span>{file.relativePath}</span>
-                <button
-                  type="button"
-                  className="file-context-remove"
-                  onClick={() => removeContextFile(file.relativePath)}
-                  title="Remove file context"
-                >
-                  <X width={12} height={12} />
-                </button>
-              </div>
-            ))}
+            {pendingContextFiles.map((file) => {
+              const key = contextFileKey(file);
+              const isSandboxFile = file.source === CONTEXT_SOURCE_SANDBOX;
+              return (
+                <div key={key} className="file-context-chip" title={`${contextSourceLabel(file.source)}: ${file.relativePath || file.displayPath}`}>
+                  {isSandboxFile ? <Cloud width={14} height={14} /> : <File width={14} height={14} />}
+                  <span>{contextSourceLabel(file.source)}:{file.relativePath}</span>
+                  <button
+                    type="button"
+                    className="file-context-remove"
+                    onClick={() => removeContextFile(key)}
+                    title="Remove file context"
+                  >
+                    <X width={12} height={12} />
+                  </button>
+                </div>
+              );
+            })}
           </div>
         )}
         {queuedMessages.length > 0 && (
@@ -1078,28 +1176,29 @@ const MessagePanel = forwardRef(({
             <div className="file-mention-popover">
               <div className="file-mention-header">
                 <span>@ files</span>
-                <span>workspace</span>
+                <span>{mentionScopeLabel}</span>
               </div>
               <div className="file-mention-list">
                 {mentionLoading ? (
                   <div className="file-mention-empty">Searching files...</div>
-                ) : mentionError ? (
+                ) : mentionError && filteredMentionFiles.length === 0 ? (
                   <div className="file-mention-empty">{mentionError}</div>
                 ) : filteredMentionFiles.length === 0 ? (
-                  <div className="file-mention-empty">{agentId ? 'No matching files' : 'Select an agent first'}</div>
+                  <div className="file-mention-empty">{agentId || activeSandboxUrl ? 'No matching files' : 'Select an agent or sandbox first'}</div>
                 ) : (
                   filteredMentionFiles.map((file, index) => (
                     <button
-                      key={file.relativePath}
+                      key={contextFileKey(file)}
                       type="button"
                       className={`file-mention-item${index === safeMentionActiveIndex ? ' active' : ''}`}
                       onMouseDown={(e) => {
                         e.preventDefault();
                         selectMentionFile(file);
                       }}
+                      title={`${contextSourceLabel(file.source)}: ${file.relativePath}`}
                     >
-                      <File width={15} height={15} />
-                      <span className="file-mention-path">{file.relativePath}</span>
+                      {file.source === CONTEXT_SOURCE_SANDBOX ? <Cloud width={15} height={15} /> : <File width={15} height={15} />}
+                      <span className="file-mention-path">{contextSourceLabel(file.source)}:{file.relativePath}</span>
                       <span className="file-mention-size">{formatBytes(file.size)}</span>
                     </button>
                   ))
