@@ -5,6 +5,7 @@ import { listFiles, readFileText } from '../../models/agent';
 import { ChevronRight, Settings as SettingsIcon, Folder, File, FileEdit, Copy, MessageSquare, Plus, X, Send, Stop, Plug, PieChart, Cloud, User, ImageGenerate } from '../Icons/Icons';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import rehypeHighlight from 'rehype-highlight';
 import rehypeSanitize from 'rehype-sanitize';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
@@ -21,6 +22,14 @@ const LOAD_HISTORY_TOP_THRESHOLD = 24;
 const SCROLL_DIRECTION_EPSILON = 2;
 const CONTEXT_SOURCE_BROWSER = 'browser';
 const CONTEXT_SOURCE_SANDBOX = 'sandbox';
+const MARKDOWN_REMARK_PLUGINS = [remarkGfm];
+const MARKDOWN_REHYPE_PLUGINS = [
+  rehypeSanitize,
+  [rehypeHighlight, { plainText: ['text', 'txt', 'plain'] }],
+];
+const MARKDOWN_COMPONENTS = {
+  pre: CodeBlock,
+};
 
 function contextSourceLabel(source) {
   return source === CONTEXT_SOURCE_SANDBOX ? 'sandbox' : 'workspace';
@@ -97,6 +106,57 @@ async function copyTextToClipboard(text) {
   } finally {
     document.body.removeChild(textarea);
   }
+}
+
+function extractTextContent(node) {
+  if (node == null || typeof node === 'boolean') return '';
+  if (typeof node === 'string' || typeof node === 'number') return String(node);
+  if (Array.isArray(node)) return node.map(extractTextContent).join('');
+  if (typeof node === 'object' && node.props) return extractTextContent(node.props.children);
+  return '';
+}
+
+function CodeBlock({ children, node: _node, ...props }) {
+  const { t } = useI18n();
+  const [copied, setCopied] = useState(false);
+  const copyTimerRef = useRef(null);
+  const codeText = useMemo(() => extractTextContent(children), [children]);
+
+  useEffect(() => () => {
+    if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+  }, []);
+
+  const handleCopyCode = async () => {
+    if (!codeText) return;
+
+    try {
+      await copyTextToClipboard(codeText);
+      setCopied(true);
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+      copyTimerRef.current = setTimeout(() => {
+        setCopied(false);
+        copyTimerRef.current = null;
+      }, 1200);
+    } catch (err) {
+      console.warn('Failed to copy code block', err);
+    }
+  };
+
+  return (
+    <div className="message-code-block">
+      <pre {...props}>{children}</pre>
+      <button
+        type="button"
+        className={`message-code-copy${copied ? ' copied' : ''}`}
+        onClick={handleCopyCode}
+        disabled={!codeText}
+        title={copied ? t('message.copied') : t('message.copy')}
+        aria-label={copied ? t('message.copied') : t('message.copy')}
+      >
+        <Copy width={14} height={14} />
+      </button>
+    </div>
+  );
 }
 
 async function collectAgentWorkspaceFiles(agentId) {
@@ -1138,7 +1198,13 @@ const MessagePanel = forwardRef(({
                     </div>
                   ) : (
                     <>
-                      <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]}>{msg.content}</ReactMarkdown>
+                      <ReactMarkdown
+                        remarkPlugins={MARKDOWN_REMARK_PLUGINS}
+                        rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
+                        components={MARKDOWN_COMPONENTS}
+                      >
+                        {msg.content}
+                      </ReactMarkdown>
                       {msg.role === 'assistant' && msg.content?.startsWith('Error:') && !streaming && onRetry && (
                         <button className="retry-btn" onClick={() => onRetry()} title={t('message.retry')}>Retry</button>
                       )}
