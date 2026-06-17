@@ -435,7 +435,7 @@
   flex-shrink: 0;
 }
 
-.message.user:hover .message-action-btn,
+.message:hover .message-action-btn,
 .message-action-btn:focus-visible {
   opacity: 1;
 }

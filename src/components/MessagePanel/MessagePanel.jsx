@@ -1145,18 +1145,20 @@ const MessagePanel = forwardRef(({
                     </>
                   )}
                 </div>
-                {msg.role === 'user' && editingMessageId !== msg.id && (
+                {(msg.role === 'user' || (msg.role === 'assistant' && msg.content)) && editingMessageId !== msg.id && (
                   <div className="message-actions">
-                    <button
-                      type="button"
-                      className="message-action-btn message-edit-btn"
-                      onClick={() => startEditMessage(msg)}
-                      disabled={streaming}
-                      title={t('message.edit')}
-                      aria-label={t('message.edit')}
-                    >
-                      <FileEdit width={14} height={14} />
-                    </button>
+                    {msg.role === 'user' && (
+                      <button
+                        type="button"
+                        className="message-action-btn message-edit-btn"
+                        onClick={() => startEditMessage(msg)}
+                        disabled={streaming}
+                        title={t('message.edit')}
+                        aria-label={t('message.edit')}
+                      >
+                        <FileEdit width={14} height={14} />
+                      </button>
+                    )}
                     <button
                       type="button"
                       className={`message-action-btn message-copy-btn${copiedMessageId === msg.id ? ' copied' : ''}`}
