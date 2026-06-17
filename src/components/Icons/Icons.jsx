@@ -68,6 +68,13 @@ export const FileEdit = ({ width = 18, height = 18, className = '' }) => (
   </IconBase>
 );
 
+export const Copy = ({ width = 18, height = 18, className = '' }) => (
+  <IconBase width={width} height={height} viewBox="0 0 24 24" className={className}>
+    <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+  </IconBase>
+);
+
 export const Save = ({ width = 18, height = 18, className = '' }) => (
   <IconBase width={width} height={height} viewBox="0 0 24 24" className={className}>
     <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />

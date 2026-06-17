@@ -2,7 +2,7 @@ import { forwardRef, lazy, Suspense, useImperativeHandle, useState, useRef, useE
 import { useI18n } from '../../i18n/context';
 import { getAgentDir, normalizeWorkspaceRelativePath } from '../../vfs/opfs';
 import { listFiles, readFileText } from '../../models/agent';
-import { ChevronRight, Settings as SettingsIcon, Folder, File, FileEdit, MessageSquare, Plus, X, Send, Stop, Plug, PieChart, Cloud, User, ImageGenerate } from '../Icons/Icons';
+import { ChevronRight, Settings as SettingsIcon, Folder, File, FileEdit, Copy, MessageSquare, Plus, X, Send, Stop, Plug, PieChart, Cloud, User, ImageGenerate } from '../Icons/Icons';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeSanitize from 'rehype-sanitize';
@@ -72,6 +72,31 @@ function isImageGenerationToolName(name) {
 
 function isImageGenerationPrompt(text) {
   return /\b(generate|create|make|draw|render|paint|design)\b[\s\S]{0,80}\b(image|picture|photo|illustration|poster|avatar|logo|icon)\b|\b(image|picture|photo|illustration|poster|avatar|logo|icon)\b[\s\S]{0,80}\b(generate|create|make|draw|render|paint|design)\b/i.test(text || '');
+}
+
+async function copyTextToClipboard(text) {
+  const value = String(text || '');
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.value = value;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.top = '-9999px';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+
+  try {
+    const copied = document.execCommand('copy');
+    if (!copied) throw new Error('Copy command failed');
+  } finally {
+    document.body.removeChild(textarea);
+  }
 }
 
 async function collectAgentWorkspaceFiles(agentId) {
@@ -530,6 +555,7 @@ const MessagePanel = forwardRef(({
   const [input, setInput] = useState('');
   const [editingMessageId, setEditingMessageId] = useState(null);
   const [editingText, setEditingText] = useState('');
+  const [copiedMessageId, setCopiedMessageId] = useState(null);
   const [pendingImages, setPendingImages] = useState([]); // [{dataUrl, name}]
   const [pendingContextFiles, setPendingContextFiles] = useState([]);
   const [mentionOpen, setMentionOpen] = useState(false);
@@ -546,6 +572,7 @@ const MessagePanel = forwardRef(({
   const scrollRafRef = useRef(null);
   const lastScrollTopRef = useRef(0);
   const pendingHistoryScrollRestoreRef = useRef(null);
+  const copiedTimerRef = useRef(null);
   const textareaRef = useRef(null);
   const fileInputRef = useRef(null);
   const selectedAgent = agentList.find((agent) => agent.id === agentId) || agentList[0];
@@ -617,6 +644,10 @@ const MessagePanel = forwardRef(({
 
   useEffect(() => () => {
     if (scrollRafRef.current) cancelAnimationFrame(scrollRafRef.current);
+  }, []);
+
+  useEffect(() => () => {
+    if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
   }, []);
 
   const handleMessageListScroll = (e) => {
@@ -743,6 +774,23 @@ const MessagePanel = forwardRef(({
     if (!text || streaming || !editingMessageId) return;
     onEditMessage?.(editingMessageId, text);
     cancelEditMessage();
+  };
+
+  const handleCopyMessage = async (msg) => {
+    const text = msg.content || '';
+    if (!text) return;
+
+    try {
+      await copyTextToClipboard(text);
+      setCopiedMessageId(msg.id);
+      if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
+      copiedTimerRef.current = setTimeout(() => {
+        setCopiedMessageId((currentId) => (currentId === msg.id ? null : currentId));
+        copiedTimerRef.current = null;
+      }, 1200);
+    } catch (err) {
+      console.warn('Failed to copy message', err);
+    }
   };
 
   const handleEditKeyDown = (e) => {
@@ -1042,18 +1090,6 @@ const MessagePanel = forwardRef(({
               <div className="message-content">
                 <div className="message-role">
                   <span>{msg.role === 'user' ? userName : assistantName}</span>
-                  {msg.role === 'user' && editingMessageId !== msg.id && (
-                    <button
-                      type="button"
-                      className="message-edit-btn"
-                      onClick={() => startEditMessage(msg)}
-                      disabled={streaming}
-                      title={t('message.edit')}
-                      aria-label={t('message.edit')}
-                    >
-                      <FileEdit width={14} height={14} />
-                    </button>
-                  )}
                 </div>
                 {msg.role === 'assistant' && !showImageGenerationStatus && (msg.thinking || (streaming && msg.content === '')) && (
                   <ThinkingBlock thinking={msg.thinking} isThinking={streaming && msg === messages[messages.length - 1]} />
@@ -1109,6 +1145,30 @@ const MessagePanel = forwardRef(({
                     </>
                   )}
                 </div>
+                {msg.role === 'user' && editingMessageId !== msg.id && (
+                  <div className="message-actions">
+                    <button
+                      type="button"
+                      className="message-action-btn message-edit-btn"
+                      onClick={() => startEditMessage(msg)}
+                      disabled={streaming}
+                      title={t('message.edit')}
+                      aria-label={t('message.edit')}
+                    >
+                      <FileEdit width={14} height={14} />
+                    </button>
+                    <button
+                      type="button"
+                      className={`message-action-btn message-copy-btn${copiedMessageId === msg.id ? ' copied' : ''}`}
+                      onClick={() => handleCopyMessage(msg)}
+                      disabled={!msg.content}
+                      title={copiedMessageId === msg.id ? t('message.copied') : t('message.copy')}
+                      aria-label={copiedMessageId === msg.id ? t('message.copied') : t('message.copy')}
+                    >
+                      <Copy width={14} height={14} />
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
             );

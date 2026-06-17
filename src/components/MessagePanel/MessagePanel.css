@@ -405,14 +405,21 @@
 .message-role {
   display: flex;
   align-items: center;
-  gap: 6px;
   font-size: 13px;
   font-weight: 600;
   color: var(--color-text-heading);
   margin-bottom: 4px;
 }
 
-.message-edit-btn {
+.message-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 4px;
+  margin-top: 8px;
+  min-height: 24px;
+}
+
+.message-action-btn {
   width: 24px;
   height: 24px;
   border: none;
@@ -423,21 +430,28 @@
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  opacity: 0;
+  opacity: 0.72;
   transition: opacity 0.15s, background 0.15s, color 0.15s;
+  flex-shrink: 0;
 }
 
-.message.user:hover .message-edit-btn,
-.message-edit-btn:focus-visible {
+.message.user:hover .message-action-btn,
+.message-action-btn:focus-visible {
   opacity: 1;
 }
 
-.message-edit-btn:hover:not(:disabled) {
+.message-action-btn:hover:not(:disabled) {
   background: color-mix(in srgb, var(--color-accent-strong) 16%, transparent);
   color: var(--color-text-heading);
 }
 
-.message-edit-btn:disabled {
+.message-action-btn.copied {
+  background: color-mix(in srgb, var(--color-success) 16%, transparent);
+  color: var(--color-success);
+  opacity: 1;
+}
+
+.message-action-btn:disabled {
   cursor: not-allowed;
   opacity: 0.4;
 }

@@ -30,6 +30,8 @@
         "remove": "Remove",
         "uploadImage": "Upload image",
         "edit": "Edit",
+        "copy": "Copy",
+        "copied": "Copied",
         "cancel": "Cancel",
         "submitEdit": "Submit",
         "placeholder": "Send a message...",

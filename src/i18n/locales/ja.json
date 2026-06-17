@@ -30,6 +30,8 @@
         "remove": "削除",
         "uploadImage": "画像をアップロード",
         "edit": "編集",
+        "copy": "コピー",
+        "copied": "コピーしました",
         "cancel": "キャンセル",
         "submitEdit": "送信",
         "placeholder": "メッセージを入力...",
