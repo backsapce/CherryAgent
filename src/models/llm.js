@@ -24,6 +24,7 @@ import qwen from './providers/qwen.js';
 import deepseek from './providers/deepseek.js';
 import customOpenai from './providers/custom-openai.js';
 import { loadSettings, saveSettings } from './settings.js';
+import { getModelContextWindowFallback } from './contextWindow.js';
 
 // ─── Provider registry ──────────────────────────────────────────────────────
 
@@ -65,6 +66,7 @@ function defaultProfileName(cfg) {
 
 function normalizeProfile(id, cfg = {}) {
   const contextWindow = Number(cfg.contextWindow);
+  const updatedAtMs = Number(cfg.updatedAtMs);
   return {
     id,
     name: cfg.name || defaultProfileName(cfg),
@@ -73,6 +75,7 @@ function normalizeProfile(id, cfg = {}) {
     baseUrl: cfg.baseUrl || null,
     model: cfg.model || null,
     contextWindow: Number.isFinite(contextWindow) && contextWindow > 0 ? contextWindow : null,
+    ...(Number.isFinite(updatedAtMs) && updatedAtMs > 0 ? { updatedAtMs: Math.floor(updatedAtMs) } : {}),
   };
 }
 
@@ -164,10 +167,11 @@ async function resolveContextWindow(providerId, modelId) {
   if (!providerId || !modelId) return null;
   try {
     const catalog = await loadModelsDevCatalog();
-    return findModelsDevContextWindow(catalog, providerId, modelId);
+    return findModelsDevContextWindow(catalog, providerId, modelId)
+      || getModelContextWindowFallback(providerId, modelId);
   } catch (err) {
     console.warn('Failed to fetch model context window from models.dev:', err.message);
-    return null;
+    return getModelContextWindowFallback(providerId, modelId);
   }
 }
 
@@ -254,12 +258,15 @@ const llm = {
   getActiveConfig(profileId = activeProfileId) {
     const profile = getProfile(profileId);
     const p = providers[profile?.provider];
+    const model = profile?.model || p?.defaultModel || null;
+    const contextWindow = profile?.contextWindow
+      || (profile?.provider && model ? getModelContextWindowFallback(profile.provider, model) : null);
     return {
       id: profile?.id || null,
       name: profile?.name || null,
       provider: profile?.provider || null,
-      model: profile?.model || p?.defaultModel || null,
-      contextWindow: profile?.contextWindow || null,
+      model,
+      contextWindow,
       baseUrl: profile?.baseUrl || null,
       configured: !!(profile?.provider && profile?.apiKey),
       hasApiKey: !!profile?.apiKey,
@@ -311,7 +318,12 @@ const llm = {
       : (activeProfileId || generateProfileId());
     const previous = profiles[id] || { id };
     const clonedApiKey = cfg.cloneApiKeyFrom ? profiles[cfg.cloneApiKeyFrom]?.apiKey : null;
-    const merged = { ...previous, ...cfg, apiKey: cfg.apiKey || previous.apiKey || clonedApiKey };
+    const merged = {
+      ...previous,
+      ...cfg,
+      apiKey: cfg.apiKey || previous.apiKey || clonedApiKey,
+      updatedAtMs: Date.now(),
+    };
     const modelChanged = previous.provider !== merged.provider || previous.model !== merged.model;
     const effectiveModel = merged.model || providers[merged.provider]?.defaultModel;
     const requestedContextWindow = Number(cfg.contextWindow);

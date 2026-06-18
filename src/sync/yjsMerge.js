@@ -166,8 +166,10 @@ function newerTimestampedRecord(localValue, incomingValue) {
 }
 
 function mergeData(localValue, incomingValue) {
-  if (localValue == null) return incomingValue;
-  if (incomingValue == null) return localValue;
+  if (localValue === undefined) return incomingValue;
+  if (incomingValue === undefined) return localValue;
+  if (incomingValue === null) return null;
+  if (localValue === null) return incomingValue;
 
   if (Array.isArray(localValue) && Array.isArray(incomingValue)) {
     const localIdentity = localValue.map(identityKey).every(Boolean);

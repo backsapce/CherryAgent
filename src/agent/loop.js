@@ -2,13 +2,13 @@
  * Agent loop: stream -> tool calls -> tool results -> continue until complete.
  */
 
-import { getContext } from 'tokenlens';
 import llm from '../models/llm';
 import { getEnabledToolSchemas, registry } from './tools.js';
 import { assembleApiMessages } from './context.js';
 import { loadMemory } from './memory.js';
 import { buildSkillsSection } from './skills.js';
 import { compactToolResultForModel } from './toolObservation.js';
+import { getStaticContextWindow } from '../models/contextWindow.js';
 import { readAgentAgentsFile } from '../vfs/opfs.js';
 import { getAgent, getWorkspaceDirName } from '../agents/agents.js';
 
@@ -64,7 +64,7 @@ export async function runAgentLoop(opts) {
   const memorySnapshot = await loadMemory(agentId);
   const skillsList = await buildSkillsSection(agentId);
   const agentIdentity = agentId ? await readAgentAgentsFile(agentId) : null;
-  const contextWindow = opts.contextWindow || getContextWindow(opts.provider, opts.model);
+  const contextWindow = opts.contextWindow || getStaticContextWindow(opts.provider, opts.model);
   const toolSchemas = getAvailableToolSchemas({
     agentUrl,
     agentId,
@@ -622,60 +622,4 @@ function formatBytes(bytes) {
     unitIndex += 1;
   }
   return `${value >= 10 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`;
-}
-
-// Map app provider IDs to tokenlens provider prefixes
-const TOKENLENS_PROVIDER = {
-  openai: 'openai',
-  anthropic: 'anthropic',
-  gemini: 'google',
-  qwen: 'alibaba',
-  openrouter: 'openrouter',
-  deepseek: 'deepseek',
-};
-
-const FALLBACK_WINDOWS = {
-  anthropic: 200_000,
-  openai: 128_000,
-  gemini: 1_000_000,
-  openrouter: 128_000,
-  qwen: 1_000_000,
-  deepseek: 128_000,
-  'custom-openai': 128_000,
-};
-
-function modelFallbackWindow(model) {
-  const m = model?.toLowerCase() || '';
-  if (m.startsWith('qwen3.5') || m.startsWith('qwen3-5')) return 1_000_000;
-  if (m.startsWith('qwen3.6') || m.startsWith('qwen3-6')) return 1_000_000;
-  if (m.startsWith('qwen3-') || m.startsWith('qwen-m') || m.startsWith('qwen-p')) return 262_144;
-  if (m === 'qwen-turbo') return 262_144;
-  if (m.startsWith('deepseek-v4-')) return 1_000_000;
-  if (m.startsWith('deepseek-')) return 128_000;
-  return null;
-}
-
-function getContextWindow(provider, model) {
-  if (model) {
-    const tlProvider = TOKENLENS_PROVIDER[provider];
-    const ids = [];
-    if (tlProvider) {
-      ids.push(`${tlProvider}:${model}`);
-      ids.push(`${tlProvider}:${model.replace(/(\d)\.(\d)/g, '$1-$2')}`);
-    }
-    ids.push(model);
-    ids.push(model.replace(/(\d)\.(\d)/g, '$1-$2'));
-
-    for (const mid of ids) {
-      try {
-        const ctx = getContext({ modelId: mid });
-        if (ctx.maxTotal || ctx.combinedMax) return ctx.maxTotal || ctx.combinedMax;
-      } catch { /* tokenlens miss */ }
-    }
-
-    const modelWindow = modelFallbackWindow(model);
-    if (modelWindow) return modelWindow;
-  }
-
-  return FALLBACK_WINDOWS[provider] || 128_000;
 }
