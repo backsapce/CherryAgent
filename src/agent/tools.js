@@ -20,7 +20,7 @@ import {
   getSkill,
   searchSkills,
 } from './skills.js';
-import { downloadE2bFile, downloadRemoteFile, executeCommand, listFiles, readFileText, writeFile } from '../models/agent';
+import { downloadE2bFile, downloadRemoteFile, executeCommand, listFiles, readFileText, writeFile } from '../models/agent.js';
 import {
   getAgentFileInfo,
   getAgentSkillFileInfo,
@@ -31,8 +31,8 @@ import {
   readAgentSkillPath,
   writeAgentFile,
   writeAgentSkillPath,
-} from '../vfs/opfs';
-import config from '../config/config';
+} from '../vfs/opfs.js';
+import config from '../config/config.js';
 import { getAgent, listAgents, updateAgentConfig } from '../agents/agents.js';
 
 const DEFAULT_READ_FILE_MAX_BYTES = 256 * 1024;

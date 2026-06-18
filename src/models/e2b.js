@@ -6,7 +6,7 @@
  * Commands are sent via E2B's WebSocket protocol (browser-compatible).
  */
 
-import config from '../config/config';
+import config from '../config/config.js';
 import { Sandbox } from 'e2b';
 
 const E2B_TEMPLATE = 'base';

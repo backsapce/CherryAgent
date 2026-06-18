@@ -13,7 +13,7 @@ import {
   readAgentMemoryFile,
   writeAgentMemoryFile,
   deleteAgentMemoryFile,
-} from '../vfs/opfs';
+} from '../vfs/opfs.js';
 
 export const MEMORY_MAX = 8000;
 export const USER_MAX = 4000;
@@ -241,7 +241,7 @@ function parseMemoryDocument(content, type) {
   if (!text.includes(DOC_MARKER)) return parseLegacyMemory(text, type);
 
   const records = [];
-  const recordRe = /^##\s+([^\n]+)\n([\s\S]*?)(?=^##\s+|\s*$)/gm;
+  const recordRe = /^##\s+([^\n]+)\n([\s\S]*?)(?=^##\s+|(?![\s\S]))/gm;
   let match;
   while ((match = recordRe.exec(text)) !== null) {
     const id = normalizeId(match[1]);

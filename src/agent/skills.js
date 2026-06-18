@@ -20,8 +20,8 @@ import {
   listAgentSkillRefs,
   readAgentSkillRef,
   writeAgentSkillRef,
-} from '../vfs/opfs';
-import config from '../config/config';
+} from '../vfs/opfs.js';
+import config from '../config/config.js';
 
 const MAX_SKILL_CONTENT_CHARS = 60_000;
 const MAX_REFERENCE_CHARS = 80_000;
