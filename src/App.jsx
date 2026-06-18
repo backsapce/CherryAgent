@@ -11,6 +11,7 @@ import { ensureDefaultAgent, listAgents, updateAgentConfig } from './agents/agen
 import { configureAutoSync } from './sync/syncManager';
 import { I18nProvider } from './i18n/index';
 import { useI18n } from './i18n/context';
+import { editUserMessageAndDiscardFollowing } from './messageHistory';
 import { WifiOff, ChevronRight } from './components/Icons/Icons';
 import './App.css';
 
@@ -755,22 +756,19 @@ function App() {
 
   const handleEditMessage = useCallback((messageId, text) => {
     if (streaming || !activeSessionId) return;
-    const session = sessions.find((c) => c.id === activeSessionId);
+    const sessionId = activeSessionId;
+    const session = sessions.find((c) => c.id === sessionId);
     if (!session) return;
 
-    const messageIndex = session.messages.findIndex((m) => m.id === messageId);
-    const message = session.messages[messageIndex];
-    if (messageIndex === -1 || message?.role !== 'user') return;
+    const editResult = editUserMessageAndDiscardFollowing(session.messages, messageId, text);
+    if (!editResult) return;
 
-    const updatedMessage = { ...message, content: text };
-    const trimmedMessages = [
-      ...session.messages.slice(0, messageIndex),
-      updatedMessage,
-    ];
+    const { messageIndex, messages: trimmedMessages } = editResult;
+    setMessageQueue((prev) => prev.filter((item) => item.sessionId !== sessionId));
 
     setSessions((prev) =>
       sortSessions(prev.map((c) =>
-        c.id === activeSessionId
+        c.id === sessionId
           ? {
               ...c,
               title: messageIndex === 0 ? text.slice(0, 30) + (text.length > 30 ? '...' : '') : c.title,
@@ -782,7 +780,7 @@ function App() {
       ))
     );
 
-    setTimeout(() => streamResponse(activeSessionId, trimmedMessages), 0);
+    setTimeout(() => streamResponse(sessionId, trimmedMessages), 0);
   }, [activeSessionId, sessions, streaming, streamResponse]);
 
   const handleSelectLLM = useCallback(async (profileId) => {
