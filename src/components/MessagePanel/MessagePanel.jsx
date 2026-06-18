@@ -2,7 +2,8 @@ import { forwardRef, lazy, Suspense, useImperativeHandle, useState, useRef, useE
 import { useI18n } from '../../i18n/context';
 import { getAgentDir, normalizeWorkspaceRelativePath } from '../../vfs/opfs';
 import { listFiles, readFileText } from '../../models/agent';
-import { ChevronRight, Settings as SettingsIcon, Folder, File, FileEdit, Copy, MessageSquare, Plus, X, Send, Stop, Plug, PieChart, Cloud, User, ImageGenerate } from '../Icons/Icons';
+import { getSyncStatus, subscribeSyncStatus } from '../../sync/syncManager';
+import { ChevronRight, Settings as SettingsIcon, Folder, File, FileEdit, Copy, MessageSquare, Plus, X, Send, Stop, Plug, PieChart, Cloud, User, ImageGenerate, Refresh } from '../Icons/Icons';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
@@ -626,6 +627,7 @@ const MessagePanel = forwardRef(({
   const [mentionError, setMentionError] = useState('');
   const [mentionActiveIndex, setMentionActiveIndex] = useState(0);
   const [showSettings, setShowSettings] = useState(false);
+  const [syncStatus, setSyncStatus] = useState(() => getSyncStatus());
   const [visibleMessageCount, setVisibleMessageCount] = useState(MESSAGE_HISTORY_PAGE_SIZE);
   const messageListRef = useRef(null);
   const shouldAutoScrollRef = useRef(true);
@@ -645,6 +647,7 @@ const MessagePanel = forwardRef(({
   const selectedLlmProviderLabel = selectedProvider?.name || selectedLlmProfile?.provider || t('message.noProviderConfigured');
   const selectedLlmModelLabel = selectedLlmProfile?.model || selectedLlmProfile?.name || '';
   const showCenteredInput = !activeSessionId || messages.length === 0;
+  const showSyncIndicator = syncStatus.syncing || syncStatus.queued;
   const activeSandbox = useMemo(
     () => (agents || []).find((agent) => agent.url === selectedAgentUrl && agent.status === 'connected') || null,
     [agents, selectedAgentUrl]
@@ -663,6 +666,8 @@ const MessagePanel = forwardRef(({
       resetEmptyTextareaCaret(textareaRef.current);
     },
   }), []);
+
+  useEffect(() => subscribeSyncStatus(setSyncStatus), []);
 
   useEffect(() => {
     if (!shouldAutoScrollRef.current) return;
@@ -1050,7 +1055,12 @@ const MessagePanel = forwardRef(({
 
       {/* Header bar with settings and file manager */}
       <div className="message-panel-header">
-        
+        {showSyncIndicator && (
+          <div className="sync-status-indicator" role="status" aria-label={t('syncSettings.working')} title={t('syncSettings.working')}>
+            <Refresh width={18} height={18} aria-hidden="true" />
+          </div>
+        )}
+
         {agentList.length > 0 && (
           <div className="agent-selector">
             <User width={14} height={14} />

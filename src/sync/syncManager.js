@@ -32,6 +32,27 @@ let activeRun = null;
 let pendingAutoSync = false;
 let autoRefreshCallback = null;
 let deleteStateWrite = Promise.resolve();
+const statusListeners = new Set();
+
+export function getSyncStatus() {
+  return {
+    syncing: Boolean(activeRun),
+    queued: pendingAutoSync,
+  };
+}
+
+function notifySyncStatus() {
+  const status = getSyncStatus();
+  for (const listener of statusListeners) {
+    try { listener(status); } catch (err) { console.warn('Sync status listener failed:', err); }
+  }
+}
+
+export function subscribeSyncStatus(listener) {
+  statusListeners.add(listener);
+  listener(getSyncStatus());
+  return () => statusListeners.delete(listener);
+}
 
 function statsChangedLocal(stats) {
   return Boolean(stats && (
@@ -714,10 +735,12 @@ function getSyncConfig() {
 async function runExclusive(fn) {
   if (activeRun) return activeRun;
   activeRun = fn().finally(() => {
+    const shouldRunPending = pendingAutoSync;
     activeRun = null;
-    if (pendingAutoSync) {
-      pendingAutoSync = false;
+    notifySyncStatus();
+    if (shouldRunPending) {
       queueMicrotask(() => {
+        pendingAutoSync = false;
         const syncConfig = getSyncConfig();
         if (syncConfig.enabled) {
           syncNow(syncConfig)
@@ -725,10 +748,13 @@ async function runExclusive(fn) {
               if (syncResultChangedLocal(result)) autoRefreshCallback?.();
             })
             .catch((err) => console.warn('Queued auto sync failed:', err));
+        } else {
+          notifySyncStatus();
         }
       });
     }
   });
+  notifySyncStatus();
   return activeRun;
 }
 
@@ -771,6 +797,7 @@ function scheduleAutoSync(onStorageRestored, event) {
     if (!syncConfig.enabled) return;
     if (activeRun) {
       pendingAutoSync = true;
+      notifySyncStatus();
       return;
     }
     syncNow(syncConfig)
