@@ -10,6 +10,7 @@
     "session": {
         "newSession": "New Session",
         "deleteSession": "Delete session",
+        "exportDebug": "Export chat debug",
         "noMessages": "No messages yet",
         "noConversations": "No conversations yet",
         "clickToStart": "Click + to start a new session"

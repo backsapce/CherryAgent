@@ -8,12 +8,14 @@ import { getEnabledToolSchemas, registry } from './tools.js';
 import { assembleApiMessages } from './context.js';
 import { loadMemory } from './memory.js';
 import { buildSkillsSection } from './skills.js';
+import { compactToolResultForModel } from './toolObservation.js';
 import { readAgentAgentsFile } from '../vfs/opfs.js';
 import { getAgent, getWorkspaceDirName } from '../agents/agents.js';
 
 const DEFAULT_MAX_ROUNDS = 40;
 const ABSOLUTE_MAX_ROUNDS = 80;
 const MAX_CONTINUATION_GUARDS = 2;
+const STREAMING_TOOL_OUTPUT_MAX_CHARS = 80_000;
 
 const CONTINUATION_INTENT_RE =
   /\b(?:wait(?:ing)?|poll|check(?:ing)?|download(?:ing)?|compare|continue|next step|not (?:done|finished|complete)|after .*complete|once .*complete)\b|(?:等待|生成完成后|完成后|下载|对比|继续|下一步|稍后|轮生成任务)/i;
@@ -77,7 +79,7 @@ export async function runAgentLoop(opts) {
     llmProfileId: opts.llmProfileId,
     provider: opts.provider,
     model: opts.model,
-    contextWindow: opts.contextWindow,
+    contextWindow,
     subAgentDepth,
     signal,
   };
@@ -93,6 +95,8 @@ export async function runAgentLoop(opts) {
   let completed = false;
   let exhaustedRounds = false;
   let usageTotals = emptyUsageTotals();
+  let latestUsage = null;
+  let usageCallCount = 0;
 
   for (let round = 0; round < maxRounds; round += 1) {
     throwIfAborted(signal);
@@ -126,7 +130,11 @@ export async function runAgentLoop(opts) {
     displayThinking = appendDisplaySegment(displayThinking, response.thinking);
     finalContent = displayContent;
     finalThinking = displayThinking;
-    usageTotals = addUsage(usageTotals, response.usage);
+    if (hasUsageTokens(response.usage)) {
+      latestUsage = normalizeUsage(response.usage);
+      usageTotals = addUsage(usageTotals, latestUsage);
+      usageCallCount += 1;
+    }
 
     if (!response.toolCalls?.length) {
       if (
@@ -200,16 +208,18 @@ export async function runAgentLoop(opts) {
     displayThinking = appendDisplaySegment(displayThinking, response.thinking);
     finalContent = displayContent || finalContent;
     finalThinking = displayThinking || finalThinking;
-    usageTotals = addUsage(usageTotals, response.usage);
+    if (hasUsageTokens(response.usage)) {
+      latestUsage = normalizeUsage(response.usage);
+      usageTotals = addUsage(usageTotals, latestUsage);
+      usageCallCount += 1;
+    }
   }
 
   return {
     content: finalContent,
     thinking: finalThinking,
     toolCalls: Object.values(allToolCalls),
-    usage: usageTotals.total_tokens > 0
-      ? { ...usageTotals, content_len: contextWindow }
-      : null,
+    usage: buildUsageReport(latestUsage, usageTotals, contextWindow, usageCallCount),
   };
 }
 
@@ -338,8 +348,8 @@ async function executeToolCall(toolCall, env) {
 
   const updateRunningOutput = (chunk) => {
     if (!allToolCalls[toolCall.id]) return;
-    if (chunk?.stdout) streamingStdout += chunk.stdout;
-    if (chunk?.stderr) streamingStderr += chunk.stderr;
+    if (chunk?.stdout) streamingStdout = appendStreamingOutput(streamingStdout, chunk.stdout, 'stdout');
+    if (chunk?.stderr) streamingStderr = appendStreamingOutput(streamingStderr, chunk.stderr, 'stderr');
     allToolCalls[toolCall.id].result = formatStreamingCommandResult(streamingStdout, streamingStderr);
     allToolCalls[toolCall.id].status = 'running';
     onUpdate({ content, thinking, toolCalls: Object.values(allToolCalls) });
@@ -351,13 +361,16 @@ async function executeToolCall(toolCall, env) {
       onToolUpdate: updateRunningOutput,
     });
     const resultStr = String(result);
+    const modelResultStr = compactToolResultForModel(toolCall, resultStr, {
+      contextWindow: toolContext.contextWindow,
+    });
     updateToolCall(allToolCalls, toolCall, {
       status: 'completed',
       result: resultStr,
       summary: formatToolCallSummary(toolCall, resultStr),
     });
     onUpdate({ content, thinking, toolCalls: Object.values(allToolCalls) });
-    return buildToolResultMessage(toolCall, resultStr);
+    return buildToolResultMessage(toolCall, modelResultStr);
   } catch (err) {
     if (err.name === 'AbortError') {
       const abortStr = formatAbortResult(streamingStdout, streamingStderr);
@@ -370,13 +383,16 @@ async function executeToolCall(toolCall, env) {
       throw err;
     }
     const errStr = `Error: ${err.message}`;
+    const modelErrStr = compactToolResultForModel(toolCall, errStr, {
+      contextWindow: toolContext.contextWindow,
+    });
     updateToolCall(allToolCalls, toolCall, {
       status: 'error',
       result: errStr,
       summary: formatToolCallSummary(toolCall),
     });
     onUpdate({ content, thinking, toolCalls: Object.values(allToolCalls) });
-    return buildToolResultMessage(toolCall, errStr);
+    return buildToolResultMessage(toolCall, modelErrStr);
   }
 }
 
@@ -385,6 +401,8 @@ function registerToolCalls(toolCalls, allToolCalls) {
     allToolCalls[toolCall.id] = {
       id: toolCall.id,
       name: toolCall.name,
+      parsedArgs: toolCall.parsedArgs,
+      rawArgs: toolCall.rawArgs,
       status: getInitialToolStatus(toolCall.name),
       command: getToolCallCommand(toolCall),
       summary: formatToolCallSummary(toolCall),
@@ -499,6 +517,14 @@ function formatStreamingCommandResult(stdout, stderr) {
   return out;
 }
 
+function appendStreamingOutput(existing, chunk, streamName) {
+  const combined = `${existing || ''}${chunk || ''}`;
+  if (combined.length <= STREAMING_TOOL_OUTPUT_MAX_CHARS) return combined;
+  const notice = `[${streamName} streaming output trimmed to latest ${STREAMING_TOOL_OUTPUT_MAX_CHARS} chars]\n`;
+  const tailBudget = Math.max(1, STREAMING_TOOL_OUTPUT_MAX_CHARS - notice.length);
+  return `${notice}${combined.slice(-tailBudget)}`;
+}
+
 function formatAbortResult(stdout, stderr) {
   let out = '';
   if (stdout) out += `Stdout:\n${stdout}`;
@@ -538,6 +564,29 @@ function addUsage(total, usage) {
     completion_tokens: total.completion_tokens + normalized.completion_tokens,
     total_tokens: total.total_tokens + normalized.total_tokens,
   };
+}
+
+function buildUsageReport(latestUsage, usageTotals, contextWindow, usageCallCount) {
+  const latest = latestUsage || (hasUsageTokens(usageTotals) ? normalizeUsage(usageTotals) : null);
+  if (!hasUsageTokens(latest)) return null;
+
+  const turn = hasUsageTokens(usageTotals) ? normalizeUsage(usageTotals) : latest;
+  return {
+    ...latest,
+    content_len: contextWindow,
+    turn_prompt_tokens: turn.prompt_tokens,
+    turn_completion_tokens: turn.completion_tokens,
+    turn_total_tokens: turn.total_tokens,
+    model_call_count: usageCallCount || 1,
+  };
+}
+
+function hasUsageTokens(usage) {
+  if (!usage) return false;
+  const normalized = normalizeUsage(usage);
+  return normalized.prompt_tokens > 0
+    || normalized.completion_tokens > 0
+    || normalized.total_tokens > 0;
 }
 
 function normalizeUsage(usage, previous = null) {

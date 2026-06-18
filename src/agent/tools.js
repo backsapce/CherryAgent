@@ -45,6 +45,7 @@ const DEFAULT_IMAGE_QUALITY = 0.82;
 const MAX_IMAGE_DATA_URL_BYTES = 1_500_000;
 const E2B_AGENT_ID = '__e2b__';
 const TOOL_RESULT_MAX_CHARS = 80_000;
+const TOOL_RESULT_HEAD_RATIO = 0.62;
 
 // ─── Registry singleton ─────────────────────────────────────────────────────
 
@@ -212,7 +213,25 @@ function capToolResult(result) {
       ? ''
       : JSON.stringify(result, null, 2);
   if (text.length <= TOOL_RESULT_MAX_CHARS) return text;
-  return `${text.slice(0, TOOL_RESULT_MAX_CHARS)}\n[tool result truncated: ${text.length - TOOL_RESULT_MAX_CHARS} chars omitted]`;
+  return truncateMiddle(text, TOOL_RESULT_MAX_CHARS, 'tool result truncated');
+}
+
+function truncateMiddle(text, maxChars, label = 'truncated') {
+  const value = String(text || '');
+  if (value.length <= maxChars) return value;
+
+  let marker = `\n[${label}]\n`;
+  let available = Math.max(1, maxChars - marker.length);
+  let headChars = Math.ceil(available * TOOL_RESULT_HEAD_RATIO);
+  let tailChars = Math.max(0, available - headChars);
+  let omitted = Math.max(0, value.length - headChars - tailChars);
+
+  marker = `\n[${label}: ${omitted} chars omitted from middle]\n`;
+  available = Math.max(1, maxChars - marker.length);
+  headChars = Math.ceil(available * TOOL_RESULT_HEAD_RATIO);
+  tailChars = Math.max(0, available - headChars);
+
+  return `${value.slice(0, headChars)}${marker}${value.slice(value.length - tailChars)}`;
 }
 
 // ─── Built-in tools ─────────────────────────────────────────────────────────

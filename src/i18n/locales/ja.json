@@ -10,6 +10,7 @@
     "session": {
         "newSession": "新しいセッション",
         "deleteSession": "セッションを削除",
+        "exportDebug": "チャットデバッグをエクスポート",
         "noMessages": "メッセージなし",
         "noConversations": "会話はまだありません",
         "clickToStart": "+ をクリックして新しいセッションを開始"

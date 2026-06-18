@@ -6,6 +6,7 @@ import config from './config/config';
 import llm from './models/llm';
 import { executeCommand, initAgents, cleanupE2b, enableE2b, E2B_AGENT_ID, getSandboxStatus } from './models/agent';
 import { runAgentLoop } from './agent/loop';
+import { buildChatDebugExport, createChatDebugFilename } from './agent/debug';
 import { ensureDefaultSkills } from './agent/skills';
 import { ensureDefaultAgent, listAgents, updateAgentConfig } from './agents/agents';
 import { configureAutoSync } from './sync/syncManager';
@@ -19,6 +20,18 @@ const FileManage = lazy(() => import('./components/FileManage/FileManage'));
 
 function generateId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+
+function downloadJsonFile(filename, data) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 
 function formatTime(date) {
@@ -497,6 +510,49 @@ function App() {
     });
   }, [activeSessionId, sessions]);
 
+  const handleExportDebug = useCallback(() => {
+    const session = sessions.find((c) => c.id === activeSessionId);
+    if (!session) return;
+
+    const agentId = session.agentId || sessionAgents[session.id] || null;
+    const agent = agentId ? agentList.find((item) => item.id === agentId) : null;
+    const llmProfileId = session.llmProfileId
+      || sessionLlmProfiles[session.id]
+      || currentLlmProfileId
+      || agent?.llmProfileId
+      || llm.getActiveProfileId()
+      || getFirstLlmProfileId();
+    const llmProfile = llm.getActiveConfig(llmProfileId);
+    const provider = llm.getProviders().find((item) => item.id === llmProfile?.provider) || null;
+    const hasToolContext = Boolean(agent?.sandboxUrl || agentId);
+
+    const payload = buildChatDebugExport({
+      session,
+      messages: session.messages,
+      llmMessages: expandMessagesForLlm(session.messages),
+      systemPrompt: hasToolContext ? AGENT_SYSTEM_PROMPT : '',
+      llmProfile,
+      provider,
+      agent,
+      runtime: {
+        activeSessionId,
+        streaming: streaming && session.id === activeSessionId,
+        hasToolContext,
+      },
+    });
+
+    downloadJsonFile(createChatDebugFilename(session), payload);
+  }, [
+    activeSessionId,
+    agentList,
+    currentLlmProfileId,
+    getFirstLlmProfileId,
+    sessionAgents,
+    sessionLlmProfiles,
+    sessions,
+    streaming,
+  ]);
+
   // Stream LLM response for a given session using the agent loop
   const streamResponse = useCallback(async (sessionId, sessionMessages, opts = {}) => {
     // Prevent duplicate calls (StrictMode double-invoke guard)
@@ -609,15 +665,21 @@ function App() {
                   result: tc.result,
                   summary: tc.summary,
                   command: tc.command,
+                  parsedArgs: tc.parsedArgs,
+                  rawArgs: tc.rawArgs,
                 });
               } else if (tc.result !== undefined || tc.status !== undefined) {
                 if (tc.status !== undefined) existing.status = tc.status;
                 if (tc.result !== undefined) existing.result = tc.result;
                 if (tc.summary !== undefined) existing.summary = tc.summary;
                 if (tc.command !== undefined) existing.command = tc.command;
+                if (tc.parsedArgs !== undefined) existing.parsedArgs = tc.parsedArgs;
+                if (tc.rawArgs !== undefined) existing.rawArgs = tc.rawArgs;
               } else if (tc.summary !== undefined) {
                 existing.summary = tc.summary;
                 if (tc.command !== undefined) existing.command = tc.command;
+                if (tc.parsedArgs !== undefined) existing.parsedArgs = tc.parsedArgs;
+                if (tc.rawArgs !== undefined) existing.rawArgs = tc.rawArgs;
               }
             }
           }
@@ -842,6 +904,8 @@ function App() {
         onSelectSession={handleSelectSession}
         onNewSession={handleNewSession}
         onDeleteSession={handleDeleteSession}
+        onExportDebug={handleExportDebug}
+        debugExportDisabled={!activeSessionId}
         collapsed={leftPanelCollapsed}
         onToggleCollapse={() => setLeftPanelCollapsed(prev => !prev)}
         sessionAgents={sessionAgents}

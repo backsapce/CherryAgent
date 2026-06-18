@@ -216,6 +216,20 @@ export const AlertTriangle = ({ width = 24, height = 24, className = '' }) => (
   </IconBase>
 );
 
+export const Bug = ({ width = 18, height = 18, className = '' }) => (
+  <IconBase width={width} height={height} viewBox="0 0 24 24" className={className}>
+    <rect x="8" y="6" width="8" height="14" rx="4" />
+    <path d="M8 8H4" />
+    <path d="M16 8h4" />
+    <path d="M7 13H3" />
+    <path d="M17 13h4" />
+    <path d="M8 18H5" />
+    <path d="M16 18h3" />
+    <path d="M9 3l2 3" />
+    <path d="M15 3l-2 3" />
+  </IconBase>
+);
+
 // Language & Globe Icons
 export const Globe = ({ width = 16, height = 16, className = '' }) => (
   <IconBase width={width} height={height} viewBox="0 0 24 24" className={className}>

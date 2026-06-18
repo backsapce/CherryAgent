@@ -1,12 +1,24 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { useI18n } from '../../i18n/context';
-import { Plus, X, Menu, ChevronLeft, ChevronRight } from '../Icons/Icons';
+import { Plus, X, Menu, ChevronLeft, ChevronRight, Bug } from '../Icons/Icons';
 import './SessionList.css';
 
 // Breakpoint for mobile/tablet
 const MOBILE_BREAKPOINT = 768;
 
-const SessionList = ({ sessions, activeSessionId, onSelectSession, onNewSession, onDeleteSession, collapsed = false, onToggleCollapse, sessionAgents = {}, agentList = [] }) => {
+const SessionList = ({
+  sessions,
+  activeSessionId,
+  onSelectSession,
+  onNewSession,
+  onDeleteSession,
+  onExportDebug,
+  debugExportDisabled = false,
+  collapsed = false,
+  onToggleCollapse,
+  sessionAgents = {},
+  agentList = [],
+}) => {
   const { t } = useI18n();
   const [width, setWidth] = useState(280);
   const [isResizing, setIsResizing] = useState(false);
@@ -38,6 +50,10 @@ const SessionList = ({ sessions, activeSessionId, onSelectSession, onNewSession,
     }
     onNewSession();
   }, [isMobile, onNewSession]);
+
+  const handleExportDebug = useCallback(() => {
+    onExportDebug?.();
+  }, [onExportDebug]);
 
   const handleMouseDown = useCallback((e) => {
     e.preventDefault();
@@ -162,6 +178,17 @@ const SessionList = ({ sessions, activeSessionId, onSelectSession, onNewSession,
                 <p>{t('session.clickToStart')}</p>
               </div>
             )}
+          </div>
+          <div className="session-list-debug-action">
+            <button
+              className="session-debug-export-btn"
+              onClick={handleExportDebug}
+              title={t('session.exportDebug')}
+              aria-label={t('session.exportDebug')}
+              disabled={!onExportDebug || debugExportDisabled}
+            >
+              <Bug width={18} height={18} />
+            </button>
           </div>
           {!isMobile && !collapsed && (
             <div
