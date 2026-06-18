@@ -229,6 +229,14 @@ export async function listOpfsFiles(options = {}) {
   return files;
 }
 
+export async function getOpfsDataStats(options = {}) {
+  const files = await listOpfsFiles({ includeSync: true, ...options, hash: false });
+  return {
+    fileCount: files.length,
+    totalBytes: files.reduce((total, file) => total + (Number(file.size) || 0), 0),
+  };
+}
+
 function parseJson(text) {
   try {
     return JSON.parse(text);

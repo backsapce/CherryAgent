@@ -141,6 +141,11 @@
     "dataSettings": {
         "title": "データ管理",
         "desc": "すべてのセッションと設定を zip ファイルにエクスポート、または以前のバックアップからインポートします。",
+        "storageTitle": "ブラウザーファイルシステム",
+        "storageDesc": "このブラウザーに保存されている VertexAgent データの合計です。",
+        "storageLoading": "計算中...",
+        "storageError": "ストレージサイズを計算できません。",
+        "storageFiles": "ファイル数: {count}",
         "exportTitle": "データエクスポート",
         "exportDesc": "すべてのセッション、メッセージ、設定を zip ファイルとしてダウンロードします。",
         "exporting": "エクスポート中...",

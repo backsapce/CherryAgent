@@ -831,6 +831,39 @@
   margin-top: 8px;
 }
 
+.data-storage-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px;
+  border-radius: 10px;
+  border: 1px solid var(--color-border);
+  background: color-mix(in srgb, var(--color-primary) 6%, var(--color-surface-alt));
+}
+
+.data-storage-metric {
+  flex-shrink: 0;
+  min-width: 120px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: flex-end;
+  text-align: right;
+}
+
+.data-storage-size {
+  font-size: 20px;
+  line-height: 1.1;
+  font-weight: 700;
+  color: var(--color-text);
+}
+
+.data-storage-detail {
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--color-text-tertiary);
+}
+
 .data-action-card {
   display: flex;
   align-items: center;
@@ -1405,9 +1438,16 @@
   .sandbox-add-row,
   .e2b-add-row,
   .model-select-row,
+  .data-storage-card,
   .data-action-card {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .data-storage-metric {
+    min-width: 0;
+    align-items: flex-start;
+    text-align: left;
   }
 
   .theme-option {

@@ -141,6 +141,11 @@
     "dataSettings": {
         "title": "数据管理",
         "desc": "将所有会话和设置导出为 zip 文件，或导入之前导出的备份。",
+        "storageTitle": "浏览器文件系统",
+        "storageDesc": "此浏览器中存储的 VertexAgent 数据总量。",
+        "storageLoading": "正在计算...",
+        "storageError": "无法计算存储大小。",
+        "storageFiles": "文件数：{count}",
         "exportTitle": "导出数据",
         "exportDesc": "将所有会话、消息和配置下载为 zip 文件。",
         "exporting": "导出中...",

@@ -141,6 +141,11 @@
     "dataSettings": {
         "title": "Data Management",
         "desc": "Export all your sessions and settings to a zip file, or import a previously exported backup.",
+        "storageTitle": "Browser File System",
+        "storageDesc": "Total VertexAgent data stored in this browser.",
+        "storageLoading": "Calculating...",
+        "storageError": "Unable to calculate storage size.",
+        "storageFiles": "Files: {count}",
         "exportTitle": "Export Data",
         "exportDesc": "Download all sessions, messages, and config as a zip file.",
         "exporting": "Exporting...",

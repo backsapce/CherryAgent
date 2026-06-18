@@ -1088,6 +1088,7 @@ function App() {
           }
         }}
         onStorageRestored={refreshFromStorage}
+        storageVersion={storageVersion}
       />
       {showFileManage && (
         <Suspense fallback={null}>

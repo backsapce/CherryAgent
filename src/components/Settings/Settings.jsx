@@ -1,17 +1,29 @@
 import { useState, useRef, useEffect } from 'react';
 import { checkAgentAvailable, connectAgent } from '../../models/agent';
-import { exportToZip, importFromZip } from '../../vfs/opfs';
+import { exportToZip, getOpfsDataStats, importFromZip } from '../../vfs/opfs';
 import config from '../../config/config';
 import { pullSync, pushSync, syncNow, syncResultChangedLocal, testSyncConnection } from '../../sync/syncManager';
 import { useI18n } from '../../i18n/context';
 import { SUPPORTED_LOCALES } from '../../i18n/locales';
-import { X, Lock, Plug, Sun, Moon, Monitor, UploadCloud, DownloadCloud, AlertTriangle, Globe, ChevronDown, User, Cloud, Layers, Refresh, Upload, Download } from '../Icons/Icons';
+import { X, Lock, Plug, Sun, Moon, Monitor, UploadCloud, DownloadCloud, AlertTriangle, Globe, ChevronDown, User, Cloud, HardDrive, Layers, Refresh, Upload, Download } from '../Icons/Icons';
 import { listAllSkills, setSkillEnabled } from '../../agent/skills';
 import { listAllTools, setToolEnabled } from '../../agent/tools';
 import { createAgent, deleteAgent, updateAgentName, updateAgentConfig, listAgents } from '../../agents/agents';
 import './Settings.css';
 
 const AVATAR_SIZE = 256;
+
+function formatDataSize(bytes) {
+  const value = Number(bytes);
+  if (!Number.isFinite(value) || value <= 0) return '0 B';
+
+  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+  const exponent = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1);
+  const size = value / (1024 ** exponent);
+  const maximumFractionDigits = exponent === 0 ? 0 : size >= 100 ? 0 : size >= 10 ? 1 : 2;
+
+  return `${new Intl.NumberFormat(undefined, { maximumFractionDigits }).format(size)} ${units[exponent]}`;
+}
 
 function fileToAvatarDataUrl(file) {
   return new Promise((resolve, reject) => {
@@ -65,6 +77,7 @@ const Settings = ({
   agentList = [],
   onAgentListChange,
   onStorageRestored,
+  storageVersion = 0,
 }) => {
   const { t, localePref, changeLocale } = useI18n();
   const [settingsTab, setSettingsTab] = useState('llm');
@@ -93,6 +106,12 @@ const Settings = ({
   const [dataExporting, setDataExporting] = useState(false);
   const [dataImporting, setDataImporting] = useState(false);
   const [dataMessage, setDataMessage] = useState(null);
+  const [dataStorageStats, setDataStorageStats] = useState({
+    loading: false,
+    error: null,
+    fileCount: 0,
+    totalBytes: 0,
+  });
   const [factoryResetting, setFactoryResetting] = useState(false);
   const zipInputRef = useRef(null);
   const [localNickname, setLocalNickname] = useState(userNickname || '');
@@ -215,6 +234,28 @@ const Settings = ({
       }
     }
   }, [settingsTab]);
+
+  useEffect(() => {
+    if (!show || settingsTab !== 'data') return;
+
+    let canceled = false;
+    setDataStorageStats((prev) => ({ ...prev, loading: true, error: null }));
+
+    getOpfsDataStats()
+      .then((stats) => {
+        if (canceled) return;
+        setDataStorageStats({ ...stats, loading: false, error: null });
+      })
+      .catch((err) => {
+        console.error('Failed to calculate OPFS data size:', err);
+        if (canceled) return;
+        setDataStorageStats((prev) => ({ ...prev, loading: false, error: err }));
+      });
+
+    return () => {
+      canceled = true;
+    };
+  }, [show, settingsTab, storageVersion]);
 
   const handleToolToggle = async (toolName, enabled) => {
     await setToolEnabled(toolName, enabled);
@@ -1042,6 +1083,32 @@ const Settings = ({
               {dataMessage && (
                 <p className={`settings-${dataMessage.type === 'error' ? 'error' : 'success'}`}>{dataMessage.text}</p>
               )}
+
+              <div className="data-storage-card">
+                <div className="data-action-icon">
+                  <HardDrive width={24} height={24} />
+                </div>
+                <div className="data-action-info">
+                  <span className="data-action-title">{t('dataSettings.storageTitle')}</span>
+                  <span className="data-action-desc">{t('dataSettings.storageDesc')}</span>
+                </div>
+                <div className="data-storage-metric" aria-live="polite">
+                  <span className="data-storage-size">
+                    {dataStorageStats.loading
+                      ? '...'
+                      : dataStorageStats.error
+                        ? '--'
+                        : formatDataSize(dataStorageStats.totalBytes)}
+                  </span>
+                  <span className="data-storage-detail">
+                    {dataStorageStats.loading
+                      ? t('dataSettings.storageLoading')
+                      : dataStorageStats.error
+                        ? t('dataSettings.storageError')
+                        : t('dataSettings.storageFiles', { count: dataStorageStats.fileCount })}
+                  </span>
+                </div>
+              </div>
 
               <div className="data-actions">
                 <div className="data-action-card">
