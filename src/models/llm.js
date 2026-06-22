@@ -25,6 +25,8 @@ import deepseek from './providers/deepseek.js';
 import customOpenai from './providers/custom-openai.js';
 import { loadSettings, saveSettings } from './settings.js';
 import { getModelContextWindowFallback } from './contextWindow.js';
+import { jsonSchema, streamText, tool } from 'ai';
+import { createLanguageModel, normalizeAiUsage, toModelMessages } from './ai.js';
 
 // ─── Provider registry ──────────────────────────────────────────────────────
 
@@ -273,6 +275,32 @@ const llm = {
     };
   },
 
+  /**
+   * Build a Vercel AI SDK model for a saved profile.
+   * API keys remain local to the browser and are never returned by
+   * getActiveConfig(), which is safe to use for UI rendering.
+   */
+  getLanguageModel(profileId = activeProfileId) {
+    const profile = getProfile(profileId);
+    const provider = providers[profile?.provider];
+    if (!provider) {
+      throw new Error('No LLM provider configured. Please set up a provider in Settings.');
+    }
+    if (!profile.apiKey) {
+      throw new Error(`API key not set for ${provider.name}. Please add your key in Settings.`);
+    }
+    const model = profile.model || provider.defaultModel;
+    if (!model) {
+      throw new Error(`No model selected for ${provider.name}.`);
+    }
+    return createLanguageModel({
+      provider: profile.provider,
+      apiKey: profile.apiKey,
+      baseUrl: profile.baseUrl || provider.defaultBaseUrl,
+      model,
+    });
+  },
+
   getProfiles() {
     return Object.values(profiles).map((profile) => llm.getActiveConfig(profile.id));
   },
@@ -378,43 +406,41 @@ const llm = {
   },
 
   /**
-   * Send a session request and return an async generator of content chunks.
-   *
-   * @param {Array<{ role: string, content: string }>} messages
-   * @param {Object} [opts] - { signal?, temperature?, maxTokens?, systemPrompt?, tools? }
-   * @returns {AsyncGenerator<{ content?: string, reasoning?: string, toolCalls?: Array, usage?: Object }>}
+   * Backward-compatible stream adapter over AI SDK events.
+   * New agent code should consume streamText().fullStream through agent/events.
    */
   async *streamSession(messages, opts = {}) {
-    const profile = getProfile(opts.llmProfileId);
-    const provider = providers[profile?.provider];
-    if (!provider) {
-      throw new Error(
-        'No LLM provider configured. Please set up a provider in Settings.'
-      );
-    }
-    if (!profile.apiKey) {
-      throw new Error(
-        `API key not set for ${provider.name}. Please add your key in Settings.`
-      );
-    }
-
-    // Prepend system prompt if provided
     const fullMessages = opts.systemPrompt
       ? [{ role: 'system', content: opts.systemPrompt }, ...messages]
       : messages;
-
-    const config = {
-      apiKey: profile.apiKey,
-      baseUrl: profile.baseUrl,
-      model: profile.model || provider.defaultModel,
-    };
-
-    yield* provider.stream(config, fullMessages, {
-      signal: opts.signal,
-      temperature: opts.temperature,
-      maxTokens: opts.maxTokens,
-      tools: opts.tools,
+    const tools = createAiTools(opts.tools);
+    const result = streamText({
+      model: llm.getLanguageModel(opts.llmProfileId),
+      messages: toModelMessages(fullMessages),
+      ...(Object.keys(tools).length ? { tools } : {}),
+      ...(opts.signal ? { abortSignal: opts.signal } : {}),
+      ...(opts.temperature != null ? { temperature: opts.temperature } : {}),
+      ...(opts.maxTokens != null ? { maxOutputTokens: opts.maxTokens } : {}),
+      maxRetries: 0,
     });
+
+    for await (const part of result.fullStream) {
+      if (part.type === 'text-delta') yield { content: part.text };
+      else if (part.type === 'reasoning-delta') yield { reasoning: part.text };
+      else if (part.type === 'tool-call') {
+        yield {
+          toolCalls: [{
+            id: part.toolCallId,
+            name: part.toolName,
+            arguments: JSON.stringify(part.input || {}),
+          }],
+        };
+      } else if (part.type === 'finish') {
+        yield { usage: normalizeAiUsage(part.totalUsage) };
+      } else if (part.type === 'error') {
+        throw part.error;
+      }
+    }
   },
 
   /**
@@ -424,15 +450,22 @@ const llm = {
    * @returns {Promise<string>}
    */
   async completeSession(messages, opts = {}) {
-    let result = '';
-    for await (const chunk of llm.streamSession(messages, opts)) {
-      if (typeof chunk === 'string') {
-        result += chunk;
-      } else if (chunk.content) {
-        result += chunk.content;
-      }
+    const result = streamText({
+      model: llm.getLanguageModel(opts.llmProfileId),
+      messages: toModelMessages(opts.systemPrompt
+        ? [{ role: 'system', content: opts.systemPrompt }, ...messages]
+        : messages),
+      ...(opts.signal ? { abortSignal: opts.signal } : {}),
+      ...(opts.temperature != null ? { temperature: opts.temperature } : {}),
+      ...(opts.maxTokens != null ? { maxOutputTokens: opts.maxTokens } : {}),
+      maxRetries: 0,
+    });
+    let content = '';
+    for await (const part of result.fullStream) {
+      if (part.type === 'text-delta') content += part.text;
+      else if (part.type === 'error') throw part.error;
     }
-    return result;
+    return content;
   },
 
   /**
@@ -449,5 +482,15 @@ const llm = {
     return !!(profile?.provider && profile?.apiKey);
   },
 };
+
+function createAiTools(schemas = []) {
+  return Object.fromEntries((schemas || []).map((schema) => [
+    schema.name,
+    tool({
+      description: schema.description,
+      inputSchema: jsonSchema(schema.parameters || { type: 'object', properties: {} }),
+    }),
+  ]));
+}
 
 export default llm;

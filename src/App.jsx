@@ -6,6 +6,7 @@ import config from './config/config';
 import llm from './models/llm';
 import { executeCommand, initAgents, cleanupE2b, enableE2b, E2B_AGENT_ID, getSandboxStatus } from './models/agent';
 import { runAgentLoop } from './agent/loop';
+import { applyAgentEvent, createAgentEventState } from './agent/events';
 import { buildChatDebugExport, createChatDebugFilename } from './agent/debug';
 import { ensureDefaultSkills } from './agent/skills';
 import { ensureDefaultAgent, listAgents, updateAgentConfig } from './agents/agents';
@@ -602,6 +603,7 @@ function App() {
 
     // Track tool calls for this message
     const toolCalls = [];
+    let agentEventState = createAgentEventState();
 
     // Helper: update message in state
     const updateMessage = (fields) => {
@@ -650,39 +652,11 @@ function App() {
         model: activeConfig.model,
         contextWindow: activeConfig.contextWindow,
         llmProfileId,
-        onUpdate: ({ content, thinking, toolCalls: tcList }) => {
-          streamingContentRef.current = content;
-          if (thinking) streamingThinkingRef.current = thinking;
-          if (tcList) {
-            // Sync tool calls display by unique id
-            for (const tc of tcList) {
-              const existing = toolCalls.find((t) => t.id === tc.id);
-              if (!existing) {
-                toolCalls.push({
-                  id: tc.id,
-                  name: tc.name,
-                  status: tc.status,
-                  result: tc.result,
-                  summary: tc.summary,
-                  command: tc.command,
-                  parsedArgs: tc.parsedArgs,
-                  rawArgs: tc.rawArgs,
-                });
-              } else if (tc.result !== undefined || tc.status !== undefined) {
-                if (tc.status !== undefined) existing.status = tc.status;
-                if (tc.result !== undefined) existing.result = tc.result;
-                if (tc.summary !== undefined) existing.summary = tc.summary;
-                if (tc.command !== undefined) existing.command = tc.command;
-                if (tc.parsedArgs !== undefined) existing.parsedArgs = tc.parsedArgs;
-                if (tc.rawArgs !== undefined) existing.rawArgs = tc.rawArgs;
-              } else if (tc.summary !== undefined) {
-                existing.summary = tc.summary;
-                if (tc.command !== undefined) existing.command = tc.command;
-                if (tc.parsedArgs !== undefined) existing.parsedArgs = tc.parsedArgs;
-                if (tc.rawArgs !== undefined) existing.rawArgs = tc.rawArgs;
-              }
-            }
-          }
+        onEvent: (event) => {
+          agentEventState = applyAgentEvent(agentEventState, event);
+          streamingContentRef.current = agentEventState.content;
+          streamingThinkingRef.current = agentEventState.thinking;
+          toolCalls.splice(0, toolCalls.length, ...agentEventState.toolCalls);
           scheduleFlush();
         },
       });

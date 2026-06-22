@@ -1,13 +1,20 @@
 /**
- * Agent loop: stream -> tool calls -> tool results -> continue until complete.
+ * Agent loop powered by Vercel AI SDK.
+ *
+ * `streamText` owns the model -> tool -> model loop. This module is the thin
+ * VertexAgent adapter that provides its tools, context packing, bounded loop
+ * policy, and a UI-safe event stream derived from AI SDK's `fullStream`.
  */
 
+import { jsonSchema, stepCountIs, streamText, tool } from 'ai';
 import llm from '../models/llm';
+import { normalizeAiUsage, toModelMessages } from '../models/ai.js';
 import { getEnabledToolSchemas, registry } from './tools.js';
 import { assembleApiMessages } from './context.js';
 import { loadMemory } from './memory.js';
 import { buildSkillsSection } from './skills.js';
 import { compactToolResultForModel } from './toolObservation.js';
+import { createAgentEventState, applyAgentEvent } from './events.js';
 import { getStaticContextWindow } from '../models/contextWindow.js';
 import { readAgentAgentsFile } from '../vfs/opfs.js';
 import { getAgent, getWorkspaceDirName } from '../agents/agents.js';
@@ -37,14 +44,10 @@ const FINALIZE_PROMPT =
  * @param {string} opts.systemPrompt
  * @param {string} [opts.agentUrl]
  * @param {string} [opts.agentId]
- * @param {Function} [opts.onUpdate]
+ * @param {Function} [opts.onEvent] Receives normalized AI SDK stream events.
+ * @param {Function} [opts.onUpdate] Legacy snapshot callback.
  * @param {AbortSignal} [opts.signal]
  * @param {number} [opts.maxRounds]
- * @param {string} [opts.provider]
- * @param {string} [opts.model]
- * @param {number} [opts.contextWindow]
- * @param {string} [opts.llmProfileId]
- * @param {number} [opts.subAgentDepth]
  * @returns {Promise<{ content: string, thinking: string, toolCalls: Array, usage: Object|null }>}
  */
 export async function runAgentLoop(opts) {
@@ -53,7 +56,8 @@ export async function runAgentLoop(opts) {
     systemPrompt = '',
     agentUrl = null,
     agentId = null,
-    onUpdate = () => {},
+    onEvent = () => {},
+    onUpdate = null,
     signal = null,
     subAgentDepth = 0,
   } = opts;
@@ -65,7 +69,7 @@ export async function runAgentLoop(opts) {
   const skillsList = await buildSkillsSection(agentId);
   const agentIdentity = agentId ? await readAgentAgentsFile(agentId) : null;
   const contextWindow = opts.contextWindow || getStaticContextWindow(opts.provider, opts.model);
-  const toolSchemas = getAvailableToolSchemas({
+  const schemas = getEnabledToolSchemas({
     agentUrl,
     agentId,
     llmProfileId: opts.llmProfileId,
@@ -83,438 +87,366 @@ export async function runAgentLoop(opts) {
     subAgentDepth,
     signal,
   };
+  const packed = await assembleApiMessages({
+    messages,
+    systemPrompt,
+    memorySnapshot,
+    skillsList,
+    agentIdentity,
+    contextWindow,
+    summaryState: { content: '', coveredUntil: 0 },
+    llmProfileId: opts.llmProfileId,
+    signal,
+  });
 
-  const history = [...messages];
-  const allToolCalls = {};
-  let summaryState = { content: '', coveredUntil: 0 };
-  let finalContent = '';
-  let finalThinking = '';
-  let displayContent = '';
-  let displayThinking = '';
+  let state = createAgentEventState();
+  const emit = (event) => {
+    state = applyAgentEvent(state, event);
+    onEvent?.(event);
+    onUpdate?.({
+      content: state.content,
+      thinking: state.thinking,
+      toolCalls: state.toolCalls,
+    });
+  };
+
+  const model = llm.getLanguageModel(opts.llmProfileId);
+  const tools = createAgentTools(schemas, toolContext, emit);
+  const initial = await consumeAgentStream({
+    model,
+    messages: toModelMessages(packed.apiMessages),
+    system: packed.systemPrompt,
+    tools,
+    maxRounds,
+    contextWindow,
+    signal,
+    emit,
+  });
+
+  let latestRun = initial;
+  let responseMessages = [...initial.responseMessages];
+  let latestUsage = initial.usage;
+  let totalUsage = initial.totalUsage;
+  let modelCallCount = initial.steps.length;
   let continuationGuardCount = 0;
-  let completed = false;
-  let exhaustedRounds = false;
-  let usageTotals = emptyUsageTotals();
-  let latestUsage = null;
-  let usageCallCount = 0;
 
-  for (let round = 0; round < maxRounds; round += 1) {
-    throwIfAborted(signal);
-    const packed = await assembleApiMessages({
-      messages: history,
-      systemPrompt,
-      memorySnapshot,
-      skillsList,
-      agentIdentity,
+  while (modelCallCount < maxRounds && shouldContinueWithoutToolCall(latestRun, schemas, continuationGuardCount)) {
+    continuationGuardCount += 1;
+    const continuation = await consumeAgentStream({
+      model,
+      messages: [
+        ...toModelMessages(packed.apiMessages),
+        ...responseMessages,
+        { role: 'user', content: CONTINUATION_GUARD_PROMPT },
+      ],
+      system: packed.systemPrompt,
+      tools,
+      maxRounds: Math.max(1, maxRounds - modelCallCount),
       contextWindow,
-      summaryState,
-      llmProfileId: opts.llmProfileId,
       signal,
+      emit,
     });
-    summaryState = packed.summaryState;
-
-    const response = await streamAndCollect(
-      packed.apiMessages,
-      packed.systemPrompt,
-      toolSchemas,
-      {
-        signal,
-        onUpdate,
-        llmProfileId: opts.llmProfileId,
-        displayContent,
-        displayThinking,
-      }
-    );
-
-    displayContent = appendDisplaySegment(displayContent, response.content);
-    displayThinking = appendDisplaySegment(displayThinking, response.thinking);
-    finalContent = displayContent;
-    finalThinking = displayThinking;
-    if (hasUsageTokens(response.usage)) {
-      latestUsage = normalizeUsage(response.usage);
-      usageTotals = addUsage(usageTotals, latestUsage);
-      usageCallCount += 1;
-    }
-
-    if (!response.toolCalls?.length) {
-      if (
-        shouldContinueWithoutToolCall({
-          content: response.content,
-          thinking: response.thinking,
-          toolSchemas,
-          toolCallsSoFar: Object.keys(allToolCalls).length,
-          continuationGuardCount,
-          round,
-          maxRounds,
-        })
-      ) {
-        continuationGuardCount += 1;
-        history.push(buildAssistantMessage(response.content, response.thinking, []));
-        history.push({ role: 'user', content: CONTINUATION_GUARD_PROMPT });
-        continue;
-      }
-      completed = true;
-      break;
-    }
-
-    continuationGuardCount = 0;
-    registerToolCalls(response.toolCalls, allToolCalls);
-    onUpdate({ content: displayContent, thinking: displayThinking, toolCalls: Object.values(allToolCalls) });
-
-    const toolResults = await executeToolCalls(response.toolCalls, {
-      allToolCalls,
-      content: displayContent,
-      thinking: displayThinking,
-      onUpdate,
-      toolContext,
-    });
-
-    history.push(buildAssistantMessage(response.content, response.thinking, response.toolCalls));
-    history.push(...toolResults);
-    onUpdate({ content: displayContent, thinking: displayThinking, toolCalls: Object.values(allToolCalls) });
+    latestRun = continuation;
+    responseMessages.push(...continuation.responseMessages);
+    latestUsage = continuation.usage || latestUsage;
+    totalUsage = addUsage(totalUsage, continuation.totalUsage);
+    modelCallCount += continuation.steps.length;
   }
 
-  if (!completed) {
-    exhaustedRounds = true;
-  }
-
-  if (exhaustedRounds && !signal?.aborted) {
-    history.push({ role: 'user', content: FINALIZE_PROMPT });
-    const packed = await assembleApiMessages({
-      messages: history,
-      systemPrompt,
-      memorySnapshot,
-      skillsList,
-      agentIdentity,
+  // `stepCountIs` ends on a tool-call step. Give the model one tool-free turn
+  // to report a useful status, matching the old loop's bounded finalizer.
+  if (latestRun.finishReason === 'tool-calls' && !signal?.aborted) {
+    const finalizer = await consumeAgentStream({
+      model,
+      messages: [
+        ...toModelMessages(packed.apiMessages),
+        ...responseMessages,
+        { role: 'user', content: FINALIZE_PROMPT },
+      ],
+      system: packed.systemPrompt,
+      tools: {},
+      maxRounds: 1,
       contextWindow,
-      summaryState,
-      llmProfileId: opts.llmProfileId,
       signal,
+      emit,
     });
-    summaryState = packed.summaryState;
-    const response = await streamAndCollect(
-      packed.apiMessages,
-      packed.systemPrompt,
-      [],
-      {
-        signal,
-        onUpdate,
-        llmProfileId: opts.llmProfileId,
-        displayContent,
-        displayThinking,
-      }
-    );
-    displayContent = appendDisplaySegment(displayContent, response.content);
-    displayThinking = appendDisplaySegment(displayThinking, response.thinking);
-    finalContent = displayContent || finalContent;
-    finalThinking = displayThinking || finalThinking;
-    if (hasUsageTokens(response.usage)) {
-      latestUsage = normalizeUsage(response.usage);
-      usageTotals = addUsage(usageTotals, latestUsage);
-      usageCallCount += 1;
-    }
+    latestUsage = finalizer.usage || latestUsage;
+    totalUsage = addUsage(totalUsage, finalizer.totalUsage);
+    modelCallCount += finalizer.steps.length;
   }
+
+  throwIfAborted(signal);
+  const usage = buildUsageReport(latestUsage, totalUsage, contextWindow, modelCallCount);
+  emit({ type: 'finish', usage });
 
   return {
-    content: finalContent,
-    thinking: finalThinking,
-    toolCalls: Object.values(allToolCalls),
-    usage: buildUsageReport(latestUsage, usageTotals, contextWindow, usageCallCount),
+    content: state.content,
+    thinking: state.thinking,
+    toolCalls: state.toolCalls,
+    usage,
   };
 }
 
-// ─── Streaming ──────────────────────────────────────────────────────────────
-
-async function streamAndCollect(apiMessages, systemPrompt, toolSchemas, opts) {
-  let content = '';
-  let thinking = '';
-  const toolCallFragments = [];
-  let usage = null;
-
-  try {
-    const requestOpts = {
-      signal: opts.signal,
-      llmProfileId: opts.llmProfileId,
-      ...(toolSchemas?.length ? { tools: toolSchemas } : {}),
-      ...(systemPrompt ? { systemPrompt } : {}),
-    };
-
-    for await (const chunk of llm.streamSession(apiMessages, requestOpts)) {
-      if (typeof chunk === 'string') {
-        content += chunk;
-      } else {
-        if (chunk.usage) {
-          usage = normalizeUsage(chunk.usage, usage);
-          continue;
-        }
-        if (chunk.content) content += chunk.content;
-        if (chunk.reasoning) thinking += chunk.reasoning;
-        if (chunk.toolCalls) {
-          for (const tc of chunk.toolCalls) mergeToolFragment(toolCallFragments, tc);
-        }
-      }
-      opts.onUpdate?.({
-        content: appendDisplaySegment(opts.displayContent, content),
-        thinking: appendDisplaySegment(opts.displayThinking, thinking),
-        toolCalls: previewToolFragments(toolCallFragments),
-      });
-    }
-
-    const completedToolCalls = finalizeToolCalls(toolCallFragments);
-    return {
-      content,
-      thinking,
-      toolCalls: completedToolCalls,
-      completed: !completedToolCalls?.length,
-      usage,
-    };
-  } catch (err) {
-    if (err.name === 'AbortError') {
-      return { content, thinking, toolCalls: null, completed: true, usage };
-    }
-    throw err;
-  }
+function shouldContinueWithoutToolCall(run, schemas, continuationGuardCount) {
+  if (!schemas?.length || continuationGuardCount >= MAX_CONTINUATION_GUARDS) return false;
+  if (run.finishReason === 'tool-calls') return false;
+  const finalStep = run.steps.at(-1);
+  if (!finalStep) return false;
+  const text = `${finalStep.text || ''}\n${finalStep.reasoningText || ''}`;
+  const toolCallsSoFar = run.steps.reduce((count, step) => count + step.toolCalls.length, 0);
+  return (toolCallsSoFar > 0 && CONTINUATION_INTENT_RE.test(text)) || PROMISED_TOOL_WORK_RE.test(text);
 }
 
-function appendDisplaySegment(existing, segment) {
-  const base = String(existing || '');
-  const text = String(segment || '');
-  if (!text) return base;
-  if (!base) return text;
-  const separator = base.endsWith('\n') || text.startsWith('\n') ? '' : '\n\n';
-  return `${base}${separator}${text}`;
+function createAgentTools(schemas, toolContext, emit) {
+  // AI SDK may start multiple execute functions at once. Serializing here
+  // protects mutating workspace tools while still letting the SDK preserve its
+  // native multi-step tool protocol.
+  let executionTail = Promise.resolve();
+
+  return Object.fromEntries((schemas || []).map((schema) => [
+    schema.name,
+    tool({
+      description: schema.description,
+      inputSchema: jsonSchema(schema.parameters || { type: 'object', properties: {} }),
+      execute: (input, execution) => {
+        const scheduled = executionTail.then(() => executeAgentTool({
+          toolCallId: execution.toolCallId,
+          toolName: schema.name,
+          input,
+          signal: execution.abortSignal || toolContext.signal,
+          toolContext,
+          emit,
+        }));
+        executionTail = scheduled.catch(() => {});
+        return scheduled;
+      },
+    }),
+  ]));
 }
 
-function mergeToolFragment(accumulator, fragment) {
-  const idx = fragment.index ?? 0;
-  if (!accumulator[idx]) {
-    accumulator[idx] = { id: '', name: '', arguments: '' };
-  }
-  const existing = accumulator[idx];
-  if (fragment.id) existing.id = fragment.id;
-  if (fragment.name) existing.name = fragment.name;
-  if (fragment.arguments) existing.arguments += fragment.arguments;
-}
-
-function previewToolFragments(fragments) {
-  if (!fragments.length) return null;
-  return fragments
-    .filter((fragment) => fragment?.name)
-    .map((fragment) => ({
-      id: fragment.id || fragment.name || '',
-      name: fragment.name,
-      status: getInitialToolStatus(fragment.name),
-    }));
-}
-
-function finalizeToolCalls(fragments) {
-  const results = [];
-  for (const fragment of Object.values(fragments)) {
-    if (!fragment.name) continue;
-    let parsedArgs = {};
-    try {
-      parsedArgs = fragment.arguments ? JSON.parse(fragment.arguments) : {};
-    } catch {
-      parsedArgs = { _raw: fragment.arguments };
-    }
-    results.push({
-      id: fragment.id || createToolCallId(fragment.name),
-      name: fragment.name,
-      parsedArgs,
-      rawArgs: fragment.arguments || '{}',
-    });
-  }
-  return results.length > 0 ? results : null;
-}
-
-// ─── Tool execution ─────────────────────────────────────────────────────────
-
-async function executeToolCalls(toolCalls, env) {
-  if (toolCalls.length > 1 && toolCalls.every((tc) => registry.canRunInParallel(tc.name))) {
-    return Promise.all(toolCalls.map((tc) => executeToolCall(tc, env)));
-  }
-
-  const results = [];
-  for (const toolCall of toolCalls) {
-    results.push(await executeToolCall(toolCall, env));
-  }
-  return results;
-}
-
-async function executeToolCall(toolCall, env) {
-  const { allToolCalls, content, thinking, onUpdate, toolContext } = env;
+async function executeAgentTool({ toolCallId, toolName, input, signal, toolContext, emit }) {
   let streamingStdout = '';
   let streamingStderr = '';
+  const baseEvent = { toolCallId, toolName, input };
 
   const updateRunningOutput = (chunk) => {
-    if (!allToolCalls[toolCall.id]) return;
     if (chunk?.stdout) streamingStdout = appendStreamingOutput(streamingStdout, chunk.stdout, 'stdout');
     if (chunk?.stderr) streamingStderr = appendStreamingOutput(streamingStderr, chunk.stderr, 'stderr');
-    allToolCalls[toolCall.id].result = formatStreamingCommandResult(streamingStdout, streamingStderr);
-    allToolCalls[toolCall.id].status = 'running';
-    onUpdate({ content, thinking, toolCalls: Object.values(allToolCalls) });
+    emit({
+      type: 'tool-status',
+      ...baseEvent,
+      status: 'running',
+      output: formatStreamingCommandResult(streamingStdout, streamingStderr),
+    });
   };
 
   try {
-    const result = await registry.dispatch(toolCall.name, toolCall.parsedArgs, {
+    throwIfAborted(signal);
+    const result = await registry.dispatch(toolName, input, {
       ...toolContext,
+      signal,
       onToolUpdate: updateRunningOutput,
     });
-    const resultStr = String(result);
-    const modelResultStr = compactToolResultForModel(toolCall, resultStr, {
+    const output = String(result);
+    const summary = formatToolCallSummary(toolName, input, output);
+    emit({ type: 'tool-result', ...baseEvent, status: 'completed', output, summary });
+    return compactToolResultForModel({ name: toolName, parsedArgs: input }, output, {
       contextWindow: toolContext.contextWindow,
     });
-    updateToolCall(allToolCalls, toolCall, {
-      status: 'completed',
-      result: resultStr,
-      summary: formatToolCallSummary(toolCall, resultStr),
-    });
-    onUpdate({ content, thinking, toolCalls: Object.values(allToolCalls) });
-    return buildToolResultMessage(toolCall, modelResultStr);
   } catch (err) {
-    if (err.name === 'AbortError') {
-      const abortStr = formatAbortResult(streamingStdout, streamingStderr);
-      updateToolCall(allToolCalls, toolCall, {
+    if (err?.name === 'AbortError') {
+      emit({
+        type: 'tool-status',
+        ...baseEvent,
         status: 'aborted',
-        result: abortStr,
-        summary: formatToolCallSummary(toolCall),
+        output: formatAbortResult(streamingStdout, streamingStderr),
       });
-      onUpdate({ content, thinking, toolCalls: Object.values(allToolCalls) });
       throw err;
     }
-    const errStr = `Error: ${err.message}`;
-    const modelErrStr = compactToolResultForModel(toolCall, errStr, {
+    const output = `Error: ${err?.message || String(err)}`;
+    emit({
+      type: 'tool-result',
+      ...baseEvent,
+      status: 'error',
+      output,
+      summary: formatToolCallSummary(toolName, input),
+    });
+    return compactToolResultForModel({ name: toolName, parsedArgs: input }, output, {
       contextWindow: toolContext.contextWindow,
     });
-    updateToolCall(allToolCalls, toolCall, {
-      status: 'error',
-      result: errStr,
-      summary: formatToolCallSummary(toolCall),
-    });
-    onUpdate({ content, thinking, toolCalls: Object.values(allToolCalls) });
-    return buildToolResultMessage(toolCall, modelErrStr);
   }
 }
 
-function registerToolCalls(toolCalls, allToolCalls) {
-  for (const toolCall of toolCalls) {
-    allToolCalls[toolCall.id] = {
-      id: toolCall.id,
-      name: toolCall.name,
-      parsedArgs: toolCall.parsedArgs,
-      rawArgs: toolCall.rawArgs,
-      status: getInitialToolStatus(toolCall.name),
-      command: getToolCallCommand(toolCall),
-      summary: formatToolCallSummary(toolCall),
-    };
+async function consumeAgentStream({ model, messages, system, tools, maxRounds, contextWindow, signal, emit }) {
+  const result = streamText({
+    model,
+    messages,
+    ...(system ? { system } : {}),
+    ...(Object.keys(tools).length ? { tools, stopWhen: stepCountIs(maxRounds) } : {}),
+    ...(signal ? { abortSignal: signal } : {}),
+    prepareStep: ({ messages: stepMessages }) => {
+      const compacted = compactAiMessages(stepMessages, contextWindow);
+      return compacted === stepMessages ? undefined : { messages: compacted };
+    },
+    maxRetries: 0,
+  });
+
+  let finishReason = null;
+  let currentStepHasText = false;
+  let currentStepHasReasoning = false;
+
+  for await (const part of result.fullStream) {
+    throwIfAborted(signal);
+    switch (part.type) {
+      case 'start-step':
+        currentStepHasText = false;
+        currentStepHasReasoning = false;
+        break;
+      case 'text-delta':
+        emit({
+          type: 'text-delta',
+          text: part.text,
+          newSegment: !currentStepHasText,
+        });
+        currentStepHasText = true;
+        break;
+      case 'reasoning-delta':
+        emit({
+          type: 'reasoning-delta',
+          text: part.text,
+          newSegment: !currentStepHasReasoning,
+        });
+        currentStepHasReasoning = true;
+        break;
+      case 'tool-input-start':
+        emit({ type: 'tool-input-start', toolCallId: part.id, toolName: part.toolName });
+        break;
+      case 'tool-input-delta':
+        emit({ type: 'tool-input-delta', toolCallId: part.id, delta: part.delta });
+        break;
+      case 'tool-call':
+        emit({
+          type: 'tool-call',
+          toolCallId: part.toolCallId,
+          toolName: part.toolName,
+          input: part.input,
+          summary: formatToolCallSummary(part.toolName, part.input),
+        });
+        break;
+      case 'tool-error':
+        emit({
+          type: 'tool-error',
+          toolCallId: part.toolCallId,
+          toolName: part.toolName,
+          error: part.error,
+        });
+        break;
+      case 'finish':
+        finishReason = part.finishReason;
+        break;
+      case 'error':
+        throw part.error;
+      default:
+        break;
+    }
   }
-}
 
-function updateToolCall(allToolCalls, toolCall, patch) {
-  if (!allToolCalls[toolCall.id]) return;
-  allToolCalls[toolCall.id] = {
-    ...allToolCalls[toolCall.id],
-    ...patch,
-  };
-}
-
-function buildAssistantMessage(content, thinking, toolCalls) {
+  const [steps, usage, totalUsage] = await Promise.all([
+    result.steps,
+    result.usage,
+    result.totalUsage,
+  ]);
   return {
-    role: 'assistant',
-    content: content || '',
-    ...(thinking ? { reasoning_content: thinking } : {}),
-    ...(toolCalls?.length ? {
-      tool_calls: toolCalls.map((tc) => ({
-        id: tc.id,
-        name: tc.name,
-        arguments: tc.rawArgs || '{}',
-      })),
-    } : {}),
+    finishReason: finishReason || await result.finishReason,
+    steps,
+    usage: normalizeAiUsage(usage),
+    totalUsage: normalizeAiUsage(totalUsage),
+    responseMessages: steps.flatMap((step) => step.response.messages),
   };
 }
 
-function buildToolResultMessage(toolCall, result) {
-  return {
-    role: 'tool',
-    tool_call_id: toolCall.id,
-    name: toolCall.name,
-    content: String(result),
-  };
+/**
+ * Bound multi-step history without separating native assistant tool calls from
+ * their tool-result messages. Initial user history is already summarized by
+ * assembleApiMessages(); this protects the additional AI SDK loop history.
+ */
+function compactAiMessages(messages, contextWindow) {
+  const threshold = Math.floor(Math.max(contextWindow || 0, 8_000) * 0.72);
+  if (estimateAiMessageTokens(messages) <= threshold) return messages;
+
+  const blocks = groupAiMessageBlocks(messages);
+  const headBlocks = blocks.slice(0, Math.min(4, blocks.length));
+  const headCount = headBlocks.length;
+  const headTokens = estimateAiMessageTokens(headBlocks.flat());
+  const tailBudget = Math.max(2_048, threshold - headTokens);
+  const tail = [];
+  let tailTokens = 0;
+
+  for (let index = blocks.length - 1; index >= headCount; index -= 1) {
+    const block = blocks[index];
+    const blockTokens = estimateAiMessageTokens(block);
+    const mustKeep = tail.length < 8;
+    if (!mustKeep && tailTokens + blockTokens > tailBudget) break;
+    tail.unshift(block);
+    tailTokens += blockTokens;
+  }
+
+  return [...headBlocks.flat(), ...tail.flat()];
 }
 
-// ─── Small helpers ──────────────────────────────────────────────────────────
-
-function getAvailableToolSchemas(context) {
-  return getEnabledToolSchemas(context);
+function groupAiMessageBlocks(messages) {
+  const blocks = [];
+  for (let index = 0; index < messages.length; index += 1) {
+    const block = [messages[index]];
+    if (hasNativeToolCall(messages[index]) && messages[index + 1]?.role === 'tool') {
+      block.push(messages[index + 1]);
+      index += 1;
+    }
+    blocks.push(block);
+  }
+  return blocks;
 }
 
-function shouldContinueWithoutToolCall({
-  content,
-  thinking,
-  toolSchemas,
-  toolCallsSoFar,
-  continuationGuardCount,
-  round,
-  maxRounds,
-}) {
-  if (!toolSchemas?.length) return false;
-  if (continuationGuardCount >= MAX_CONTINUATION_GUARDS) return false;
-  if (round >= maxRounds - 1) return false;
-
-  const text = `${content || ''}\n${thinking || ''}`;
-  if (toolCallsSoFar > 0 && CONTINUATION_INTENT_RE.test(text)) return true;
-  return PROMISED_TOOL_WORK_RE.test(text);
+function hasNativeToolCall(message) {
+  return message?.role === 'assistant'
+    && Array.isArray(message.content)
+    && message.content.some((part) => part?.type === 'tool-call');
 }
 
-function getInitialToolStatus(name) {
-  return name === 'write_browser_file' || name === 'write_sandbox_file' || name === 'write_skill_file'
-    ? 'writing'
-    : 'running';
+function estimateAiMessageTokens(messages) {
+  return Math.max(1, Math.floor((messages || []).reduce((total, message) => {
+    try {
+      return total + JSON.stringify(message).length;
+    } catch {
+      return total + 256;
+    }
+  }, 0) / 4));
 }
 
-function getToolCallCommand(toolCall) {
-  if (toolCall.name !== 'execute_command') return undefined;
-  const command = toolCall.parsedArgs?.command;
-  return typeof command === 'string' && command.trim() ? command : undefined;
-}
-
-function formatToolCallSummary(toolCall, result = '') {
-  const args = toolCall.parsedArgs || {};
-  if (toolCall.name === 'write_browser_file' || toolCall.name === 'write_sandbox_file' || toolCall.name === 'write_skill_file') {
+function formatToolCallSummary(name, args = {}, result = '') {
+  if (name === 'write_browser_file' || name === 'write_sandbox_file' || name === 'write_skill_file') {
     const path = typeof args.path === 'string' && args.path.trim() ? args.path : 'file';
     const contentSize = typeof args.content === 'string' ? ` (${formatBytes(args.content.length)})` : '';
-    let target = 'sandbox';
-    if (toolCall.name === 'write_browser_file') target = 'browser';
-    if (toolCall.name === 'write_skill_file') target = 'skill';
+    const target = name === 'write_browser_file' ? 'browser' : name === 'write_skill_file' ? 'skill' : 'sandbox';
     return `${target}: ${path}${contentSize}`;
   }
-  if (toolCall.name === 'memory') {
-    return [args.action, args.type, args.id].filter(Boolean).join(' ');
-  }
-  if (toolCall.name === 'skill') {
-    return [args.action, args.name, args.reference_name].filter(Boolean).join(' ');
-  }
-  if (toolCall.name !== 'spawn_agent') return undefined;
+  if (name === 'memory') return [args.action, args.type, args.id].filter(Boolean).join(' ');
+  if (name === 'skill') return [args.action, args.name, args.reference_name].filter(Boolean).join(' ');
+  if (name !== 'spawn_agent') return undefined;
 
   const completedAgents = [];
-  const matches = String(result).matchAll(/(?:Sub-agent|Agent)\s+(.+?)\s+\((agent-[^)]+)\)\s+completed/g);
-  for (const match of matches) completedAgents.push(`${match[1]} (${match[2]})`);
-  if (completedAgents.length > 0) return completedAgents.join(', ');
+  for (const match of String(result).matchAll(/(?:Sub-agent|Agent)\s+(.+?)\s+\(agent-[^)]+\)\s+completed/g)) {
+    completedAgents.push(match[1]);
+  }
+  if (completedAgents.length) return completedAgents.join(', ');
 
-  const taskTargets = Array.isArray(args.tasks) && args.tasks.length > 0 ? args.tasks : [args];
-  return taskTargets.map((task, index) => {
+  const tasks = Array.isArray(args.tasks) && args.tasks.length ? args.tasks : [args];
+  return tasks.map((task, index) => {
     if (task.agent_id && task.agent_name) return `${task.agent_name} (${task.agent_id})`;
     if (task.agent_id) return task.agent_id;
     if (task.agent_name) return task.agent_name;
-    return taskTargets.length > 1 ? `current agent task ${index + 1}` : 'current agent';
+    return tasks.length > 1 ? `current agent task ${index + 1}` : 'current agent';
   }).join(', ');
-}
-
-function formatStreamingCommandResult(stdout, stderr) {
-  let out = 'Running...';
-  if (stdout) out += `\nStdout:\n${stdout}`;
-  if (stderr) out += `\nStderr:\n${stderr}`;
-  return out;
 }
 
 function appendStreamingOutput(existing, chunk, streamName) {
@@ -525,17 +457,18 @@ function appendStreamingOutput(existing, chunk, streamName) {
   return `${notice}${combined.slice(-tailBudget)}`;
 }
 
-function formatAbortResult(stdout, stderr) {
-  let out = '';
-  if (stdout) out += `Stdout:\n${stdout}`;
-  if (stderr) out += `${out ? '\n' : ''}Stderr:\n${stderr}`;
-  return `${out ? `${out}\n` : ''}Aborted`;
+function formatStreamingCommandResult(stdout, stderr) {
+  let output = 'Running...';
+  if (stdout) output += `\nStdout:\n${stdout}`;
+  if (stderr) output += `\nStderr:\n${stderr}`;
+  return output;
 }
 
-function createToolCallId(name) {
-  const random = globalThis.crypto?.randomUUID?.().slice(0, 8)
-    || Math.random().toString(36).slice(2, 10);
-  return `tc-${name}-${Date.now()}-${random}`;
+function formatAbortResult(stdout, stderr) {
+  let output = '';
+  if (stdout) output += `Stdout:\n${stdout}`;
+  if (stderr) output += `${output ? '\n' : ''}Stderr:\n${stderr}`;
+  return `${output ? `${output}\n` : ''}Aborted`;
 }
 
 function normalizeMaxRounds(value) {
@@ -548,67 +481,36 @@ function throwIfAborted(signal) {
   if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
 }
 
-function emptyUsageTotals() {
+function addUsage(left, right) {
+  const first = left || emptyUsage();
+  const second = right || emptyUsage();
   return {
-    prompt_tokens: 0,
-    completion_tokens: 0,
-    total_tokens: 0,
+    prompt_tokens: first.prompt_tokens + second.prompt_tokens,
+    completion_tokens: first.completion_tokens + second.completion_tokens,
+    total_tokens: first.total_tokens + second.total_tokens,
   };
 }
 
-function addUsage(total, usage) {
-  if (!usage) return total;
-  const normalized = normalizeUsage(usage);
-  return {
-    prompt_tokens: total.prompt_tokens + normalized.prompt_tokens,
-    completion_tokens: total.completion_tokens + normalized.completion_tokens,
-    total_tokens: total.total_tokens + normalized.total_tokens,
-  };
-}
-
-function buildUsageReport(latestUsage, usageTotals, contextWindow, usageCallCount) {
-  const latest = latestUsage || (hasUsageTokens(usageTotals) ? normalizeUsage(usageTotals) : null);
+function buildUsageReport(latestUsage, totalUsage, contextWindow, modelCallCount) {
+  const latest = latestUsage || totalUsage;
   if (!hasUsageTokens(latest)) return null;
-
-  const turn = hasUsageTokens(usageTotals) ? normalizeUsage(usageTotals) : latest;
+  const total = totalUsage || latest;
   return {
     ...latest,
     content_len: contextWindow,
-    turn_prompt_tokens: turn.prompt_tokens,
-    turn_completion_tokens: turn.completion_tokens,
-    turn_total_tokens: turn.total_tokens,
-    model_call_count: usageCallCount || 1,
+    turn_prompt_tokens: total.prompt_tokens,
+    turn_completion_tokens: total.completion_tokens,
+    turn_total_tokens: total.total_tokens,
+    model_call_count: modelCallCount || 1,
   };
+}
+
+function emptyUsage() {
+  return { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
 }
 
 function hasUsageTokens(usage) {
-  if (!usage) return false;
-  const normalized = normalizeUsage(usage);
-  return normalized.prompt_tokens > 0
-    || normalized.completion_tokens > 0
-    || normalized.total_tokens > 0;
-}
-
-function normalizeUsage(usage, previous = null) {
-  const prompt = usage.prompt_tokens
-    ?? usage.input_tokens
-    ?? usage.promptTokenCount
-    ?? usage.inputTokenCount
-    ?? 0;
-  const completion = usage.completion_tokens
-    ?? usage.output_tokens
-    ?? usage.outputTokenCount
-    ?? usage.candidatesTokenCount
-    ?? 0;
-  const total = usage.total_tokens
-    ?? usage.totalTokenCount
-    ?? (prompt + completion);
-  if (previous && total < previous.total_tokens) return previous;
-  return {
-    prompt_tokens: prompt,
-    completion_tokens: completion,
-    total_tokens: total,
-  };
+  return !!usage && (usage.prompt_tokens > 0 || usage.completion_tokens > 0 || usage.total_tokens > 0);
 }
 
 function formatBytes(bytes) {
