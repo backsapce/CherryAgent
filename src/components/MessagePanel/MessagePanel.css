@@ -933,6 +933,11 @@
   background: rgba(239, 68, 68, 0.1);
 }
 
+.tool-exit-code.blocked {
+  color: #b45309;
+  background: rgba(180, 83, 9, 0.12);
+}
+
 .tool-exit-code.aborted {
   color: var(--color-text-secondary);
   background: color-mix(in srgb, var(--color-text-secondary) 12%, transparent);

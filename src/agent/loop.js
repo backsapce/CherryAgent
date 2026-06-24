@@ -14,7 +14,8 @@ import { assembleApiMessages } from './context.js';
 import { loadMemory } from './memory.js';
 import { buildSkillsSection } from './skills.js';
 import { compactToolResultForModel } from './toolObservation.js';
-import { createAgentEventState, applyAgentEvent } from './events.js';
+import { AGENT_EVENT_VERSION, createAgentEventState, applyAgentEvent } from './events.js';
+import { createToolLoopGuard } from './loopSafety.js';
 import { getStaticContextWindow } from '../models/contextWindow.js';
 import { readAgentAgentsFile } from '../vfs/opfs.js';
 import { getAgent, getWorkspaceDirName } from '../agents/agents.js';
@@ -46,6 +47,9 @@ const FINALIZE_PROMPT =
  * @param {string} [opts.agentId]
  * @param {Function} [opts.onEvent] Receives normalized AI SDK stream events.
  * @param {Function} [opts.onUpdate] Legacy snapshot callback.
+ * @param {Function} [opts.onPermissionRequest] Optional approval callback for
+ * repeated identical tool calls. It receives a doom-loop request and must
+ * resolve to `true` to allow the call; without it, repeated calls are blocked.
  * @param {AbortSignal} [opts.signal]
  * @param {number} [opts.maxRounds]
  * @returns {Promise<{ content: string, thinking: string, toolCalls: Array, usage: Object|null }>}
@@ -58,6 +62,7 @@ export async function runAgentLoop(opts) {
     agentId = null,
     onEvent = () => {},
     onUpdate = null,
+    onPermissionRequest = null,
     signal = null,
     subAgentDepth = 0,
   } = opts;
@@ -86,6 +91,8 @@ export async function runAgentLoop(opts) {
     contextWindow,
     subAgentDepth,
     signal,
+    onPermissionRequest,
+    toolLoopGuard: createToolLoopGuard(),
   };
   const packed = await assembleApiMessages({
     messages,
@@ -99,10 +106,20 @@ export async function runAgentLoop(opts) {
     signal,
   });
 
+  const runId = createAgentRunId();
+  const lifecycle = { stepIndex: 0, currentStepId: null };
+  let eventSequence = 0;
   let state = createAgentEventState();
   const emit = (event) => {
-    state = applyAgentEvent(state, event);
-    onEvent?.(event);
+    const normalized = {
+      version: AGENT_EVENT_VERSION,
+      runId,
+      sequence: ++eventSequence,
+      at: new Date().toISOString(),
+      ...event,
+    };
+    state = applyAgentEvent(state, normalized);
+    onEvent?.(normalized);
     onUpdate?.({
       content: state.content,
       thinking: state.thinking,
@@ -110,81 +127,113 @@ export async function runAgentLoop(opts) {
     });
   };
 
-  const model = llm.getLanguageModel(opts.llmProfileId);
-  const tools = createAgentTools(schemas, toolContext, emit);
-  const initial = await consumeAgentStream({
-    model,
-    messages: toModelMessages(packed.apiMessages),
-    system: packed.systemPrompt,
-    tools,
+  emit({
+    type: 'run-start',
     maxRounds,
     contextWindow,
-    signal,
-    emit,
+    estimatedInputTokens: packed.estimatedTokens,
   });
 
-  let latestRun = initial;
-  let responseMessages = [...initial.responseMessages];
-  let latestUsage = initial.usage;
-  let totalUsage = initial.totalUsage;
-  let modelCallCount = initial.steps.length;
-  let continuationGuardCount = 0;
-
-  while (modelCallCount < maxRounds && shouldContinueWithoutToolCall(latestRun, schemas, continuationGuardCount)) {
-    continuationGuardCount += 1;
-    const continuation = await consumeAgentStream({
+  try {
+    const model = llm.getLanguageModel(opts.llmProfileId);
+    const tools = createAgentTools(schemas, toolContext, emit);
+    const initial = await consumeAgentStream({
       model,
-      messages: [
-        ...toModelMessages(packed.apiMessages),
-        ...responseMessages,
-        { role: 'user', content: CONTINUATION_GUARD_PROMPT },
-      ],
+      messages: toModelMessages(packed.apiMessages),
       system: packed.systemPrompt,
       tools,
-      maxRounds: Math.max(1, maxRounds - modelCallCount),
+      maxRounds,
       contextWindow,
       signal,
       emit,
+      lifecycle,
     });
-    latestRun = continuation;
-    responseMessages.push(...continuation.responseMessages);
-    latestUsage = continuation.usage || latestUsage;
-    totalUsage = addUsage(totalUsage, continuation.totalUsage);
-    modelCallCount += continuation.steps.length;
-  }
 
-  // `stepCountIs` ends on a tool-call step. Give the model one tool-free turn
-  // to report a useful status, matching the old loop's bounded finalizer.
-  if (latestRun.finishReason === 'tool-calls' && !signal?.aborted) {
-    const finalizer = await consumeAgentStream({
-      model,
-      messages: [
-        ...toModelMessages(packed.apiMessages),
-        ...responseMessages,
-        { role: 'user', content: FINALIZE_PROMPT },
-      ],
-      system: packed.systemPrompt,
-      tools: {},
-      maxRounds: 1,
-      contextWindow,
-      signal,
-      emit,
+    let latestRun = initial;
+    let responseMessages = [...initial.responseMessages];
+    let latestUsage = initial.usage;
+    let totalUsage = initial.totalUsage;
+    let modelCallCount = initial.steps.length;
+    let continuationGuardCount = 0;
+
+    while (modelCallCount < maxRounds && shouldContinueWithoutToolCall(latestRun, schemas, continuationGuardCount)) {
+      continuationGuardCount += 1;
+      const continuation = await consumeAgentStream({
+        model,
+        messages: [
+          ...toModelMessages(packed.apiMessages),
+          ...responseMessages,
+          { role: 'user', content: CONTINUATION_GUARD_PROMPT },
+        ],
+        system: packed.systemPrompt,
+        tools,
+        maxRounds: Math.max(1, maxRounds - modelCallCount),
+        contextWindow,
+        signal,
+        emit,
+        lifecycle,
+      });
+      latestRun = continuation;
+      responseMessages.push(...continuation.responseMessages);
+      latestUsage = continuation.usage || latestUsage;
+      totalUsage = addUsage(totalUsage, continuation.totalUsage);
+      modelCallCount += continuation.steps.length;
+    }
+
+    // `stepCountIs` ends on a tool-call step. Give the model one tool-free turn
+    // to report a useful status, matching the old loop's bounded finalizer.
+    if (latestRun.finishReason === 'tool-calls' && !signal?.aborted) {
+      const finalizer = await consumeAgentStream({
+        model,
+        messages: [
+          ...toModelMessages(packed.apiMessages),
+          ...responseMessages,
+          { role: 'user', content: FINALIZE_PROMPT },
+        ],
+        system: packed.systemPrompt,
+        tools: {},
+        maxRounds: 1,
+        contextWindow,
+        signal,
+        emit,
+        lifecycle,
+      });
+      latestRun = finalizer;
+      latestUsage = finalizer.usage || latestUsage;
+      totalUsage = addUsage(totalUsage, finalizer.totalUsage);
+      modelCallCount += finalizer.steps.length;
+    }
+
+    throwIfAborted(signal);
+    const usage = buildUsageReport(latestUsage, totalUsage, contextWindow, modelCallCount);
+    emit({
+      type: 'run-finish',
+      usage,
+      finishReason: latestRun.finishReason,
+      modelCallCount,
     });
-    latestUsage = finalizer.usage || latestUsage;
-    totalUsage = addUsage(totalUsage, finalizer.totalUsage);
-    modelCallCount += finalizer.steps.length;
+
+    return {
+      content: state.content,
+      thinking: state.thinking,
+      toolCalls: state.toolCalls,
+      usage,
+      run: {
+        id: runId,
+        status: state.status,
+        finishReason: state.finishReason,
+        steps: state.steps,
+        compactions: state.compactions,
+      },
+    };
+  } catch (err) {
+    if (isAbortError(err) || signal?.aborted) {
+      emit({ type: 'run-abort', reason: err?.message || 'aborted' });
+    } else {
+      emit({ type: 'run-error', error: err });
+    }
+    throw err;
   }
-
-  throwIfAborted(signal);
-  const usage = buildUsageReport(latestUsage, totalUsage, contextWindow, modelCallCount);
-  emit({ type: 'finish', usage });
-
-  return {
-    content: state.content,
-    thinking: state.thinking,
-    toolCalls: state.toolCalls,
-    usage,
-  };
 }
 
 function shouldContinueWithoutToolCall(run, schemas, continuationGuardCount) {
@@ -235,13 +284,39 @@ async function executeAgentTool({ toolCallId, toolName, input, signal, toolConte
     emit({
       type: 'tool-status',
       ...baseEvent,
-      status: 'running',
+      status: runningToolStatus(toolName),
       output: formatStreamingCommandResult(streamingStdout, streamingStderr),
     });
   };
 
   try {
     throwIfAborted(signal);
+    const guardResult = toolContext.toolLoopGuard?.check({ toolName, input });
+    if (guardResult?.repeated) {
+      const permission = {
+        id: toolCallId,
+        kind: 'doom-loop',
+        toolCallId,
+        toolName,
+        input,
+        threshold: guardResult.threshold,
+        occurrences: guardResult.occurrences,
+      };
+      emit({ type: 'permission-request', requestId: toolCallId, toolCallId, kind: permission.kind, permission });
+      const approved = await requestToolApproval(toolContext.onPermissionRequest, permission);
+      emit({ type: 'permission-resolved', requestId: toolCallId, toolCallId, kind: permission.kind, approved });
+      throwIfAborted(signal);
+      if (!approved) {
+        const output = formatDoomLoopBlock(toolName, guardResult.threshold);
+        const summary = formatToolCallSummary(toolName, input);
+        emit({ type: 'tool-blocked', ...baseEvent, output, summary });
+        return compactToolResultForModel({ name: toolName, parsedArgs: input }, output, {
+          contextWindow: toolContext.contextWindow,
+        });
+      }
+    }
+
+    emit({ type: 'tool-status', ...baseEvent, status: runningToolStatus(toolName) });
     const result = await registry.dispatch(toolName, input, {
       ...toolContext,
       signal,
@@ -277,7 +352,7 @@ async function executeAgentTool({ toolCallId, toolName, input, signal, toolConte
   }
 }
 
-async function consumeAgentStream({ model, messages, system, tools, maxRounds, contextWindow, signal, emit }) {
+async function consumeAgentStream({ model, messages, system, tools, maxRounds, contextWindow, signal, emit, lifecycle }) {
   const result = streamText({
     model,
     messages,
@@ -286,6 +361,16 @@ async function consumeAgentStream({ model, messages, system, tools, maxRounds, c
     ...(signal ? { abortSignal: signal } : {}),
     prepareStep: ({ messages: stepMessages }) => {
       const compacted = compactAiMessages(stepMessages, contextWindow);
+      if (compacted !== stepMessages) {
+        emit({
+          type: 'context-compact',
+          stepId: lifecycle?.currentStepId || null,
+          beforeTokens: estimateAiMessageTokens(stepMessages),
+          afterTokens: estimateAiMessageTokens(compacted),
+          beforeMessages: stepMessages.length,
+          afterMessages: compacted.length,
+        });
+      }
       return compacted === stepMessages ? undefined : { messages: compacted };
     },
     maxRetries: 0,
@@ -301,28 +386,56 @@ async function consumeAgentStream({ model, messages, system, tools, maxRounds, c
       case 'start-step':
         currentStepHasText = false;
         currentStepHasReasoning = false;
+        if (lifecycle) {
+          lifecycle.stepIndex += 1;
+          lifecycle.currentStepId = `step-${lifecycle.stepIndex}`;
+        }
+        emit({
+          type: 'step-start',
+          stepId: lifecycle?.currentStepId,
+          stepIndex: lifecycle?.stepIndex,
+        });
+        break;
+      case 'text-start':
+        emit({ type: 'text-start', segmentId: part.id, stepId: lifecycle?.currentStepId });
         break;
       case 'text-delta':
         emit({
           type: 'text-delta',
           text: part.text,
           newSegment: !currentStepHasText,
+          segmentId: part.id,
+          stepId: lifecycle?.currentStepId,
         });
         currentStepHasText = true;
+        break;
+      case 'text-end':
+        emit({ type: 'text-end', segmentId: part.id, stepId: lifecycle?.currentStepId });
+        break;
+      case 'reasoning-start':
+        emit({ type: 'reasoning-start', segmentId: part.id, stepId: lifecycle?.currentStepId });
         break;
       case 'reasoning-delta':
         emit({
           type: 'reasoning-delta',
           text: part.text,
           newSegment: !currentStepHasReasoning,
+          segmentId: part.id,
+          stepId: lifecycle?.currentStepId,
         });
         currentStepHasReasoning = true;
         break;
+      case 'reasoning-end':
+        emit({ type: 'reasoning-end', segmentId: part.id, stepId: lifecycle?.currentStepId });
+        break;
       case 'tool-input-start':
-        emit({ type: 'tool-input-start', toolCallId: part.id, toolName: part.toolName });
+        emit({ type: 'tool-input-start', toolCallId: part.id, toolName: part.toolName, stepId: lifecycle?.currentStepId });
         break;
       case 'tool-input-delta':
-        emit({ type: 'tool-input-delta', toolCallId: part.id, delta: part.delta });
+        emit({ type: 'tool-input-delta', toolCallId: part.id, delta: part.delta, stepId: lifecycle?.currentStepId });
+        break;
+      case 'tool-input-end':
+        emit({ type: 'tool-input-end', toolCallId: part.id, stepId: lifecycle?.currentStepId });
         break;
       case 'tool-call':
         emit({
@@ -331,6 +444,7 @@ async function consumeAgentStream({ model, messages, system, tools, maxRounds, c
           toolName: part.toolName,
           input: part.input,
           summary: formatToolCallSummary(part.toolName, part.input),
+          stepId: lifecycle?.currentStepId,
         });
         break;
       case 'tool-error':
@@ -339,13 +453,25 @@ async function consumeAgentStream({ model, messages, system, tools, maxRounds, c
           toolCallId: part.toolCallId,
           toolName: part.toolName,
           error: part.error,
+          stepId: lifecycle?.currentStepId,
         });
+        break;
+      case 'finish-step':
+        emit({
+          type: 'step-finish',
+          stepId: lifecycle?.currentStepId,
+          usage: normalizeAiUsage(part.usage),
+          finishReason: part.finishReason,
+        });
+        if (lifecycle) lifecycle.currentStepId = null;
         break;
       case 'finish':
         finishReason = part.finishReason;
         break;
+      case 'abort':
+        throw createAbortError(part.reason);
       case 'error':
-        throw part.error;
+        throw asError(part.error);
       default:
         break;
     }
@@ -469,6 +595,49 @@ function formatAbortResult(stdout, stderr) {
   if (stdout) output += `Stdout:\n${stdout}`;
   if (stderr) output += `${output ? '\n' : ''}Stderr:\n${stderr}`;
   return `${output ? `${output}\n` : ''}Aborted`;
+}
+
+function runningToolStatus(name) {
+  return name === 'write_browser_file' || name === 'write_sandbox_file' || name === 'write_skill_file'
+    ? 'writing'
+    : 'running';
+}
+
+function formatDoomLoopBlock(toolName, threshold) {
+  return [
+    `Tool execution blocked: ${toolName} was requested ${threshold} consecutive times with identical input.`,
+    'This call was not run to prevent a doom loop. Change the approach, inspect the prior result, or request explicit user approval before retrying.',
+  ].join('\n');
+}
+
+async function requestToolApproval(handler, permission) {
+  if (typeof handler !== 'function') return false;
+  try {
+    return (await handler(permission)) === true;
+  } catch (err) {
+    console.warn('Tool permission callback failed:', err?.message || err);
+    return false;
+  }
+}
+
+function createAgentRunId() {
+  const suffix = globalThis.crypto?.randomUUID?.().slice(0, 8)
+    || Math.random().toString(36).slice(2, 10);
+  return `run-${Date.now()}-${suffix}`;
+}
+
+function createAbortError(reason = 'aborted') {
+  const error = new Error(String(reason || 'aborted'));
+  error.name = 'AbortError';
+  return error;
+}
+
+function asError(value) {
+  return value instanceof Error ? value : new Error(String(value || 'Agent stream failed'));
+}
+
+function isAbortError(error) {
+  return error?.name === 'AbortError';
 }
 
 function normalizeMaxRounds(value) {

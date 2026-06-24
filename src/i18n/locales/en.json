@@ -26,6 +26,7 @@
         "writing": "writing...",
         "completed": "completed",
         "error": "error",
+        "blocked": "blocked",
         "aborted": "aborted",
         "exitCode": "exit {code}",
         "remove": "Remove",

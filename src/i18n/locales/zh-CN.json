@@ -26,6 +26,7 @@
         "writing": "写入中...",
         "completed": "已完成",
         "error": "错误",
+        "blocked": "已阻止",
         "aborted": "已中止",
         "exitCode": "退出码 {code}",
         "remove": "移除",

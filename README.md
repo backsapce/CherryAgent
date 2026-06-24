@@ -194,6 +194,19 @@ Core runtime flow:
 5. Tool results are fed back to the model until the loop completes or reaches the round limit.
 6. Session state is saved back to OPFS.
 
+### Agent run events
+
+`src/agent/events.js` is the provider-neutral event contract for a live agent
+turn. The loop emits a versioned run lifecycle (`run-start` / `run-finish`),
+step boundaries, text and reasoning segment boundaries, streamed tool-input
+phases, tool state changes, permission decisions, and context compaction
+telemetry. Its reducer builds the message snapshot used by the UI, so the same
+event stream can also be replayed by debugging or persistence code.
+
+The loop blocks a third consecutive identical tool call by default. Hosts that
+want an approval UI can provide `runAgentLoop({ onPermissionRequest })`; only a
+callback resolving to `true` permits that repeated call.
+
 ## Data Storage
 
 Browser data lives under the OPFS root:

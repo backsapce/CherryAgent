@@ -26,6 +26,7 @@
         "writing": "書き込み中...",
         "completed": "完了",
         "error": "エラー",
+        "blocked": "ブロック済み",
         "aborted": "中止",
         "exitCode": "終了コード {code}",
         "remove": "削除",

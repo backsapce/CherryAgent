@@ -485,7 +485,7 @@ const ToolBlock = ({ toolCall, onStopStreaming }) => {
   const isLegacyExecute = !!toolCall?.cmd;
   const isRunningExecute = isLegacyExecute
     ? !toolCall?.result
-    : toolCall?.name === 'execute_command' && toolCall?.status === 'running';
+    : toolCall?.name === 'execute_command' && ['pending', 'running'].includes(toolCall?.status);
   const [expanded, setExpanded] = useState(false);
   const effectiveExpanded = expanded || isRunningExecute;
 
@@ -519,7 +519,7 @@ const ToolBlock = ({ toolCall, onStopStreaming }) => {
 
   // New tool call format: { name, status?, result?, summary? }
   const { name, status, result, summary, command } = toolCall;
-  const showShutdown = name === 'execute_command' && status === 'running' && onStopStreaming;
+  const showShutdown = name === 'execute_command' && ['pending', 'running'].includes(status) && onStopStreaming;
   const renderTerminal = name === 'execute_command';
   const isImageGeneration = isImageGenerationToolName(name);
   const label = renderTerminal ? t('message.execute') : (isImageGeneration ? t('message.imageGeneration') : name);
@@ -532,10 +532,12 @@ const ToolBlock = ({ toolCall, onStopStreaming }) => {
         <span className="tool-label">{label}</span>
         {renderTerminal && command && <span className="tool-cmd" title={command}>{command}</span>}
         {summary && <span className="tool-summary">{summary}</span>}
+        {status === 'pending' && <span className="tool-exit-code">{t('message.running')}</span>}
         {status === 'writing' && <span className="tool-exit-code writing">{t('message.writing')}</span>}
         {status === 'running' && <span className="tool-exit-code">{t('message.running')}</span>}
         {status === 'completed' && <span className="tool-exit-code success">{t('message.completed')}</span>}
         {status === 'error' && <span className="tool-exit-code error">{t('message.error')}</span>}
+        {status === 'blocked' && <span className="tool-exit-code blocked">{t('message.blocked')}</span>}
         {status === 'aborted' && <span className="tool-exit-code aborted">{t('message.aborted')}</span>}
         {showShutdown && (
           <button
@@ -552,7 +554,7 @@ const ToolBlock = ({ toolCall, onStopStreaming }) => {
           </button>
         )}
       </div>
-      {effectiveExpanded && (result || (renderTerminal && status === 'running')) && (
+      {effectiveExpanded && (result || (renderTerminal && ['pending', 'running'].includes(status))) && (
         <div className={`tool-output ${renderTerminal ? 'terminal-output' : ''}`}>
           {renderTerminal ? <ToolTerminal output={result} /> : <pre>{result}</pre>}
         </div>
