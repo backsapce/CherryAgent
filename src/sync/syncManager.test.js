@@ -6,11 +6,52 @@ const {
   collectDeletedPaths,
   collectDeletedSessionIds,
   hasDeletedAncestor,
+  mapWithConcurrency,
+  maxConcurrentRequests,
   mergeSets,
   pruneDeletedRecords,
   restoredPathCandidates,
   restoreLocalChangedPathsOverDeletedAncestors,
 } = __syncInternals;
+
+test('transfer scheduler limits parallel requests and keeps result order', async () => {
+  let active = 0;
+  let peak = 0;
+  const results = await mapWithConcurrency([1, 2, 3, 4, 5], async (value) => {
+    active += 1;
+    peak = Math.max(peak, active);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    active -= 1;
+    return value * 2;
+  }, 2);
+
+  assert.equal(peak, 2);
+  assert.deepEqual(results, [2, 4, 6, 8, 10]);
+});
+
+test('transfer concurrency defaults to four and is bounded', () => {
+  assert.equal(maxConcurrentRequests({}), 4);
+  assert.equal(maxConcurrentRequests({ maxConcurrentRequests: 0 }), 1);
+  assert.equal(maxConcurrentRequests({ maxConcurrentRequests: 99 }), 8);
+});
+
+test('transfer scheduler waits for started work after an error', async () => {
+  let otherTransferFinished = false;
+
+  await assert.rejects(
+    mapWithConcurrency([0, 1, 2], async (value) => {
+      if (value === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 2));
+        throw new Error('network failed');
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      otherTransferFinished = true;
+    }, 2),
+    /network failed/
+  );
+
+  assert.equal(otherTransferFinished, true);
+});
 
 test('deleted session ids include local tombstones', () => {
   const remoteDeleted = collectDeletedSessionIds({

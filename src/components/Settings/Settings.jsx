@@ -142,6 +142,7 @@ const Settings = ({
     forcePathStyle: false,
     autoOnStart: false,
     autoIntervalMinutes: '',
+    maxConcurrentRequests: '4',
   });
   const [syncBusy, setSyncBusy] = useState(null);
   const [syncMessage, setSyncMessage] = useState(null);
@@ -288,6 +289,7 @@ const Settings = ({
       forcePathStyle: Boolean(savedSync.forcePathStyle),
       autoOnStart: Boolean(savedSync.autoOnStart),
       autoIntervalMinutes: savedSync.autoIntervalMinutes != null ? String(savedSync.autoIntervalMinutes) : '',
+      maxConcurrentRequests: savedSync.maxConcurrentRequests != null ? String(savedSync.maxConcurrentRequests) : '4',
     });
     setSyncMessage(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -574,6 +576,8 @@ const Settings = ({
     const saved = config.get('sync') || {};
     const intervalText = String(syncForm.autoIntervalMinutes).trim();
     const interval = Number(intervalText);
+    const concurrencyText = String(syncForm.maxConcurrentRequests).trim();
+    const concurrency = Number(concurrencyText);
     return {
       ...saved,
       enabled: Boolean(syncForm.enabled),
@@ -587,6 +591,9 @@ const Settings = ({
       forcePathStyle: Boolean(syncForm.forcePathStyle),
       autoOnStart: Boolean(syncForm.autoOnStart),
       autoIntervalMinutes: intervalText && Number.isFinite(interval) && interval >= 0 ? Math.floor(interval) : null,
+      maxConcurrentRequests: concurrencyText && Number.isFinite(concurrency) && concurrency >= 1
+        ? Math.min(8, Math.floor(concurrency))
+        : 4,
     };
   };
 
@@ -1345,6 +1352,18 @@ const Settings = ({
                   />
                 </label>
               </div>
+
+              <label>
+                {t('syncSettings.maxConcurrentRequests')}
+                <input
+                  type="number"
+                  min="1"
+                  max="8"
+                  step="1"
+                  value={syncForm.maxConcurrentRequests}
+                  onChange={(e) => setSyncForm((f) => ({ ...f, maxConcurrentRequests: e.target.value }))}
+                />
+              </label>
 
               <div className="sync-actions">
                 <button className="settings-secondary" disabled={Boolean(syncBusy)} onClick={() => runSyncAction('test', testSyncConnection)}>

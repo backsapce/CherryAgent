@@ -191,6 +191,7 @@
         "autoOnStart": "起動時に同期",
         "autoInterval": "間隔（分）",
         "autoIntervalPlaceholder": "手動のみ",
+        "maxConcurrentRequests": "並列転送数（1～8）",
         "test": "テスト",
         "pull": "プル",
         "push": "プッシュ",

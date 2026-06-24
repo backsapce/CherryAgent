@@ -24,6 +24,8 @@ import {
 const MANIFEST_FILE = 'manifest.json';
 const STATE_FILE = '.sync/state.json';
 const AUTO_DEBOUNCE_MS = 3000;
+const DEFAULT_MAX_CONCURRENT_REQUESTS = 4;
+const MAX_CONCURRENT_REQUESTS = 8;
 
 let unsubscribeHook = null;
 let intervalId = null;
@@ -68,6 +70,35 @@ export function syncResultChangedLocal(result) {
     return statsChangedLocal(result.pulled) || statsChangedLocal(result.pushed);
   }
   return statsChangedLocal(result);
+}
+
+function maxConcurrentRequests(syncConfig = {}) {
+  const requested = Number(syncConfig.maxConcurrentRequests);
+  if (!Number.isFinite(requested)) return DEFAULT_MAX_CONCURRENT_REQUESTS;
+  return Math.min(MAX_CONCURRENT_REQUESTS, Math.max(1, Math.floor(requested)));
+}
+
+async function mapWithConcurrency(items, mapper, concurrency = DEFAULT_MAX_CONCURRENT_REQUESTS) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  let firstError = null;
+  const workerCount = Math.min(Math.max(1, concurrency), items.length);
+
+  async function worker() {
+    while (!firstError && nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      try {
+        results[index] = await mapper(items[index], index);
+      } catch (err) {
+        firstError ||= err;
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  if (firstError) throw firstError;
+  return results;
 }
 
 function encodePath(path) {
@@ -482,6 +513,7 @@ async function pullInternal(syncConfig) {
   const deletedAgentIds = mergeSets(collectDeletedAgentIds(manifest.files), collectDeletedAgentIds(state.files));
   const locallyDeletedPaths = collectDeletedPaths(state.files);
   const stats = { downloaded: 0, merged: 0, deleted: 0, skipped: 0 };
+  const transferTasks = [];
 
   for (const [path, entry] of Object.entries(manifest.files || {})) {
     let localEntry = local.get(path);
@@ -546,14 +578,40 @@ async function pullInternal(syncConfig) {
       continue;
     }
 
-    const result = await applyRemoteFile(backend, syncConfig, path, entry, localEntry, deletedSessionIds, deletedAgentIds);
+    transferTasks.push(async () => {
+      const result = await applyRemoteFile(
+        backend,
+        syncConfig,
+        path,
+        entry,
+        localEntry,
+        deletedSessionIds,
+        deletedAgentIds
+      );
+      if (!result) return { path, entry, result: null };
+
+      const file = await readPathBlob(path);
+      return {
+        path,
+        entry,
+        result,
+        hash: await hashBlob(file),
+      };
+    });
+  }
+
+  const transferResults = await mapWithConcurrency(
+    transferTasks,
+    (transfer) => transfer(),
+    maxConcurrentRequests(syncConfig)
+  );
+  for (const { path, entry, result, hash } of transferResults) {
     if (!result) {
       stats.skipped += 1;
       continue;
     }
-    const file = await readPathBlob(path);
     state.files[path] = {
-      hash: await hashBlob(file),
+      hash,
       remoteUpdatedAt: entry.updatedAt,
       yjsKey: entry.yjsKey || null,
       objectKey: entry.objectKey || null,
@@ -604,7 +662,7 @@ async function pushInternal(syncConfig) {
   const deletedSessionIds = collectDeletedSessionIds(state.files);
   const deletedAgentIds = collectDeletedAgentIds(state.files);
 
-  for (const [path, entry] of local) {
+  await mapWithConcurrency([...local], async ([path, entry]) => {
     const previous = state.files[path];
     const remoteEntry = manifest.files[path];
     if (hasDeletedAncestor(state.files, path) || hasDeletedAncestor(manifest.files, path)) {
@@ -613,7 +671,7 @@ async function pushInternal(syncConfig) {
       manifest.files[path] = deleteEntry;
       state.files[path] = { ...(previous || {}), ...deleteEntry };
       stats.deleted += 1;
-      continue;
+      return;
     }
 
     if ((previous?.deleted || remoteEntry?.deleted) && isSessionMessagesPath(path)) {
@@ -631,7 +689,7 @@ async function pushInternal(syncConfig) {
         remoteUpdatedAt: remoteEntry?.updatedAt || previous?.remoteUpdatedAt || null,
       };
       stats.deleted += 1;
-      continue;
+      return;
     }
 
     const agentId = agentIdFromWorkspacePath(path);
@@ -650,14 +708,14 @@ async function pushInternal(syncConfig) {
         remoteUpdatedAt: remoteEntry?.updatedAt || previous?.remoteUpdatedAt || null,
       };
       stats.deleted += 1;
-      continue;
+      return;
     }
 
     const shouldPruneIndex = (path === 'session.json' && deletedSessionIds.size > 0)
       || (isConfigPath(path) && deletedAgentIds.size > 0);
     if (!shouldPruneIndex && previous?.hash === entry.hash && remoteEntry && !remoteEntry.deleted) {
       stats.skipped += 1;
-      continue;
+      return;
     }
 
     const updatedAt = new Date(entry.lastModified || Date.now()).toISOString();
@@ -696,7 +754,11 @@ async function pushInternal(syncConfig) {
         ? formatStructuredContent(path, syncData)
         : await readPathText(path);
       await backend.putBytes(updateKey, localUpdate, 'application/octet-stream');
-      await backend.putBytes(rawKey, new TextEncoder().encode(content), path.endsWith('.json') ? 'application/json' : 'text/yaml');
+      await backend.putBytes(
+        rawKey,
+        new TextEncoder().encode(content),
+        path.endsWith('.json') ? 'application/json' : 'text/yaml'
+      );
     } else {
       await backend.putBytes(rawKey, await readPathBytes(path));
     }
@@ -721,7 +783,7 @@ async function pushInternal(syncConfig) {
       deleted: false,
     };
     stats.uploaded += 1;
-  }
+  }, maxConcurrentRequests(syncConfig));
 
   await saveRemoteManifest(backend, syncConfig, manifest);
   await saveState(state);
@@ -853,6 +915,8 @@ export const __syncInternals = {
   collectDeletedPaths,
   collectDeletedSessionIds,
   hasDeletedAncestor,
+  mapWithConcurrency,
+  maxConcurrentRequests,
   mergeSets,
   pruneDeletedRecords,
   restoredPathCandidates,

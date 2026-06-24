@@ -191,6 +191,7 @@
         "autoOnStart": "启动时同步",
         "autoInterval": "间隔分钟",
         "autoIntervalPlaceholder": "仅手动",
+        "maxConcurrentRequests": "并行传输数（1–8）",
         "test": "测试",
         "pull": "拉取",
         "push": "推送",

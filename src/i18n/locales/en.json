@@ -191,6 +191,7 @@
         "autoOnStart": "Sync on startup",
         "autoInterval": "Interval Minutes",
         "autoIntervalPlaceholder": "Manual only",
+        "maxConcurrentRequests": "Parallel transfers (1–8)",
         "test": "Test",
         "pull": "Pull",
         "push": "Push",
