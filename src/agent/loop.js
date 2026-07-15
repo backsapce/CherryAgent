@@ -7,7 +7,7 @@
  */
 
 import { jsonSchema, stepCountIs, streamText, tool } from 'ai';
-import llm from '../models/llm';
+import llm from '../models/llm.js';
 import { normalizeAiUsage, toModelMessages } from '../models/ai.js';
 import { getEnabledToolSchemas, registry } from './tools.js';
 import { assembleApiMessages } from './context.js';
@@ -68,13 +68,14 @@ export async function runAgentLoop(opts) {
   } = opts;
 
   const maxRounds = normalizeMaxRounds(opts.maxRounds);
-  const workspaceDirName = agentId ? await getWorkspaceDirName(agentId) : null;
-  const activeAgent = agentId ? await getAgent(agentId) : null;
-  const memorySnapshot = await loadMemory(agentId);
-  const skillsList = await buildSkillsSection(agentId);
-  const agentIdentity = agentId ? await readAgentAgentsFile(agentId) : null;
+  const runtimeContext = opts.runtimeContext || await prepareAgentRuntimeContext(agentId);
+  const workspaceDirName = runtimeContext.workspaceDirName;
+  const activeAgent = runtimeContext.activeAgent;
+  const memorySnapshot = runtimeContext.memorySnapshot;
+  const skillsList = runtimeContext.skillsList;
+  const agentIdentity = runtimeContext.agentIdentity;
   const contextWindow = opts.contextWindow || getStaticContextWindow(opts.provider, opts.model);
-  const schemas = getEnabledToolSchemas({
+  const schemas = opts.toolSchemas || getEnabledToolSchemas({
     agentUrl,
     agentId,
     llmProfileId: opts.llmProfileId,
@@ -93,6 +94,7 @@ export async function runAgentLoop(opts) {
     signal,
     onPermissionRequest,
     toolLoopGuard: createToolLoopGuard(),
+    dispatchTool: opts.dispatchTool || ((name, input, context) => registry.dispatch(name, input, context)),
   };
   const packed = await assembleApiMessages({
     messages,
@@ -104,6 +106,8 @@ export async function runAgentLoop(opts) {
     summaryState: { content: '', coveredUntil: 0 },
     llmProfileId: opts.llmProfileId,
     signal,
+    autoSummarize: opts.autoSummarize !== false,
+    runtimeMode: opts.runtimeMode || 'browser',
   });
 
   const runId = createAgentRunId();
@@ -135,7 +139,7 @@ export async function runAgentLoop(opts) {
   });
 
   try {
-    const model = llm.getLanguageModel(opts.llmProfileId);
+    const model = opts.languageModel || llm.getLanguageModel(opts.llmProfileId);
     const tools = createAgentTools(schemas, toolContext, emit);
     const initial = await consumeAgentStream({
       model,
@@ -236,6 +240,27 @@ export async function runAgentLoop(opts) {
   }
 }
 
+/**
+ * Snapshot the browser-owned agent prompt state before a run is handed to a
+ * different runtime. Files themselves are deliberately not included.
+ */
+export async function prepareAgentRuntimeContext(agentId) {
+  const workspaceDirName = agentId ? await getWorkspaceDirName(agentId) : null;
+  const activeAgent = agentId ? await getAgent(agentId) : null;
+  const [memorySnapshot, skillsList, agentIdentity] = await Promise.all([
+    loadMemory(agentId),
+    buildSkillsSection(agentId),
+    agentId ? readAgentAgentsFile(agentId) : null,
+  ]);
+  return {
+    workspaceDirName,
+    activeAgent: activeAgent ? { id: activeAgent.id, name: activeAgent.name } : null,
+    memorySnapshot,
+    skillsList,
+    agentIdentity,
+  };
+}
+
 function shouldContinueWithoutToolCall(run, schemas, continuationGuardCount) {
   if (!schemas?.length || continuationGuardCount >= MAX_CONTINUATION_GUARDS) return false;
   if (run.finishReason === 'tool-calls') return false;
@@ -317,7 +342,7 @@ async function executeAgentTool({ toolCallId, toolName, input, signal, toolConte
     }
 
     emit({ type: 'tool-status', ...baseEvent, status: runningToolStatus(toolName) });
-    const result = await registry.dispatch(toolName, input, {
+    const result = await toolContext.dispatchTool(toolName, input, {
       ...toolContext,
       signal,
       onToolUpdate: updateRunningOutput,

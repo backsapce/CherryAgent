@@ -2,14 +2,20 @@ FROM node:lts-alpine
 
 WORKDIR /app
 
-COPY server/agent.js ./server/agent.js
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
+
+COPY server ./server
+COPY src ./src
+COPY bin ./bin
 
 RUN mkdir -p /home/vertex
 
 ENV AGENT_PORT=3099
 ENV AGENT_WORKING_DIR=/home/vertex
 ENV AGENT_TOKEN_FILE=/home/vertex/.vertex-token
-ENV AGENT_ALLOWED_ORIGINS=http://localhost:3099
+ARG AGENT_ALLOWED_ORIGINS=http://localhost:3099
+ENV AGENT_ALLOWED_ORIGINS=$AGENT_ALLOWED_ORIGINS
 
 EXPOSE 3099
 

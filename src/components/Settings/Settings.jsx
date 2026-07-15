@@ -1725,6 +1725,16 @@ const Settings = ({
                           <div className="agent-id-label">{agent.id}</div>
                           <div className="agent-defaults">
                             <label>
+                              {t('agentSettings.runtime')}
+                              <select
+                                value={agent.runtimeMode || 'browser'}
+                                onChange={(e) => handleAgentDefaultChange(agent.id, { runtimeMode: e.target.value })}
+                              >
+                                <option value="browser">{t('agentSettings.browserRuntime')}</option>
+                                <option value="sandbox">{t('agentSettings.sandboxRuntime')}</option>
+                              </select>
+                            </label>
+                            <label>
                               {t('agentSettings.defaultLlm')}
                               <select
                                 value={agent.llmProfileId || ''}
@@ -1746,12 +1756,19 @@ const Settings = ({
                               >
                                 <option value="">{t('agentSettings.noSandbox')}</option>
                                 {agents.map((sandbox) => (
-                                  <option key={sandbox.url} value={sandbox.url}>
-                                    {sandbox.name}{sandbox.status !== 'connected' ? ` (${sandbox.status})` : ''}
+                                  <option
+                                    key={sandbox.url}
+                                    value={sandbox.url}
+                                    disabled={agent.runtimeMode === 'sandbox' && sandbox.isE2b}
+                                  >
+                                    {sandbox.name}{sandbox.isE2b && agent.runtimeMode === 'sandbox' ? ` (${t('agentSettings.commandOnly')})` : sandbox.status !== 'connected' ? ` (${sandbox.status})` : ''}
                                   </option>
                                 ))}
                               </select>
                             </label>
+                            {agent.runtimeMode === 'sandbox' && !agent.sandboxUrl && (
+                              <span className="settings-error">{t('agentSettings.runtimeNeedsSandbox')}</span>
+                            )}
                           </div>
                         </div>
                         {agentsTabList.length > 1 && (

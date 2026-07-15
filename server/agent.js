@@ -28,6 +28,7 @@ import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, mkdirSy
 import { isAbsolute, join, extname, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import process from 'node:process';
+import { createAgentRunManager } from './agent-runtime.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const STATIC_DIR = join(__dirname, '..', 'dist');
@@ -46,6 +47,7 @@ const WORKSPACE_DIR = resolve(process.env.AGENT_WORKING_DIR || process.cwd());
 const FILES_ROOT_DIR = resolve(process.env.AGENT_FILES_DIR || WORKSPACE_DIR);
 const PUBLIC_WORKSPACE_LABEL = 'workspace';
 const AUTH_DISABLED = /^(1|true|yes)$/i.test(process.env.AGENT_DISABLE_AUTH || '');
+const RUNS_DIR = resolve(process.env.AGENT_RUNS_DIR || join(WORKSPACE_DIR, '.vertex-runs'));
 
 function printBootConfig() {
   const agentEnv = Object.fromEntries(
@@ -318,6 +320,35 @@ function truncateLog(value, max = 2000) {
   return value.length > max ? `${value.slice(0, max)}\n...[truncated]` : value;
 }
 
+function runtimePath(inputPath = '') {
+  if (!isSafePath(inputPath)) throw new Error('Access denied: Path outside agent files root');
+  return resolve(join(FILES_ROOT_DIR, normalize(inputPath)));
+}
+
+const agentRunManager = createAgentRunManager({
+  runsDir: RUNS_DIR,
+  execCommand,
+  async listFiles(inputPath) {
+    const resolvedPath = runtimePath(inputPath);
+    if (!existsSync(resolvedPath) || !statSync(resolvedPath).isDirectory()) throw new Error('Directory not found');
+    return readdirSync(resolvedPath, { withFileTypes: true }).map((entry) => ({
+      name: entry.name,
+      type: entry.isDirectory() ? 'directory' : 'file',
+      path: join(normalize(inputPath), entry.name),
+    }));
+  },
+  async readFile(inputPath) {
+    const resolvedPath = runtimePath(inputPath);
+    if (!existsSync(resolvedPath) || !statSync(resolvedPath).isFile()) throw new Error('File not found');
+    return readFileSync(resolvedPath, 'utf8');
+  },
+  async writeFile(inputPath, content) {
+    const resolvedPath = runtimePath(inputPath);
+    mkdirSync(join(resolvedPath, '..'), { recursive: true });
+    writeFileSync(resolvedPath, content, 'utf8');
+  },
+});
+
 function json(res, status, data, req) {
   if (res.writableEnded) return;
   const headers = { 'Content-Type': 'application/json', ...corsHeaders(req) };
@@ -448,6 +479,7 @@ const server = createServer(async (req, res) => {
       shell: COMMAND_SHELL || 'default',
       cwd: PUBLIC_WORKSPACE_LABEL,
       filesRoot: PUBLIC_WORKSPACE_LABEL,
+      capabilities: { backgroundAgentRuns: true, agentRunProtocol: 1 },
     }, req);
   }
 
@@ -522,6 +554,36 @@ const server = createServer(async (req, res) => {
       if (result.stderr) console.warn(`[agent] stderr:\n${truncateLog(result.stderr)}`);
     }
     return json(res, 200, result, req);
+  }
+
+  // ── Durable sandbox agent runs (requires auth) ─────────────────────────
+  if (url.pathname === '/agent/runs' && req.method === 'POST') {
+    if (!isAuthorized(req)) return json(res, 401, { error: 'Unauthorized.' }, req);
+    try {
+      const input = JSON.parse(await readBody(req));
+      const run = agentRunManager.start(input);
+      return json(res, 202, run, req);
+    } catch (error) {
+      return json(res, 400, { error: error.message || 'Invalid agent run request' }, req);
+    }
+  }
+
+  if (url.pathname === '/agent/runs' && req.method === 'GET') {
+    if (!isAuthorized(req)) return json(res, 401, { error: 'Unauthorized.' }, req);
+    return json(res, 200, { runs: agentRunManager.list(url.searchParams.get('sessionId')) }, req);
+  }
+
+  const runRoute = url.pathname.match(/^\/agent\/runs\/([^/]+)$/);
+  if (runRoute && req.method === 'GET') {
+    if (!isAuthorized(req)) return json(res, 401, { error: 'Unauthorized.' }, req);
+    const run = agentRunManager.get(decodeURIComponent(runRoute[1]), Number(url.searchParams.get('after')) || 0);
+    return run ? json(res, 200, run, req) : json(res, 404, { error: 'Agent run not found' }, req);
+  }
+
+  if (runRoute && req.method === 'DELETE') {
+    if (!isAuthorized(req)) return json(res, 401, { error: 'Unauthorized.' }, req);
+    const run = agentRunManager.abort(decodeURIComponent(runRoute[1]));
+    return run ? json(res, 202, run, req) : json(res, 404, { error: 'Agent run not found' }, req);
   }
 
   // ── List files (requires auth) ─────────────────────────────────────────

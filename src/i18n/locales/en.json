@@ -252,6 +252,11 @@
         "rename": "Click name to rename",
         "defaultLlm": "Default LLM",
         "firstConfiguredLlm": "First configured LLM",
+        "runtime": "Agent runtime",
+        "browserRuntime": "Browser (default)",
+        "sandboxRuntime": "Sandbox (background)",
+        "runtimeNeedsSandbox": "Select a VertexAgent agent server for sandbox runtime.",
+        "commandOnly": "commands only",
         "sandbox": "Sandbox",
         "noSandbox": "Do not use sandbox"
     },

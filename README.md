@@ -83,6 +83,9 @@ Sandbox support is optional. VertexAgent works as a private browser session app 
 
 VertexAgent keeps a sandbox ID in `localStorage` so it can reconnect after page reloads.
 
+E2B Cloud currently provides command/file execution to the browser runtime. It
+does not expose the VertexAgent background-run protocol.
+
 ### Self-Hosted Agent Node
 
 Run the Agent Node when you want VertexAgent to execute commands or manage files on a machine you control.
@@ -130,6 +133,22 @@ docker run -d \
   backsapce/vertex-sandbox:latest
 ```
 
+### Agent runtime modes
+
+Each Agent can use either **Browser (default)** or **Sandbox (background)** as
+its runtime. Sandbox mode requires a connected self-hosted Agent Node. In that
+mode the shared `runAgentLoop()` implementation executes in the Agent Node,
+with only sandbox command and sandbox file tools exposed. Browser OPFS and
+browser-only tools are not available to the model, and browser-backed files,
+memory, skills, and identity files are not copied into the sandbox run.
+
+The Agent Node persists run metadata, event logs, and results under
+`AGENT_RUNS_DIR` (default: `<workspace>/.vertex-runs`). Closing the browser does
+not cancel the run; reopening VertexAgent discovers the run by session ID and
+replays its events/result. Keep the Agent Node process alive for the run to
+continue. Because the selected LLM profile is sent to the runtime for model
+calls, use an authenticated HTTPS connection for remote Agent Nodes.
+
 ## Self-Hosted Front
 
 ```bash
@@ -155,6 +174,7 @@ Agent Node environment variables:
 | `AGENT_PORT` | `3099` | HTTP port for `/agent` |
 | `AGENT_WORKING_DIR` | Server process cwd | Agent workspace root. Commands run here, and file APIs use this same directory by default. |
 | `AGENT_FILES_DIR` | `AGENT_WORKING_DIR` | Optional separate root for file APIs. Set this only when you intentionally want managed files isolated from the command cwd. |
+| `AGENT_RUNS_DIR` | `<workspace>/.vertex-runs` | Persistent metadata, event logs, and results for background sandbox Agent runs. |
 | `AGENT_TOKEN_FILE` | `.vertex-token` | File used to persist long-lived auth tokens; the sandbox Docker image sets this to `/home/vertex/.vertex-token`. |
 | `AGENT_DISABLE_AUTH` | unset | Set to `true` only when the sandbox is already protected by another trusted boundary. When enabled, `/agent` returns `needsAuth: false` and command/file APIs do not require a token. |
 | `AGENT_ALLOWED_ORIGINS` | `http://localhost:5173` | Comma-separated CORS allowlist |

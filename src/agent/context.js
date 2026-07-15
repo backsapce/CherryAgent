@@ -7,7 +7,7 @@
  * index so the same turns are not summarized repeatedly.
  */
 
-import llm from '../models/llm';
+import llm from '../models/llm.js';
 import { buildMemorySection } from './memory.js';
 
 const CONTEXT_WINDOW_FALLBACK = 128_000;
@@ -40,6 +40,20 @@ Operating rules:
 - Use memory only for durable facts, preferences, and project conventions that are likely to matter in future sessions.
 - Use skills as just-in-time procedures: list/search when needed, read the relevant skill before relying on it, and avoid loading unrelated references.
 - Treat tool output as authoritative over assumptions. If context is summarized, rely on the live tail for the latest state.`;
+
+const SANDBOX_RUNTIME_PROMPT = `You are VertexAgent running entirely inside a persistent sandbox runtime.
+
+Runtime isolation:
+- The agent loop, model calls, tool calls, and filesystem operations all run in this sandbox.
+- Browser state, browser OPFS, browser files, browser actions, and other browser-only tools are unavailable and invisible.
+- The only visible filesystem is the sandbox workspace. Use sandbox file tools and execute_command for all inspection and changes.
+- Browser-backed agent identity files, memory, and skills are not copied into this runtime.
+- The browser is only a client that may disconnect and later replay this run's persisted event log and result.
+
+Operating rules:
+- Work from evidence and continue until the request is handled or a real blocker requires user input.
+- Do not promise future tool work; call an available tool in the same response.
+- Prefer small, reversible edits, verify important changes, and report failures honestly.`;
 
 /**
  * Backward-compatible helper. Returns packed messages and system prompt.
@@ -82,6 +96,7 @@ export async function assembleApiMessages(opts) {
     llmProfileId,
     signal,
     autoSummarize = true,
+    runtimeMode = 'browser',
   } = opts;
 
   const fullSystemPrompt = buildSystemPrompt({
@@ -89,6 +104,7 @@ export async function assembleApiMessages(opts) {
     memorySnapshot,
     skillsList,
     agentIdentity,
+    runtimeMode,
   });
   let summaryState = normalizeSummaryState(opts.summaryState, opts.summary);
   let packed = packMessages(messages, fullSystemPrompt, contextWindow, summaryState);
@@ -260,10 +276,10 @@ function buildSummaryMessage(summary) {
 
 // ─── Prompt assembly ────────────────────────────────────────────────────────
 
-function buildSystemPrompt({ systemPrompt, memorySnapshot, skillsList, agentIdentity }) {
+function buildSystemPrompt({ systemPrompt, memorySnapshot, skillsList, agentIdentity, runtimeMode }) {
   const sections = [];
   if (systemPrompt?.trim()) sections.push(systemPrompt.trim());
-  sections.push(AGENT_RUNTIME_PROMPT);
+  sections.push(runtimeMode === 'sandbox' ? SANDBOX_RUNTIME_PROMPT : AGENT_RUNTIME_PROMPT);
   if (agentIdentity) sections.push(buildAgentIdentitySection(agentIdentity));
   const memorySection = buildMemorySection(memorySnapshot);
   if (memorySection) sections.push(memorySection);

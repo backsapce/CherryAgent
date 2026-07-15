@@ -30,6 +30,7 @@ function normalizeAgent(agent) {
     updatedAtMs: Number.isFinite(agent.updatedAtMs) ? agent.updatedAtMs : null,
     llmProfileId: agent.llmProfileId || null,
     sandboxUrl: agent.sandboxUrl || null,
+    runtimeMode: agent.runtimeMode === 'sandbox' ? 'sandbox' : 'browser',
   };
 }
 
@@ -228,7 +229,7 @@ export async function updateAgentName(id, name) {
 /**
  * Update an agent's runtime defaults.
  * @param {string} id
- * @param {{ llmProfileId?: string|null, sandboxUrl?: string|null }} patch
+ * @param {{ llmProfileId?: string|null, sandboxUrl?: string|null, runtimeMode?: 'browser'|'sandbox' }} patch
  */
 export async function updateAgentConfig(id, patch) {
   const agents = await listAgents();
@@ -243,6 +244,9 @@ export async function updateAgentConfig(id, patch) {
           sandboxUrl: Object.prototype.hasOwnProperty.call(patch, 'sandboxUrl')
             ? (patch.sandboxUrl || null)
             : a.sandboxUrl,
+          runtimeMode: Object.prototype.hasOwnProperty.call(patch, 'runtimeMode')
+            ? (patch.runtimeMode === 'sandbox' ? 'sandbox' : 'browser')
+            : a.runtimeMode,
         })
       : a
   ));

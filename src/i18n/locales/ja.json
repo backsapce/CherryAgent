@@ -252,6 +252,11 @@
         "rename": "名前をクリックしてリネーム",
         "defaultLlm": "デフォルト LLM",
         "firstConfiguredLlm": "最初に設定した LLM",
+        "runtime": "エージェントランタイム",
+        "browserRuntime": "ブラウザー（既定）",
+        "sandboxRuntime": "サンドボックス（バックグラウンド）",
+        "runtimeNeedsSandbox": "サンドボックスランタイムには VertexAgent agent server を選択してください。",
+        "commandOnly": "コマンドのみ",
         "sandbox": "サンドボックス",
         "noSandbox": "サンドボックスを使用しない"
     },
