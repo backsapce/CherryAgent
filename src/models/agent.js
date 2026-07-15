@@ -135,7 +135,7 @@ export async function connectAgent(tempToken, url) {
 export async function executeCommand(cmd, url, opts = {}) {
   // Route through E2B sandbox
   if (url === E2B_AGENT_ID) {
-    return executeInSandbox(cmd);
+    return executeInSandbox(cmd, opts);
   }
 
   if (typeof WebSocket !== 'undefined' && opts.stream !== false) {
@@ -157,6 +157,7 @@ export async function executeCommand(cmd, url, opts = {}) {
     method: 'POST',
     headers,
     body: JSON.stringify({ cmd }),
+    ...(opts.signal ? { signal: opts.signal } : {}),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: 'Agent request failed' }));

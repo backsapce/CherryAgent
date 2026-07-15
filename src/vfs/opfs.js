@@ -6,11 +6,47 @@
 import JSZip from 'jszip';
 import yaml from 'js-yaml';
 import { getWorkspaceDirName } from '../agents/agents.js';
+import { reconcileSessionRecoveryJournal } from '../sessionRefresh.js';
 
 const ROOT_DIR = 'vertex-agent';
 const SYNC_DIR = '.sync';
 
+export const ZIP_IMPORT_MAX_ENTRIES = 10_000;
+export const ZIP_IMPORT_MAX_FILE_BYTES = 64 * 1024 * 1024;
+export const ZIP_IMPORT_MAX_TOTAL_BYTES = 256 * 1024 * 1024;
+export const ZIP_IMPORT_MAX_ARCHIVE_BYTES = 256 * 1024 * 1024;
+export const SESSION_RECOVERY_MAX_BYTES = 64 * 1024 * 1024;
+export const SESSION_RECOVERY_MAX_SESSIONS = 20_000;
+export const SESSION_RECOVERY_MAX_MESSAGES = 200_000;
+const ZIP_IMPORT_MAX_PATH_BYTES = 4096;
+const ZIP_IMPORT_MAX_SEGMENT_BYTES = 255;
+const ZIP_IMPORT_MAX_PATH_DEPTH = 64;
+
+export class ZipImportValidationError extends Error {
+  constructor(code, message, path = null) {
+    super(message);
+    this.name = 'ZipImportValidationError';
+    this.code = code;
+    this.path = path;
+  }
+}
+
 const syncHooks = new Set();
+let sessionMetadataWriteSnapshot = null;
+const sessionMessageWriteSnapshots = new Map();
+let sessionWriteCacheRoot = null;
+
+async function ensureSessionWriteCacheRoot(root) {
+  let sameRoot = root === sessionWriteCacheRoot;
+  if (!sameRoot && root?.isSameEntry && sessionWriteCacheRoot) {
+    try { sameRoot = await root.isSameEntry(sessionWriteCacheRoot); } catch { /* reset below */ }
+  }
+  if (!sameRoot) {
+    sessionMetadataWriteSnapshot = null;
+    sessionMessageWriteSnapshots.clear();
+  }
+  sessionWriteCacheRoot = root;
+}
 
 // ─── Core Helpers ─────────────────────────────────────────────────────────────
 
@@ -53,10 +89,18 @@ export function registerOpfsSyncHook(fn) {
 }
 
 export function notifyOpfsMutation(paths, type = 'write') {
-  const changedPaths = (Array.isArray(paths) ? paths : [paths])
-    .map(normalizeLocalPath)
-    .filter((path) => path && !isInternalSyncPath(path));
+  const changedPaths = [...new Set(
+    (Array.isArray(paths) ? paths : [paths])
+      .map(normalizeLocalPath)
+      .filter((path) => path && !isInternalSyncPath(path))
+  )];
   if (changedPaths.length === 0) return;
+
+  for (const path of changedPaths) {
+    if (path === 'session.json') sessionMetadataWriteSnapshot = null;
+    const match = /^sessions\/([^/]+)\.json$/.exec(path);
+    if (match) sessionMessageWriteSnapshots.delete(match[1]);
+  }
 
   const event = { type, paths: changedPaths, at: Date.now() };
   for (const fn of syncHooks) {
@@ -100,12 +144,48 @@ async function getExistingDirectory(...pathParts) {
  * @returns {Promise<any>}
  */
 async function readJSON(dirHandle, filename) {
+  let fileHandle;
   try {
-    const fileHandle = await dirHandle.getFileHandle(filename);
-    const file = await fileHandle.getFile();
-    return JSON.parse(await file.text());
-  } catch {
-    return null;
+    fileHandle = await dirHandle.getFileHandle(filename);
+  } catch (error) {
+    if (isMissingFileSystemEntry(error)) return null;
+    throw error;
+  }
+  const file = await fileHandle.getFile();
+  const text = await file.text();
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    throw new Error(`${filename} contains invalid JSON`, { cause: error });
+  }
+}
+
+function isMissingFileSystemEntry(error) {
+  return error?.name === 'NotFoundError'
+    || /(?:file|entry|directory) not found/i.test(String(error?.message || ''));
+}
+
+function isDirectoryNotEmptyError(error) {
+  return error?.name === 'InvalidModificationError'
+    || /(?:not empty|contains entries|has children)/i.test(String(error?.message || ''));
+}
+
+const MISSING_SESSION_JSON = Symbol('missing-session-json');
+
+async function readSessionJSON(dirHandle, filename) {
+  let fileHandle;
+  try {
+    fileHandle = await dirHandle.getFileHandle(filename);
+  } catch (error) {
+    if (isMissingFileSystemEntry(error)) return MISSING_SESSION_JSON;
+    throw error;
+  }
+  const file = await fileHandle.getFile();
+  const text = await file.text();
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    throw new Error(`Session storage contains invalid JSON in ${filename}`, { cause: error });
   }
 }
 
@@ -118,8 +198,13 @@ async function readJSON(dirHandle, filename) {
 async function writeJSON(dirHandle, filename, data, options = {}) {
   const fileHandle = await dirHandle.getFileHandle(filename, { create: true });
   const writable = await fileHandle.createWritable();
-  await writable.write(JSON.stringify(data, null, 2));
-  await writable.close();
+  try {
+    await writable.write(JSON.stringify(data, null, 2));
+    await writable.close();
+  } catch (error) {
+    try { await writable.abort?.(); } catch { /* preserve the original error */ }
+    throw error;
+  }
   if (!options.internal) notifyOpfsMutation(options.localPath || filename, 'write');
 }
 
@@ -134,8 +219,9 @@ export async function readText(dirHandle, filename) {
     const fileHandle = await dirHandle.getFileHandle(filename);
     const file = await fileHandle.getFile();
     return await file.text();
-  } catch {
-    return null;
+  } catch (error) {
+    if (isMissingFileSystemEntry(error)) return null;
+    throw error;
   }
 }
 
@@ -148,8 +234,13 @@ export async function readText(dirHandle, filename) {
 export async function writeText(dirHandle, filename, content, options = {}) {
   const fileHandle = await dirHandle.getFileHandle(filename, { create: true });
   const writable = await fileHandle.createWritable();
-  await writable.write(content);
-  await writable.close();
+  try {
+    await writable.write(content);
+    await writable.close();
+  } catch (error) {
+    try { await writable.abort?.(); } catch { /* preserve the original error */ }
+    throw error;
+  }
   if (!options.internal) notifyOpfsMutation(options.localPath || filename, 'write');
 }
 
@@ -194,7 +285,81 @@ export async function deletePath(localPath, options = {}) {
     const dir = parts.length > 0 ? await getExistingDirectory(...parts) : await getRootDir();
     await dir.removeEntry(filename, { recursive: true });
     if (!options.internal) notifyOpfsMutation(localPath, 'delete');
-  } catch (_e) { /* ignore */ }
+    return true;
+  } catch (error) {
+    if (isMissingFileSystemEntry(error)) return false;
+    throw error;
+  }
+}
+
+/**
+ * Idempotently remove a file or empty directory without ever deleting
+ * descendants. This is the safe final step after sync has verified a file
+ * snapshot: if another writer replaces it with a populated directory, OPFS
+ * rejects the removal and the caller can treat the shape change as a conflict.
+ */
+export async function deletePathNonRecursive(localPath, options = {}) {
+  const parts = pathParts(localPath);
+  const filename = parts.pop();
+  if (!filename) return false;
+  let dir;
+  try {
+    dir = parts.length > 0 ? await getExistingDirectory(...parts) : await getRootDir();
+  } catch (error) {
+    if (isMissingFileSystemEntry(error)) return true;
+    throw error;
+  }
+  try {
+    // Deliberately omit `recursive`: a concurrent file-to-directory change
+    // with new descendants must never turn a sync deletion into data loss.
+    await dir.removeEntry(filename);
+    if (!options.internal) notifyOpfsMutation(localPath, 'delete');
+    return true;
+  } catch (error) {
+    if (isMissingFileSystemEntry(error)) return true;
+    if (isDirectoryNotEmptyError(error)) return false;
+    throw error;
+  }
+}
+
+async function removeDirectoryTreeIfEmpty(parent, name) {
+  let directory;
+  try {
+    directory = await parent.getDirectoryHandle(name);
+  } catch (error) {
+    if (isMissingFileSystemEntry(error)) return true;
+    throw error;
+  }
+  for (const entry of await listEntries(directory)) {
+    if (entry.kind !== 'directory') return false;
+    if (!(await removeDirectoryTreeIfEmpty(directory, entry.name))) return false;
+  }
+  try {
+    // Deliberately omit `recursive`. If a writer creates a descendant after
+    // the scan, OPFS rejects this removal instead of deleting new user data.
+    await parent.removeEntry(name);
+    return true;
+  } catch (error) {
+    if (isMissingFileSystemEntry(error)) return true;
+    if (isDirectoryNotEmptyError(error)) return false;
+    throw error;
+  }
+}
+
+export async function deleteEmptyPathTree(localPath, options = {}) {
+  const parts = pathParts(localPath);
+  const name = parts.pop();
+  if (!name) return false;
+  let parent;
+  try {
+    parent = parts.length > 0 ? await getExistingDirectory(...parts) : await getRootDir();
+  } catch (error) {
+    if (isMissingFileSystemEntry(error)) return true;
+    throw error;
+  }
+  const removed = await removeDirectoryTreeIfEmpty(parent, name);
+  if (removed && !options.internal) notifyOpfsMutation(localPath, 'delete');
+  return removed;
 }
 
 export async function hashBlob(blob) {
@@ -221,6 +386,7 @@ export async function listOpfsFiles(options = {}) {
         size: file.size,
         lastModified: file.lastModified,
         hash: options.hash ? await hashBlob(file) : null,
+        ...(options.includeBlob ? { blob: file } : {}),
       });
     }
   }
@@ -359,10 +525,13 @@ export function mergeIncomingTextContent(existingText, incomingText, localPath) 
  * Write incoming backup/sync content. Known structured data files are merged
  * instead of overwritten so local config, sessions, and messages are preserved.
  */
-export async function writeIncomingText(dirHandle, filename, content, localPath) {
+export async function writeIncomingText(dirHandle, filename, content, localPath, options = {}) {
   const existingText = await readText(dirHandle, filename);
   const result = mergeIncomingTextContent(existingText, content, localPath || filename);
-  await writeText(dirHandle, filename, result.content);
+  await writeText(dirHandle, filename, result.content, {
+    ...options,
+    localPath: localPath || filename,
+  });
   return { merged: result.merged };
 }
 
@@ -379,7 +548,11 @@ export async function writeIncomingTextExact(dirHandle, filename, content) {
 export async function deleteEntry(dirHandle, filename) {
   try {
     await dirHandle.removeEntry(filename);
-  } catch (_e) { /* ignore */ }
+    return true;
+  } catch (error) {
+    if (isMissingFileSystemEntry(error)) return false;
+    throw error;
+  }
 }
 
 /**
@@ -401,6 +574,118 @@ const SESSION_FILE = 'session.json';
 const LEGACY_CONVERSATION_FILES = ['chats.json', 'chat.json'];
 const SESSIONS_DIR = 'sessions';
 const LEGACY_MESSAGES_DIR = 'messages';
+const SESSION_INDEX_FILES = new Set([SESSION_FILE, ...LEGACY_CONVERSATION_FILES]);
+const MAX_SESSION_ID_BYTES = 250; // Leave room for the ".json" suffix in a 255-byte name.
+const SESSION_RECOVERY_FILE = `${SYNC_DIR}/session-recovery.json`;
+
+function sessionRecoveryError(reason, cause = undefined) {
+  return new Error(`Session recovery journal is invalid: ${reason}`, cause ? { cause } : undefined);
+}
+
+function validateRecoverySessionId(value) {
+  if (typeof value !== 'string' && !Number.isSafeInteger(value)) return null;
+  const id = String(value);
+  if (
+    !id
+    || id !== id.trim()
+    || id === '.'
+    || id === '..'
+    || id.includes('/')
+    || id.includes('\\')
+    || hasControlCharacter(id)
+    || new TextEncoder().encode(id).byteLength > MAX_SESSION_ID_BYTES
+  ) return null;
+  return id;
+}
+
+function validateRecoverySessions(sessions, label) {
+  if (!Array.isArray(sessions)) {
+    throw sessionRecoveryError(`${label} must be an array`);
+  }
+  if (sessions.length > SESSION_RECOVERY_MAX_SESSIONS) {
+    throw sessionRecoveryError(
+      `${label} exceeds the ${SESSION_RECOVERY_MAX_SESSIONS}-session limit`
+    );
+  }
+  const ids = new Set();
+  let messageCount = 0;
+  for (const session of sessions) {
+    if (!isPlainObject(session)) {
+      throw sessionRecoveryError(`${label} contains a non-object session`);
+    }
+    const id = validateRecoverySessionId(session.id);
+    if (id == null) throw sessionRecoveryError(`${label} contains an unsafe session id`);
+    if (ids.has(id)) throw sessionRecoveryError(`${label} contains a duplicate session id`);
+    ids.add(id);
+    if (!Array.isArray(session.messages)) {
+      throw sessionRecoveryError(`${label} contains a session without a message array`);
+    }
+    if (session.messages.some((message) => !isPlainObject(message))) {
+      throw sessionRecoveryError(`${label} contains a non-object message`);
+    }
+    messageCount += session.messages.length;
+    if (messageCount > SESSION_RECOVERY_MAX_MESSAGES) {
+      throw sessionRecoveryError(
+        `${label} exceeds the ${SESSION_RECOVERY_MAX_MESSAGES}-message limit`
+      );
+    }
+  }
+}
+
+export function validateSessionRecoveryJournal(journal) {
+  if (!isPlainObject(journal) || journal.version !== 1) {
+    throw sessionRecoveryError('unsupported or missing version');
+  }
+  validateRecoverySessions(journal.baseline, 'baseline');
+  validateRecoverySessions(journal.sessions, 'sessions');
+  return journal;
+}
+
+export async function readSessionRecoveryJournal() {
+  let file;
+  try {
+    file = await readPathBlob(SESSION_RECOVERY_FILE);
+  } catch (error) {
+    if (isMissingFileSystemEntry(error)) return null;
+    throw error;
+  }
+  if (file.size > SESSION_RECOVERY_MAX_BYTES) {
+    throw sessionRecoveryError(`file exceeds the ${SESSION_RECOVERY_MAX_BYTES}-byte limit`);
+  }
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let text;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch (error) {
+    throw sessionRecoveryError('file is not valid UTF-8', error);
+  }
+  let journal;
+  try {
+    journal = JSON.parse(text);
+  } catch (error) {
+    throw sessionRecoveryError('file is not valid JSON', error);
+  }
+  return validateSessionRecoveryJournal(journal);
+}
+
+export async function writeSessionRecoveryJournal({ baseline, sessions }) {
+  const journal = {
+    version: 1,
+    baseline,
+    sessions,
+  };
+  validateSessionRecoveryJournal(journal);
+  const text = JSON.stringify(journal);
+  const byteLength = new TextEncoder().encode(text).byteLength;
+  if (byteLength > SESSION_RECOVERY_MAX_BYTES) {
+    throw sessionRecoveryError(`file exceeds the ${SESSION_RECOVERY_MAX_BYTES}-byte limit`);
+  }
+  await writePathText(SESSION_RECOVERY_FILE, text, { internal: true });
+}
+
+export async function clearSessionRecoveryJournal() {
+  await deletePath(SESSION_RECOVERY_FILE, { internal: true });
+}
 
 /**
  * Load all sessions with their messages.
@@ -408,30 +693,52 @@ const LEGACY_MESSAGES_DIR = 'messages';
  */
 export async function loadSessions() {
   const root = await getRootDir();
-  let sessions = await readJSON(root, SESSION_FILE);
-  if (!sessions) {
+  await ensureSessionWriteCacheRoot(root);
+  let sessions = await readSessionJSON(root, SESSION_FILE);
+  const loadedPrimaryIndex = sessions !== MISSING_SESSION_JSON;
+  if (sessions === MISSING_SESSION_JSON) {
     for (const legacyFile of LEGACY_CONVERSATION_FILES) {
-      sessions = await readJSON(root, legacyFile);
-      if (sessions) break;
+      sessions = await readSessionJSON(root, legacyFile);
+      if (sessions !== MISSING_SESSION_JSON) break;
     }
   }
-  sessions = sessions || [];
+  if (sessions === MISSING_SESSION_JSON) sessions = [];
+  if (!Array.isArray(sessions)) {
+    throw new Error(`${SESSION_FILE} must contain a JSON array`);
+  }
   const sessionDir = await getDirectory(SESSIONS_DIR);
   let legacyDir = null;
 
-  return Promise.all(
+  const loaded = await Promise.all(
     sessions.map(async (session) => {
-      let messages = await readJSON(sessionDir, `${session.id}.json`);
-      if (!messages) {
+      if (session?.id == null) throw new Error(`${SESSION_FILE} contains a session without an id`);
+      let messages = await readSessionJSON(sessionDir, `${session.id}.json`);
+      const loadedPrimaryMessages = messages !== MISSING_SESSION_JSON;
+      if (messages === MISSING_SESSION_JSON) {
         legacyDir ||= await getDirectory(LEGACY_MESSAGES_DIR);
-        messages = await readJSON(legacyDir, `${session.id}.json`);
+        messages = await readSessionJSON(legacyDir, `${session.id}.json`);
+      }
+      if (messages !== MISSING_SESSION_JSON && !Array.isArray(messages)) {
+        throw new Error(`Session messages for ${session.id} must contain a JSON array`);
       }
       return {
-        ...session,
-        messages: messages || [],
+        session: {
+          ...session,
+          messages: messages === MISSING_SESSION_JSON ? [] : messages,
+        },
+        loadedPrimaryMessages,
       };
     })
   );
+
+  sessionMetadataWriteSnapshot = loadedPrimaryIndex ? JSON.stringify(sessions) : null;
+  sessionMessageWriteSnapshots.clear();
+  for (const { session, loadedPrimaryMessages } of loaded) {
+    if (loadedPrimaryMessages) {
+      sessionMessageWriteSnapshots.set(String(session.id), JSON.stringify(session.messages || []));
+    }
+  }
+  return loaded.map(({ session }) => session);
 }
 
 /**
@@ -440,28 +747,61 @@ export async function loadSessions() {
  */
 export async function saveSessions(sessions) {
   const root = await getRootDir();
+  await ensureSessionWriteCacheRoot(root);
   const sessionDir = await getDirectory(SESSIONS_DIR);
   const nextSessionsById = new Map();
+  const nextMessagesById = new Map();
 
   for (const session of sessions) {
     if (session?.id != null) {
       const { messages: _messages, ...rest } = session;
-      nextSessionsById.set(String(session.id), rest);
+      const id = String(session.id);
+      nextSessionsById.set(id, rest);
+      nextMessagesById.set(id, session.messages || []);
     }
   }
 
-  // Save metadata
-  await writeJSON(
-    root,
-    SESSION_FILE,
-    [...nextSessionsById.values()],
-    { localPath: SESSION_FILE }
-  );
+  const metadata = [...nextSessionsById.values()];
+  const metadataSnapshot = JSON.stringify(metadata);
+  const changedPaths = [];
+  const metadataChanged = metadataSnapshot !== sessionMetadataWriteSnapshot;
 
-  // Save messages in parallel
-  await Promise.all(
-    sessions.map((session) => writeJSON(sessionDir, `${session.id}.json`, session.messages, { localPath: `${SESSIONS_DIR}/${session.id}.json` }))
+  const changedMessages = [...nextMessagesById].filter(([id, messages]) => (
+    JSON.stringify(messages) !== sessionMessageWriteSnapshots.get(id)
+  ));
+  let nextIndex = 0;
+  let firstError = null;
+  const workers = Array.from(
+    { length: Math.min(8, changedMessages.length) },
+    async () => {
+      while (!firstError && nextIndex < changedMessages.length) {
+        const index = nextIndex;
+        nextIndex += 1;
+        const [id, messages] = changedMessages[index];
+        try {
+          await writeJSON(sessionDir, `${id}.json`, messages, { internal: true });
+          changedPaths.push(`${SESSIONS_DIR}/${id}.json`);
+        } catch (err) {
+          firstError ||= err;
+        }
+      }
+    }
   );
+  await Promise.all(workers);
+  if (firstError) throw firstError;
+  // Publish the index last. If the browser closes mid-save, an orphaned
+  // message file is recoverable on retry; an index pointing at a missing new
+  // message file would make that session appear empty and risk overwriting it.
+  if (metadataChanged) {
+    await writeJSON(root, SESSION_FILE, metadata, { internal: true });
+    changedPaths.unshift(SESSION_FILE);
+  }
+
+  notifyOpfsMutation(changedPaths, 'write');
+  if (changedPaths.includes(SESSION_FILE)) sessionMetadataWriteSnapshot = metadataSnapshot;
+  for (const [id, messages] of changedMessages) {
+    sessionMessageWriteSnapshots.set(id, JSON.stringify(messages));
+  }
 }
 
 /**
@@ -472,6 +812,7 @@ export async function saveSessions(sessions) {
  */
 export async function deleteSession(sessions, sessionId) {
   const root = await getRootDir();
+  await ensureSessionWriteCacheRoot(root);
   const sessionDir = await getDirectory(SESSIONS_DIR);
   const existingSessions = (await readJSON(root, SESSION_FILE)) || [];
   const remainingById = new Map();
@@ -497,15 +838,29 @@ export async function deleteSession(sessions, sessionId) {
     remaining,
     { localPath: SESSION_FILE }
   );
-  await deleteEntry(sessionDir, `${sessionId}.json`);
-  notifyOpfsMutation(`${SESSIONS_DIR}/${sessionId}.json`, 'delete');
   try {
-    const legacyDir = await getDirectory(LEGACY_MESSAGES_DIR);
-    await deleteEntry(legacyDir, `${sessionId}.json`);
-    notifyOpfsMutation(`${LEGACY_MESSAGES_DIR}/${sessionId}.json`, 'delete');
-  } catch (_e) { /* ignore */ }
+    if (await deleteEntry(sessionDir, `${sessionId}.json`)) {
+      notifyOpfsMutation(`${SESSIONS_DIR}/${sessionId}.json`, 'delete');
+    }
+  } catch (error) {
+    // The index write above is the deletion commit. A body that cannot be
+    // cleaned immediately is an unreachable orphan; rejecting here would keep
+    // the session in React and a later save could resurrect the index entry.
+    console.warn(`Failed to clean deleted session body ${sessionId}:`, error);
+  }
+  try {
+    const legacyDir = await getExistingDirectory(LEGACY_MESSAGES_DIR);
+    if (await deleteEntry(legacyDir, `${sessionId}.json`)) {
+      notifyOpfsMutation(`${LEGACY_MESSAGES_DIR}/${sessionId}.json`, 'delete');
+    }
+  } catch (error) {
+    if (!isMissingFileSystemEntry(error)) {
+      console.warn(`Failed to clean legacy deleted session body ${sessionId}:`, error);
+    }
+  }
 
-
+  sessionMetadataWriteSnapshot = JSON.stringify(remaining);
+  sessionMessageWriteSnapshots.delete(String(sessionId));
   return remaining;
 }
 
@@ -516,24 +871,118 @@ export async function clearAll() {
   const root = await navigator.storage.getDirectory();
   try {
     await root.removeEntry(ROOT_DIR, { recursive: true });
-  } catch (_e) { /* ignore */ }
+  } catch (error) {
+    if (!isMissingFileSystemEntry(error)) throw error;
+  }
+  sessionMetadataWriteSnapshot = null;
+  sessionMessageWriteSnapshots.clear();
+  sessionWriteCacheRoot = null;
 }
 
 // ─── Export/Import ────────────────────────────────────────────────────────────
 
+async function hasStoredSessionIndex(root) {
+  for (const filename of SESSION_INDEX_FILES) {
+    try {
+      await root.getFileHandle(filename);
+      return true;
+    } catch (error) {
+      if (!isMissingFileSystemEntry(error)) throw error;
+    }
+  }
+  return false;
+}
+
+function canonicalSessionExport(sessions) {
+  const metadata = [];
+  const bodies = [];
+  const ids = new Set();
+
+  for (const session of sessions) {
+    if (!isPlainObject(session) || !Object.prototype.hasOwnProperty.call(session, 'id')) {
+      throw new ZipImportValidationError(
+        'INVALID_CONTENT',
+        'Stored session index contains a session without a safe object record',
+        SESSION_FILE
+      );
+    }
+    const id = validateSessionId(session.id, SESSION_FILE);
+    if (ids.has(id)) {
+      throw new ZipImportValidationError(
+        'DUPLICATE_SESSION_ID',
+        `Stored session index contains duplicate id "${id}"`,
+        SESSION_FILE
+      );
+    }
+    ids.add(id);
+    validateSessionMessageArray(session.messages, `${SESSIONS_DIR}/${id}.json`);
+    const { messages, ...sessionMetadata } = session;
+    metadata.push(sessionMetadata);
+    bodies.push({ id, messages });
+  }
+
+  return { metadata, bodies };
+}
+
+async function sessionExportSnapshot(root, options) {
+  const hasIndex = await hasStoredSessionIndex(root);
+  let storedSessions = null;
+  let storedSessionError = null;
+
+  if (hasIndex) {
+    try {
+      storedSessions = await loadSessions();
+    } catch (error) {
+      storedSessionError = error;
+    }
+  }
+
+  if (options.materializeSessionRecovery === true) {
+    const journal = await readSessionRecoveryJournal();
+    if (journal) {
+      const sessions = storedSessions == null
+        ? journal.sessions
+        : reconcileSessionRecoveryJournal(storedSessions, journal).sessions;
+      return canonicalSessionExport(sessions);
+    }
+  }
+
+  if (storedSessionError) throw storedSessionError;
+  return storedSessions == null ? null : canonicalSessionExport(storedSessions);
+}
+
+function isRuntimeSessionStoragePath(path) {
+  const normalized = normalizeLocalPath(path);
+  const [topLevel] = normalized.split('/');
+  return SESSION_INDEX_FILES.has(normalized)
+    || topLevel === SESSIONS_DIR
+    || topLevel === LEGACY_MESSAGES_DIR;
+}
+
 /**
  * Export all data to a zip file.
+ * `materializeSessionRecovery` validates the private crash journal and writes
+ * its recovered view as normal session index/body files; `.sync` itself is
+ * never included in either export mode.
+ * @param {{materializeSessionRecovery?: boolean}} [options]
  * @returns {Promise<Blob>}
  */
-export async function exportToZip() {
+export async function exportToZip(options = {}) {
   const root = await getRootDir();
   const zip = new JSZip();
+  const sessionSnapshot = await sessionExportSnapshot(root, options);
 
   async function collect(dir, prefix = '') {
     for (const { name, kind } of await listEntries(dir)) {
       const path = prefix ? `${prefix}/${name}` : name;
+      if (isInternalSyncPath(path)) continue;
+      // Session indexes and bodies are emitted from one validated snapshot
+      // below. Skipping their raw files prevents an unreachable body left by an
+      // interrupted save or best-effort cleanup from poisoning the backup.
+      if (isRuntimeSessionStoragePath(path)) continue;
       if (kind === 'file') {
-        zip.file(path, await readText(dir, name));
+        const file = await (await dir.getFileHandle(name)).getFile();
+        zip.file(path, new Uint8Array(await file.arrayBuffer()));
       } else {
         await collect(await dir.getDirectoryHandle(name), path);
       }
@@ -541,25 +990,538 @@ export async function exportToZip() {
   }
 
   await collect(root);
+  if (sessionSnapshot) {
+    zip.file(SESSION_FILE, JSON.stringify(sessionSnapshot.metadata, null, 2), {
+      createFolders: false,
+    });
+    for (const { id, messages } of sessionSnapshot.bodies) {
+      zip.file(
+        `${SESSIONS_DIR}/${id}.json`,
+        JSON.stringify(messages, null, 2)
+      );
+    }
+  }
   return zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
+}
+
+function zipImportLimit(value, hardLimit, name) {
+  if (value == null) return hardLimit;
+  const limit = Number(value);
+  if (!Number.isSafeInteger(limit) || limit < 0) {
+    throw new ZipImportValidationError(
+      'INVALID_LIMIT',
+      `${name} must be a non-negative safe integer`
+    );
+  }
+  // Callers may lower limits for more constrained environments, but cannot
+  // raise the hard browser-safety caps.
+  return Math.min(limit, hardLimit);
+}
+
+function zipImportLimits(options = {}) {
+  return {
+    maxEntries: zipImportLimit(options.maxEntries, ZIP_IMPORT_MAX_ENTRIES, 'maxEntries'),
+    maxFileBytes: zipImportLimit(options.maxFileBytes, ZIP_IMPORT_MAX_FILE_BYTES, 'maxFileBytes'),
+    maxTotalBytes: zipImportLimit(options.maxTotalBytes, ZIP_IMPORT_MAX_TOTAL_BYTES, 'maxTotalBytes'),
+    maxArchiveBytes: zipImportLimit(
+      options.maxArchiveBytes,
+      ZIP_IMPORT_MAX_ARCHIVE_BYTES,
+      'maxArchiveBytes'
+    ),
+  };
+}
+
+function zipPathError(code, path, reason) {
+  return new ZipImportValidationError(code, `Unsafe ZIP entry path "${path}": ${reason}`, path);
+}
+
+function hasControlCharacter(value) {
+  for (let i = 0; i < value.length; i += 1) {
+    const code = value.charCodeAt(i);
+    if (code <= 0x1f || code === 0x7f) return true;
+  }
+  return false;
+}
+
+function validateZipEntryPath(path, isDirectory, source = 'name') {
+  if (typeof path !== 'string' || path.length === 0) {
+    throw zipPathError('UNSAFE_PATH', String(path || ''), `${source} is empty`);
+  }
+  if (hasControlCharacter(path)) {
+    throw zipPathError('UNSAFE_PATH', path, `${source} contains control characters`);
+  }
+  if (path.includes('\\')) {
+    throw zipPathError('UNSAFE_PATH', path, `${source} contains backslashes`);
+  }
+  if (path.startsWith('/') || /^[A-Za-z]:/.test(path)) {
+    throw zipPathError('UNSAFE_PATH', path, `${source} is absolute`);
+  }
+
+  let comparablePath = path;
+  if (isDirectory && comparablePath.endsWith('/')) comparablePath = comparablePath.slice(0, -1);
+  if (!isDirectory && comparablePath.endsWith('/')) {
+    throw zipPathError('UNSAFE_PATH', path, `${source} has a directory suffix`);
+  }
+  if (!comparablePath) {
+    throw zipPathError('UNSAFE_PATH', path, `${source} does not name an entry`);
+  }
+
+  const parts = comparablePath.split('/');
+  if (parts.some((part) => part === '' || part === '.' || part === '..')) {
+    throw zipPathError('UNSAFE_PATH', path, `${source} contains empty or traversal components`);
+  }
+  if (parts[0].toLowerCase() === SYNC_DIR) {
+    throw new ZipImportValidationError(
+      'RESERVED_PATH',
+      `ZIP entry targets the reserved ${SYNC_DIR} namespace: ${path}`,
+      path
+    );
+  }
+  const encoder = new TextEncoder();
+  if (encoder.encode(comparablePath).byteLength > ZIP_IMPORT_MAX_PATH_BYTES) {
+    throw zipPathError('UNSAFE_PATH', path, 'path is too long');
+  }
+  if (parts.length > ZIP_IMPORT_MAX_PATH_DEPTH) {
+    throw zipPathError('UNSAFE_PATH', path, 'path is too deeply nested');
+  }
+  if (parts.some((part) => encoder.encode(part).byteLength > ZIP_IMPORT_MAX_SEGMENT_BYTES)) {
+    throw zipPathError('UNSAFE_PATH', path, 'path component is too long');
+  }
+  return parts.join('/');
+}
+
+function declaredZipEntrySize(file, path) {
+  const value = file?._data?.uncompressedSize;
+  if (value == null) return null;
+  const size = Number(value);
+  if (!Number.isSafeInteger(size) || size < 0) {
+    throw new ZipImportValidationError(
+      'INVALID_SIZE',
+      `ZIP entry has an invalid uncompressed size: ${path}`,
+      path
+    );
+  }
+  return size;
+}
+
+function zipSizeError(code, path, size, limit, label) {
+  return new ZipImportValidationError(
+    code,
+    `ZIP ${label} exceeds the ${limit} byte limit at "${path}" (${size} bytes)`,
+    path
+  );
+}
+
+function readZipEntryBytes(file, path, declaredSize, acceptedBytes, limits) {
+  const maximumForEntry = Math.min(limits.maxFileBytes, limits.maxTotalBytes - acceptedBytes);
+  const initialSize = declaredSize ?? 0;
+
+  return new Promise((resolve, reject) => {
+    const helper = file.internalStream('uint8array');
+    let output = new Uint8Array(initialSize);
+    let total = 0;
+    let settled = false;
+
+    function finishWithError(error) {
+      if (settled) return;
+      settled = true;
+      output = null;
+      helper.pause();
+      reject(error);
+      // Pausing stops decompression promptly for archives whose central-directory
+      // size is false or missing. JSZip does not expose a public cancel method.
+    }
+
+    helper
+      .on('data', (chunk) => {
+        if (settled) return;
+        const bytes = chunk instanceof Uint8Array
+          ? chunk
+          : new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+        const nextTotal = total + bytes.byteLength;
+        if (nextTotal > limits.maxFileBytes) {
+          finishWithError(zipSizeError(
+            'FILE_TOO_LARGE', path, nextTotal, limits.maxFileBytes, 'entry'
+          ));
+          return;
+        }
+        if (acceptedBytes + nextTotal > limits.maxTotalBytes) {
+          finishWithError(zipSizeError(
+            'TOTAL_TOO_LARGE', path, acceptedBytes + nextTotal, limits.maxTotalBytes, 'content'
+          ));
+          return;
+        }
+        if (nextTotal > maximumForEntry) {
+          finishWithError(zipSizeError(
+            'TOTAL_TOO_LARGE', path, acceptedBytes + nextTotal, limits.maxTotalBytes, 'content'
+          ));
+          return;
+        }
+        if (nextTotal > output.byteLength) {
+          const expanded = new Uint8Array(Math.min(
+            maximumForEntry,
+            Math.max(nextTotal, Math.max(1, output.byteLength * 2))
+          ));
+          expanded.set(output.subarray(0, total));
+          output = expanded;
+        }
+        output.set(bytes, total);
+        total = nextTotal;
+      })
+      .on('error', (error) => finishWithError(error))
+      .on('end', () => {
+        if (settled) return;
+        if (declaredSize != null && total !== declaredSize) {
+          finishWithError(new ZipImportValidationError(
+            'SIZE_MISMATCH',
+            `ZIP entry uncompressed size does not match its metadata: ${path}`,
+            path
+          ));
+          return;
+        }
+        settled = true;
+        resolve(output.subarray(0, total));
+      })
+      .resume();
+  });
+}
+
+function validateSessionId(value, path) {
+  if (typeof value !== 'string' && !Number.isSafeInteger(value)) {
+    throw new ZipImportValidationError(
+      'UNSAFE_SESSION_ID',
+      `Session id must be a string or safe integer in ZIP entry: ${path}`,
+      path
+    );
+  }
+  const id = String(value);
+  if (
+    !id
+    || id !== id.trim()
+    || id === '.'
+    || id === '..'
+    || id.includes('/')
+    || id.includes('\\')
+    || hasControlCharacter(id)
+    || new TextEncoder().encode(id).byteLength > MAX_SESSION_ID_BYTES
+  ) {
+    throw new ZipImportValidationError(
+      'UNSAFE_SESSION_ID',
+      `Session id cannot be represented safely as an OPFS file name in ZIP entry: ${path}`,
+      path
+    );
+  }
+  return id;
+}
+
+function validateSessionMessageArray(messages, path) {
+  if (!Array.isArray(messages) || messages.some((message) => !isPlainObject(message))) {
+    throw new ZipImportValidationError(
+      'INVALID_CONTENT',
+      `Session message data must be an array of objects in ZIP entry: ${path}`,
+      path
+    );
+  }
+}
+
+function sessionBodyId(path) {
+  const parts = path.split('/');
+  if (![SESSIONS_DIR, LEGACY_MESSAGES_DIR].includes(parts[0])) return null;
+  if (parts.length !== 2 || !parts[1].endsWith('.json')) {
+    throw new ZipImportValidationError(
+      'INVALID_SESSION_PATH',
+      `Session storage contains an unsupported ZIP entry path: ${path}`,
+      path
+    );
+  }
+  const filenameId = parts[1].slice(0, -'.json'.length);
+  return validateSessionId(filenameId, path);
+}
+
+function validatePreparedMergeableEntry(path, bytes) {
+  const bodyId = sessionBodyId(path);
+  if (!shouldMergeIncomingFile(path) && bodyId == null) return null;
+  let text;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    throw new ZipImportValidationError(
+      'INVALID_CONTENT',
+      `ZIP entry is not valid UTF-8 text: ${path}`,
+      path
+    );
+  }
+  const data = parseMergeableFile(path, text);
+  const expectsArray = [
+    'session.json',
+    'chat.json',
+    'chats.json',
+  ].includes(path) || /^(sessions|messages)\/[^/]+\.json$/.test(path);
+  const valid = expectsArray ? Array.isArray(data) : isPlainObject(data);
+  if (!valid) {
+    throw new ZipImportValidationError(
+      'INVALID_CONTENT',
+      `ZIP entry has invalid structured content: ${path}`,
+      path
+    );
+  }
+  if (bodyId != null) validateSessionMessageArray(data, path);
+  return SESSION_INDEX_FILES.has(path) || bodyId != null ? data : null;
+}
+
+function validatePreparedSessionData(prepared) {
+  const indexedIds = new Set();
+  const bodyIds = new Set();
+  let hasSessionIndex = false;
+
+  for (const entry of prepared) {
+    if (SESSION_INDEX_FILES.has(entry.path)) {
+      hasSessionIndex = true;
+      const idsInIndex = new Set();
+      for (const session of entry.structuredData) {
+        if (!isPlainObject(session)) {
+          throw new ZipImportValidationError(
+            'INVALID_CONTENT',
+            `Session index entries must be objects in ZIP entry: ${entry.path}`,
+            entry.path
+          );
+        }
+        if (!Object.prototype.hasOwnProperty.call(session, 'id')) {
+          throw new ZipImportValidationError(
+            'UNSAFE_SESSION_ID',
+            `Session index entry is missing an id in ZIP entry: ${entry.path}`,
+            entry.path
+          );
+        }
+        const id = validateSessionId(session.id, entry.path);
+        if (idsInIndex.has(id)) {
+          throw new ZipImportValidationError(
+            'DUPLICATE_SESSION_ID',
+            `Session index contains duplicate id "${id}" in ZIP entry: ${entry.path}`,
+            entry.path
+          );
+        }
+        idsInIndex.add(id);
+        indexedIds.add(id);
+        if (Object.prototype.hasOwnProperty.call(session, 'messages')) {
+          validateSessionMessageArray(session.messages, entry.path);
+        }
+      }
+      continue;
+    }
+
+    const id = sessionBodyId(entry.path);
+    if (id != null) bodyIds.add(id);
+  }
+
+  if (bodyIds.size > 0 && !hasSessionIndex) {
+    const [id] = bodyIds;
+    throw new ZipImportValidationError(
+      'INCONSISTENT_SESSION_DATA',
+      `Session message body "${id}" has no session index in the ZIP archive`
+    );
+  }
+  for (const id of indexedIds) {
+    if (!bodyIds.has(id)) {
+      throw new ZipImportValidationError(
+        'INCONSISTENT_SESSION_DATA',
+        `Session index id "${id}" has no matching message body in the ZIP archive`
+      );
+    }
+  }
+  for (const id of bodyIds) {
+    if (!indexedIds.has(id)) {
+      throw new ZipImportValidationError(
+        'INCONSISTENT_SESSION_DATA',
+        `Session message body "${id}" has no matching index entry in the ZIP archive`
+      );
+    }
+  }
+}
+
+async function preflightZipImport(zip, options = {}) {
+  const limits = zipImportLimits(options);
+  const rawEntries = Object.entries(zip.files);
+  if (rawEntries.length > limits.maxEntries) {
+    throw new ZipImportValidationError(
+      'TOO_MANY_ENTRIES',
+      `ZIP contains ${rawEntries.length} entries; the limit is ${limits.maxEntries}`
+    );
+  }
+
+  const entries = [];
+  const pathKinds = new Map();
+  let declaredTotal = 0;
+
+  // Validate every name and all declared sizes before decompressing anything.
+  for (const [path, file] of rawEntries) {
+    const normalizedPath = validateZipEntryPath(path, file.dir, 'name');
+    const fileNamePath = validateZipEntryPath(file.name, file.dir, 'file name');
+    if (normalizedPath !== fileNamePath) {
+      throw zipPathError('UNSAFE_PATH', path, 'JSZip entry names disagree');
+    }
+    if (file.unsafeOriginalName != null) {
+      validateZipEntryPath(file.unsafeOriginalName, file.dir, 'unsafeOriginalName');
+    }
+
+    const kind = file.dir ? 'directory' : 'file';
+    const existingKind = pathKinds.get(normalizedPath);
+    if (existingKind && existingKind !== kind) {
+      throw zipPathError('PATH_CONFLICT', path, 'the same path is both a file and directory');
+    }
+    pathKinds.set(normalizedPath, kind);
+
+    if (file.dir) continue;
+    const declaredSize = declaredZipEntrySize(file, normalizedPath);
+    if (declaredSize != null && declaredSize > limits.maxFileBytes) {
+      throw zipSizeError(
+        'FILE_TOO_LARGE', normalizedPath, declaredSize, limits.maxFileBytes, 'entry'
+      );
+    }
+    if (declaredSize != null) {
+      declaredTotal += declaredSize;
+      if (declaredTotal > limits.maxTotalBytes) {
+        throw zipSizeError(
+          'TOTAL_TOO_LARGE', normalizedPath, declaredTotal, limits.maxTotalBytes, 'content'
+        );
+      }
+    }
+    entries.push({ path: normalizedPath, file, declaredSize });
+  }
+
+  const filePaths = new Set(entries.map((entry) => entry.path));
+  for (const path of filePaths) {
+    const parts = path.split('/');
+    for (let i = 1; i < parts.length; i += 1) {
+      const ancestor = parts.slice(0, i).join('/');
+      if (filePaths.has(ancestor)) {
+        throw zipPathError('PATH_CONFLICT', path, `file ancestor "${ancestor}" blocks the path`);
+      }
+    }
+  }
+
+  // Decompress and verify all actual sizes before opening OPFS for writes.
+  const prepared = [];
+  let actualTotal = 0;
+  for (const entry of entries) {
+    const bytes = await readZipEntryBytes(
+      entry.file,
+      entry.path,
+      entry.declaredSize,
+      actualTotal,
+      limits
+    );
+    const structuredData = validatePreparedMergeableEntry(entry.path, bytes);
+    actualTotal += bytes.byteLength;
+    prepared.push({ path: entry.path, bytes, structuredData });
+  }
+  validatePreparedSessionData(prepared);
+  return prepared;
+}
+
+function isFileSystemTypeMismatch(error) {
+  return error?.name === 'TypeMismatchError'
+    || /is not a (?:file|directory)/i.test(String(error?.message || ''));
+}
+
+async function validateImportDestinationPaths(preparedEntries) {
+  const root = await getRootDir();
+  for (const { path } of preparedEntries) {
+    const parts = path.split('/');
+    const fileName = parts.pop();
+    let dir = root;
+    let parentMissing = false;
+    for (const part of parts) {
+      try {
+        dir = await dir.getDirectoryHandle(part);
+      } catch (error) {
+        if (isFileSystemTypeMismatch(error)) {
+          throw new ZipImportValidationError(
+            'PATH_CONFLICT',
+            `Existing file blocks ZIP path: ${path}`,
+            path
+          );
+        }
+        if (isMissingFileSystemEntry(error)) {
+          parentMissing = true;
+          break;
+        }
+        throw error;
+      }
+    }
+    if (parentMissing) continue;
+    try {
+      await dir.getDirectoryHandle(fileName);
+      throw new ZipImportValidationError(
+        'PATH_CONFLICT',
+        `Existing directory blocks ZIP file: ${path}`,
+        path
+      );
+    } catch (error) {
+      if (error instanceof ZipImportValidationError) throw error;
+      if (isMissingFileSystemEntry(error) || isFileSystemTypeMismatch(error)) continue;
+      throw error;
+    }
+  }
 }
 
 /**
  * Import data from a zip file.
  * @param {Blob} blob
  */
-export async function importFromZip(blob) {
-  const zip = await JSZip.loadAsync(blob);
-
-  for (const [path, file] of Object.entries(zip.files)) {
-    if (file.dir) continue;
-
-    const parts = path.split('/');
-    const fileName = parts.pop();
-    const dir = await getDirectory(...parts);
-    await writeIncomingText(dir, fileName, await file.async('string'), path);
+export async function importFromZip(blob, options = {}) {
+  const limits = zipImportLimits(options);
+  const archiveBytes = typeof Blob !== 'undefined' && blob instanceof Blob
+    ? blob.size
+    : (blob?.byteLength ?? null);
+  if (
+    archiveBytes != null
+    && (!Number.isSafeInteger(Number(archiveBytes)) || Number(archiveBytes) > limits.maxArchiveBytes)
+  ) {
+    throw new ZipImportValidationError(
+      'ARCHIVE_TOO_LARGE',
+      `ZIP archive exceeds the ${limits.maxArchiveBytes} byte compressed-input limit`
+    );
   }
-  notifyOpfsMutation('zip-import', 'import');
+  const zipInput = typeof Blob !== 'undefined' && blob instanceof Blob
+    ? await blob.arrayBuffer()
+    : blob;
+  const zip = await JSZip.loadAsync(zipInput);
+  const preparedEntries = await preflightZipImport(zip, { ...options, ...limits });
+  await validateImportDestinationPaths(preparedEntries);
+  const importedPaths = [];
+
+  try {
+    // Message bodies precede their indexes so an interrupted import cannot
+    // expose a new session whose message file has not been written yet.
+    const orderedEntries = [...preparedEntries].sort((left, right) => {
+      const indexWeight = (path) => (
+        ['session.json', 'chat.json', 'chats.json'].includes(path) ? 1 : 0
+      );
+      return indexWeight(left.path) - indexWeight(right.path);
+    });
+    for (const { path, bytes } of orderedEntries) {
+      const parts = path.split('/');
+      const fileName = parts.pop();
+      const dir = await getDirectory(...parts);
+      if (shouldMergeIncomingFile(path)) {
+        await writeIncomingText(
+          dir,
+          fileName,
+          new TextDecoder().decode(bytes),
+          path,
+          { internal: true }
+        );
+      } else {
+        await writeText(dir, fileName, bytes, { internal: true });
+      }
+      importedPaths.push(path);
+    }
+  } finally {
+    // A quota or I/O failure can still occur after preflight. Always expose
+    // completed writes so caches and sync state cannot silently miss them.
+    notifyOpfsMutation(importedPaths, 'write');
+  }
 }
 
 // ─── File Manager Operations ──────────────────────────────────────────────────
@@ -882,9 +1844,12 @@ export async function writeMemoryFile(filename, content) {
 export async function deleteMemoryFile(filename) {
   try {
     const dir = await getDirectory(MEMORY_DIR);
-    await deleteEntry(dir, filename);
-    notifyOpfsMutation(`${MEMORY_DIR}/${filename}`, 'delete');
-  } catch { /* ignore */ }
+    if (await deleteEntry(dir, filename)) {
+      notifyOpfsMutation(`${MEMORY_DIR}/${filename}`, 'delete');
+    }
+  } catch (error) {
+    if (!isMissingFileSystemEntry(error)) throw error;
+  }
 }
 
 // ─── Skill Operations ─────────────────────────────────────────────────────────
@@ -953,7 +1918,9 @@ export async function deleteSkillDir(skillName) {
     const dir = await getDirectory(SKILLS_DIR);
     await dir.removeEntry(skillName, { recursive: true });
     notifyOpfsMutation(`${SKILLS_DIR}/${skillName}`, 'delete');
-  } catch { /* ignore */ }
+  } catch (error) {
+    if (!isMissingFileSystemEntry(error)) throw error;
+  }
 }
 
 /**
@@ -1108,10 +2075,13 @@ export async function writeAgentMemoryFile(agentId, filename, content) {
 export async function deleteAgentMemoryFile(agentId, filename) {
   try {
     const dir = await getAgentMemoryDir(agentId);
-    await deleteEntry(dir, filename);
-    const name = await resolveWorkspaceName(agentId);
-    notifyOpfsMutation(`${WORKSPACE_DIR}/${name}/memory/${filename}`, 'delete');
-  } catch { /* ignore */ }
+    if (await deleteEntry(dir, filename)) {
+      const name = await resolveWorkspaceName(agentId);
+      notifyOpfsMutation(`${WORKSPACE_DIR}/${name}/memory/${filename}`, 'delete');
+    }
+  } catch (error) {
+    if (!isMissingFileSystemEntry(error)) throw error;
+  }
 }
 
 // Agent-scoped skill operations
@@ -1162,7 +2132,9 @@ export async function deleteAgentSkillDir(agentId, skillName) {
     await dir.removeEntry(skillName, { recursive: true });
     const name = await resolveWorkspaceName(agentId);
     notifyOpfsMutation(`${WORKSPACE_DIR}/${name}/skills/${skillName}`, 'delete');
-  } catch { /* ignore */ }
+  } catch (error) {
+    if (!isMissingFileSystemEntry(error)) throw error;
+  }
 }
 
 export async function listAgentSkillRefs(agentId, skillName) {
@@ -1370,5 +2342,7 @@ export async function deleteAgentFile(agentId, path) {
     await dir.removeEntry(name, { recursive: true });
     const workspaceName = await resolveWorkspaceName(agentId);
     notifyOpfsMutation(`${WORKSPACE_DIR}/${workspaceName}/files/${safePath}`, 'delete');
-  } catch { /* ignore */ }
+  } catch (error) {
+    if (!isMissingFileSystemEntry(error)) throw error;
+  }
 }
