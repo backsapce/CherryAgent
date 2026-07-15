@@ -1,19 +1,35 @@
-import { lazy, Suspense, useState, useCallback, useEffect, useRef } from 'react';
+import { lazy, Suspense, useState, useCallback, useEffect, useLayoutEffect, useRef } from 'react';
 import SessionList from './components/SessionList/SessionList';
 import MessagePanel from './components/MessagePanel/MessagePanel';
-import { loadSessions, saveSessions, clearAll, deleteSession as deleteSessionFile } from './vfs/opfs';
+import {
+  loadSessions,
+  saveSessions,
+  clearAll,
+  deleteSession as deleteSessionFile,
+  exportToZip,
+  readSessionRecoveryJournal,
+  writeSessionRecoveryJournal,
+  clearSessionRecoveryJournal,
+} from './vfs/opfs';
 import config from './config/config';
 import llm from './models/llm';
-import { executeCommand, initAgents, cleanupE2b, enableE2b, E2B_AGENT_ID, getSandboxStatus } from './models/agent';
+import { executeCommand, initAgents, enableE2b, E2B_AGENT_ID, getSandboxStatus, stopE2bSandbox } from './models/agent';
 import { runAgentLoop } from './agent/loop';
 import { applyAgentEvent, createAgentEventState } from './agent/events';
 import { buildChatDebugExport, createChatDebugFilename } from './agent/debug';
 import { ensureDefaultSkills } from './agent/skills';
 import { ensureDefaultAgent, listAgents, updateAgentConfig } from './agents/agents';
-import { configureAutoSync } from './sync/syncManager';
+import { configureAutoSync, suspendAutoSync, waitForSyncIdle } from './sync/syncManager';
 import { I18nProvider } from './i18n/index';
 import { useI18n } from './i18n/context';
 import { editUserMessageAndDiscardFollowing } from './messageHistory';
+import {
+  reconcileSessionRecoveryJournal,
+  reconcileStoredSessions,
+  snapshotSessions,
+  sortSessions,
+} from './sessionRefresh';
+import { createSessionSaveCoordinator } from './sessionPersistence';
 import { WifiOff, ChevronRight } from './components/Icons/Icons';
 import './App.css';
 
@@ -25,6 +41,10 @@ function generateId() {
 
 function downloadJsonFile(filename, data) {
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  downloadBlobFile(filename, blob);
+}
+
+function downloadBlobFile(filename, blob) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
@@ -43,59 +63,6 @@ function sessionTimeFields(date = new Date()) {
   return {
     updatedAt: formatTime(date),
     updatedAtMs: date.getTime(),
-  };
-}
-
-function timestampFromGeneratedId(id) {
-  const value = parseInt(String(id || '').slice(0, 8), 36);
-  const min = new Date('2000-01-01T00:00:00Z').getTime();
-  const max = new Date('2100-01-01T00:00:00Z').getTime();
-  return Number.isFinite(value) && value >= min && value <= max ? value : 0;
-}
-
-function sessionTimestamp(session) {
-  if (Number.isFinite(session?.updatedAtMs)) return session.updatedAtMs;
-  const messageTimes = (session?.messages || []).map((message) => timestampFromGeneratedId(message.id));
-  return Math.max(timestampFromGeneratedId(session?.id), ...messageTimes, 0);
-}
-
-function sortSessions(sessions) {
-  return [...sessions].sort((a, b) => sessionTimestamp(b) - sessionTimestamp(a));
-}
-
-function sessionDataChanged(left, right) {
-  return JSON.stringify(left) !== JSON.stringify(right);
-}
-
-function mergeStoredSessions(savedSessions, currentSessions) {
-  const mergedById = new Map();
-  let keptLocalState = false;
-
-  for (const session of savedSessions) {
-    if (session?.id != null) mergedById.set(String(session.id), session);
-  }
-
-  for (const session of currentSessions) {
-    if (session?.id == null) continue;
-
-    const id = String(session.id);
-    const saved = mergedById.get(id);
-    if (!saved) {
-      mergedById.set(id, session);
-      keptLocalState = true;
-      continue;
-    }
-
-    if (sessionTimestamp(session) > sessionTimestamp(saved)) {
-      mergedById.set(id, session);
-      keptLocalState = true;
-    }
-  }
-
-  const merged = sortSessions([...mergedById.values()]);
-  return {
-    sessions: merged,
-    keptLocalState: keptLocalState || sessionDataChanged(merged, savedSessions),
   };
 }
 
@@ -206,6 +173,8 @@ function App() {
   const [activeSessionId, setActiveSessionId] = useState(null);
   const [loaded, setLoaded] = useState(false);
   const [initError, setInitError] = useState(null);
+  const [startupRecoveryBusy, setStartupRecoveryBusy] = useState(null);
+  const [startupRecoveryError, setStartupRecoveryError] = useState(null);
   const [_llmReady, setLlmReady] = useState(false); // triggers re-render on config change
   const [streaming, setStreaming] = useState(false);
   const [theme, setTheme] = useState('system'); // 'light' | 'dark' | 'system'
@@ -225,9 +194,15 @@ function App() {
   const [currentLlmProfileId, setCurrentLlmProfileId] = useState(null);
   const [storageVersion, setStorageVersion] = useState(0);
   const [messageQueue, setMessageQueue] = useState([]);
-  const savePending = useRef(null);
-  const suppressNextSaveRef = useRef(false);
+  const sessionPersistenceReadyRef = useRef(false);
+  const skipNextSessionSaveRef = useRef(null);
+  const persistedSessionsRef = useRef([]);
+  const sessionSaveCoordinatorRef = useRef(null);
   const abortRef = useRef(null);
+  const streamCompletionRef = useRef(null);
+  const factoryResetInProgressRef = useRef(false);
+  const startupRecoveryBusyRef = useRef(false);
+  const pendingStreamStartsRef = useRef(new Map());
   const streamingContentRef = useRef('');  // accumulates chunks outside React state
   const streamingThinkingRef = useRef(''); // accumulates thinking/reasoning chunks
   const rafRef = useRef(null);            // requestAnimationFrame id for UI sync
@@ -237,66 +212,126 @@ function App() {
   const sessionsRef = useRef(sessions);
   const activeSessionIdRef = useRef(activeSessionId);
 
-  useEffect(() => {
+  if (!sessionSaveCoordinatorRef.current) {
+    sessionSaveCoordinatorRef.current = createSessionSaveCoordinator({
+      save: saveSessions,
+      snapshot: snapshotSessions,
+      checkpoint: (checkpointSessions, baseline) => writeSessionRecoveryJournal({
+        baseline,
+        sessions: checkpointSessions,
+      }),
+      clearCheckpoint: clearSessionRecoveryJournal,
+      onCommitted: (snapshot) => {
+        persistedSessionsRef.current = snapshot;
+      },
+      onError: (err) => console.warn('OPFS save failed:', err),
+    });
+  }
+
+  const flushPendingSessionSave = useCallback(
+    () => sessionSaveCoordinatorRef.current.flush(),
+    []
+  );
+
+  const beginSessionStorageBarrier = useCallback(async () => {
+    return sessionSaveCoordinatorRef.current.beginBarrier();
+  }, []);
+
+  useLayoutEffect(() => {
     sessionsRef.current = sessions;
   }, [sessions]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     activeSessionIdRef.current = activeSessionId;
   }, [activeSessionId]);
 
   const refreshFromStorage = useCallback(async () => {
-    await config.init();
+    const saveCoordinator = sessionSaveCoordinatorRef.current;
+    saveCoordinator.suspend();
+    try {
+      await config.init();
 
-    const savedTheme = config.get('theme');
-    if (savedTheme && ['light', 'dark', 'system'].includes(savedTheme)) {
-      setTheme(savedTheme);
+      const savedTheme = config.get('theme');
+      if (savedTheme && ['light', 'dark', 'system'].includes(savedTheme)) {
+        setTheme(savedTheme);
+      }
+
+      const savedLocale = config.get('locale');
+      if (savedLocale) setLocalePref(savedLocale);
+
+      setUserNickname(config.get('general.userNickname') || config.get('general.nickname') || '');
+      setAvatar(config.get('general.avatar') || '');
+
+      const persistedBeforeRefresh = persistedSessionsRef.current;
+      const savedSessions = sortSessions(await loadSessions());
+      // The outer storage barrier already flushed the pre-operation state.
+      // Only after both storage reads succeed may we discard snapshots queued
+      // while remote/imported files were changing. If either read fails, the
+      // finally block resumes this still-pending save instead of losing it.
+      // On success, its in-memory edits participate in the three-way merge.
+      saveCoordinator.cancelScheduled();
+      const previewMerge = reconcileStoredSessions(
+        savedSessions,
+        sessionsRef.current,
+        persistedBeforeRefresh
+      );
+      persistedSessionsRef.current = snapshotSessions(savedSessions);
+      // Reconcile again inside the functional update. React may have accepted
+      // streaming chunks or another local edit while OPFS was being read, and
+      // sessionsRef intentionally only updates after a committed render.
+      setSessions((currentSessions) => {
+        const { sessions: latestMergedSessions, needsPersist } = reconcileStoredSessions(
+          savedSessions,
+          currentSessions,
+          persistedBeforeRefresh
+        );
+        skipNextSessionSaveRef.current = needsPersist ? null : latestMergedSessions;
+        sessionsRef.current = latestMergedSessions;
+        return latestMergedSessions;
+      });
+
+      // The non-session state below only depends on session metadata. This
+      // preview is refreshed from the same three-way merge; the functional
+      // update above remains authoritative for message content.
+      const mergedSessions = previewMerge.sessions;
+
+      const agentMap = {};
+      const llmMap = {};
+      for (const session of mergedSessions) {
+        if (session.agentId) agentMap[session.id] = session.agentId;
+        if (session.llmProfileId) llmMap[session.id] = session.llmProfileId;
+      }
+      setSessionAgents(agentMap);
+      setSessionLlmProfiles(llmMap);
+
+      const lastWithAgent = mergedSessions.find((c) => c.agentId);
+      setLastAgentId(lastWithAgent?.agentId || null);
+
+      const selectedSessionId = activeSessionIdRef.current;
+      if (mergedSessions.length === 0) {
+        setActiveSessionId(null);
+      } else if (!mergedSessions.some((session) => session.id === selectedSessionId)) {
+        setActiveSessionId(mergedSessions[0].id);
+      }
+
+      await llm.init();
+      const activeLlmId = llm.getActiveProfileId();
+      const selectedSession = mergedSessions.find((session) => session.id === selectedSessionId) || mergedSessions[0];
+      const sessionLlmId = selectedSession?.llmProfileId;
+      setCurrentLlmProfileId(sessionLlmId || activeLlmId || null);
+      setLlmReady((prev) => !prev);
+
+      const savedAgents = await listAgents();
+      setAgentList(savedAgents);
+      setStorageVersion((prev) => prev + 1);
+    } finally {
+      saveCoordinator.resume();
     }
-
-    const savedLocale = config.get('locale');
-    if (savedLocale) setLocalePref(savedLocale);
-
-    setUserNickname(config.get('general.userNickname') || config.get('general.nickname') || '');
-    setAvatar(config.get('general.avatar') || '');
-
-    const savedSessions = sortSessions(await loadSessions());
-    const { sessions: mergedSessions, keptLocalState } = mergeStoredSessions(savedSessions, sessionsRef.current);
-    suppressNextSaveRef.current = !keptLocalState;
-    setSessions(mergedSessions);
-
-    const agentMap = {};
-    const llmMap = {};
-    for (const session of mergedSessions) {
-      if (session.agentId) agentMap[session.id] = session.agentId;
-      if (session.llmProfileId) llmMap[session.id] = session.llmProfileId;
-    }
-    setSessionAgents(agentMap);
-    setSessionLlmProfiles(llmMap);
-
-    const lastWithAgent = mergedSessions.find((c) => c.agentId);
-    setLastAgentId(lastWithAgent?.agentId || null);
-
-    const selectedSessionId = activeSessionIdRef.current;
-    if (mergedSessions.length === 0) {
-      setActiveSessionId(null);
-    } else if (!mergedSessions.some((session) => session.id === selectedSessionId)) {
-      setActiveSessionId(mergedSessions[0].id);
-    }
-
-    await llm.init();
-    const activeLlmId = llm.getActiveProfileId();
-    const selectedSession = mergedSessions.find((session) => session.id === selectedSessionId) || mergedSessions[0];
-    const sessionLlmId = selectedSession?.llmProfileId;
-    setCurrentLlmProfileId(sessionLlmId || activeLlmId || null);
-    setLlmReady((prev) => !prev);
-
-    const savedAgents = await listAgents();
-    setAgentList(savedAgents);
-    setStorageVersion((prev) => prev + 1);
   }, []);
 
   // Load config, sessions and LLM settings from OPFS on mount
   useEffect(() => {
+    let sessionLoadSucceeded = false;
     config.init()
       .then(() => {
         // Restore persisted theme preference
@@ -314,10 +349,28 @@ function App() {
         if (savedAvatar) setAvatar(savedAvatar);
         return Promise.all([
           loadSessions()
-            .then((saved) => {
+            .then(async (saved) => {
+              const sortedSaved = sortSessions(saved);
+              let recoveryJournal = null;
+              try {
+                recoveryJournal = await readSessionRecoveryJournal();
+              } catch (error) {
+                // A malformed recovery journal must never make otherwise-good
+                // primary session storage unopenable. Leave it untouched for
+                // inspection and replace it after the next durable save.
+                console.warn('Ignoring invalid session recovery journal:', error);
+              }
+              const sorted = recoveryJournal
+                ? reconcileSessionRecoveryJournal(sortedSaved, recoveryJournal).sessions
+                : sortedSaved;
+              const persistedSnapshot = snapshotSessions(sortedSaved);
+              persistedSessionsRef.current = persistedSnapshot;
+              // Even a stale recovery journal gets one normal save. Only that
+              // durable save is allowed to clear the isolated checkpoint.
+              skipNextSessionSaveRef.current = recoveryJournal ? null : sorted;
+              sessionsRef.current = sorted;
+              setSessions(sorted);
               if (saved.length) {
-                const sorted = sortSessions(saved);
-                setSessions(sorted);
                 // Restore per-session agent assignments from persisted session metadata
                 const agentMap = {};
                 const llmMap = {};
@@ -331,6 +384,8 @@ function App() {
                 const lastWithAgent = sorted.find((c) => c.agentId);
                 if (lastWithAgent) setLastAgentId(lastWithAgent.agentId);
               }
+              sessionLoadSucceeded = true;
+              sessionPersistenceReadyRef.current = true;
             })
             .catch((err) => { console.error('OPFS load failed:', err); setInitError('Failed to load sessions'); }),
           llm.init()
@@ -341,54 +396,86 @@ function App() {
             .catch((err) => { console.error('LLM init failed:', err); }),
         ]);
       })
+      .then(() => {
+        // Do not create or rewrite any secondary workspace data while primary
+        // config/session storage is corrupt. The recovery screen must see a
+        // stable snapshot that the user can export before choosing a reset.
+        if (!sessionLoadSucceeded) return;
+
+        initAgents().then(({ agents: allAgents, selectedUrl }) => {
+          setAgents(allAgents);
+          setSelectedAgentUrl(selectedUrl);
+          selectedAgentRef.current = selectedUrl;
+        }).catch((err) => console.warn('Agent init failed:', err));
+
+        ensureDefaultSkills().catch((err) => console.warn('Ensure default skills failed:', err));
+
+        ensureDefaultAgent().then(() => listAgents()).then((agents) => {
+          setAgentList(agents);
+        }).catch((err) => console.warn('Ensure default agent failed:', err));
+      })
       .catch((err) => {
         console.error('Config init failed:', err);
         setInitError(err.message || 'Failed to load configuration');
       })
-      .finally(() => setLoaded(true));
+      .finally(() => {
+        // Never enable persistence over an empty fallback after a failed OPFS
+        // load: doing so could replace recoverable session data on disk.
+        if (sessionLoadSucceeded) setLoaded(true);
+      });
 
-    // Initialize agents after config is ready
-    initAgents().then(({ agents: allAgents, selectedUrl }) => {
-      setAgents(allAgents);
-      setSelectedAgentUrl(selectedUrl);
-      selectedAgentRef.current = selectedUrl;
-    }).catch((err) => console.warn('Agent init failed:', err));
-
-    // Ensure default skills exist in OPFS at startup
-    ensureDefaultSkills().catch((err) => console.warn('Ensure default skills failed:', err));
-
-    // Ensure at least one agent workspace exists
-    ensureDefaultAgent().then(() => listAgents()).then((agents) => {
-      setAgentList(agents);
-    }).catch((err) => console.warn('Ensure default agent failed:', err));
   }, []);
 
   // Debounced save to OPFS whenever sessions change
   useEffect(() => {
-    if (!loaded) return;
-    if (suppressNextSaveRef.current) {
-      suppressNextSaveRef.current = false;
+    if (!loaded || !sessionPersistenceReadyRef.current) return;
+    if (skipNextSessionSaveRef.current === sessions) {
+      skipNextSessionSaveRef.current = null;
+      sessionSaveCoordinatorRef.current.cancelScheduled();
       return;
     }
-    if (savePending.current) clearTimeout(savePending.current);
-    savePending.current = setTimeout(() => {
-      saveSessions(sessions).catch((err) => console.warn('OPFS save failed:', err));
-    }, 300);
-    return () => clearTimeout(savePending.current);
+    skipNextSessionSaveRef.current = null;
+    // Cloning is intentionally deferred into the timer so streaming renders
+    // only replace one array reference instead of cloning/stringifying history.
+    sessionSaveCoordinatorRef.current.schedule(sessions, persistedSessionsRef.current);
   }, [sessions, loaded]);
 
   useEffect(() => {
-    if (!loaded || !config.initialized) return undefined;
-    let cleanup = configureAutoSync(refreshFromStorage);
+    const persistForLifecycle = () => {
+      if (!sessionPersistenceReadyRef.current) return;
+      const coordinator = sessionSaveCoordinatorRef.current;
+      const persistence = coordinator.isSuspended()
+        ? coordinator.checkpoint(sessionsRef.current, persistedSessionsRef.current)
+        : coordinator.flush();
+      persistence.catch((err) => console.warn('OPFS lifecycle save failed:', err));
+    };
+    const persistWhenHidden = () => {
+      if (document.visibilityState === 'hidden') persistForLifecycle();
+    };
+    window.addEventListener('pagehide', persistForLifecycle);
+    document.addEventListener('visibilitychange', persistWhenHidden);
+    return () => {
+      window.removeEventListener('pagehide', persistForLifecycle);
+      document.removeEventListener('visibilitychange', persistWhenHidden);
+      sessionSaveCoordinatorRef.current.cancelScheduled();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!loaded || !sessionPersistenceReadyRef.current || !config.initialized) return undefined;
+    let cleanup = configureAutoSync(refreshFromStorage, { beforeSync: beginSessionStorageBarrier });
     const unsubscribe = config.subscribe(() => {
       cleanup?.();
-      cleanup = configureAutoSync(refreshFromStorage, { runStartup: false });
+      cleanup = configureAutoSync(refreshFromStorage, {
+        beforeSync: beginSessionStorageBarrier,
+        runStartup: false,
+      });
     });
     return () => {
       cleanup?.();
       unsubscribe?.();
     };
-  }, [loaded, refreshFromStorage]);
+  }, [loaded, refreshFromStorage, beginSessionStorageBarrier]);
 
   // Apply theme to <html> and listen for system preference changes
   useEffect(() => {
@@ -480,10 +567,7 @@ function App() {
   }, [sessions]);
 
   const handleDeleteSession = useCallback(async (sessionId) => {
-    if (savePending.current) {
-      clearTimeout(savePending.current);
-      savePending.current = null;
-    }
+    await flushPendingSessionSave();
 
     // First, delete the session file from OPFS
     await deleteSessionFile(sessions, sessionId);
@@ -509,7 +593,7 @@ function App() {
       }
       return updated;
     });
-  }, [activeSessionId, sessions]);
+  }, [activeSessionId, sessions, flushPendingSessionSave]);
 
   const handleExportDebug = useCallback(() => {
     const session = sessions.find((c) => c.id === activeSessionId);
@@ -556,6 +640,11 @@ function App() {
 
   // Stream LLM response for a given session using the agent loop
   const streamResponse = useCallback(async (sessionId, sessionMessages, opts = {}) => {
+    // A reset invalidates every in-memory session/message reference. Keep this
+    // guard at the final entry point as well as in the timer scheduler so a
+    // callback that was already dequeued cannot start work during the reset.
+    if (factoryResetInProgressRef.current) return;
+
     // Prevent duplicate calls (StrictMode double-invoke guard)
     if (abortRef.current) return;
 
@@ -597,6 +686,9 @@ function App() {
 
     const controller = new AbortController();
     abortRef.current = controller;
+    let finishStream;
+    const streamCompletion = new Promise((resolve) => { finishStream = resolve; });
+    streamCompletionRef.current = streamCompletion;
     streamingContentRef.current = '';
     streamingThinkingRef.current = '';
     setStreaming(true);
@@ -694,8 +786,37 @@ function App() {
       streamingContentRef.current = '';
       streamingThinkingRef.current = '';
       setStreaming(false);
+      if (streamCompletionRef.current === streamCompletion) {
+        streamCompletionRef.current = null;
+      }
+      finishStream();
     }
   }, [agentList, sessionAgents, sessionLlmProfiles, currentLlmProfileId, getFirstLlmProfileId]);
+
+  const scheduleStreamResponse = useCallback((sessionId, sessionMessages, opts = {}) => {
+    if (factoryResetInProgressRef.current) return;
+
+    const pendingStart = { sessionId, sessionMessages, opts };
+    const timerId = setTimeout(() => {
+      pendingStreamStartsRef.current.delete(timerId);
+      if (factoryResetInProgressRef.current) return;
+      void streamResponse(sessionId, sessionMessages, opts);
+    }, 0);
+    pendingStreamStartsRef.current.set(timerId, pendingStart);
+  }, [streamResponse]);
+
+  const cancelPendingStreamStarts = useCallback(() => {
+    const pendingStarts = [...pendingStreamStartsRef.current.values()];
+    for (const timerId of pendingStreamStartsRef.current.keys()) {
+      clearTimeout(timerId);
+    }
+    pendingStreamStartsRef.current.clear();
+    return pendingStarts;
+  }, []);
+
+  useEffect(() => () => {
+    cancelPendingStreamStarts();
+  }, [cancelPendingStreamStarts]);
 
   const handleStopStreaming = useCallback(() => {
     if (abortRef.current) abortRef.current.abort();
@@ -703,6 +824,8 @@ function App() {
 
   const sendMessageNow = useCallback(
     (text, images, contextFiles, targetSessionId = activeSessionId) => {
+      if (factoryResetInProgressRef.current) return;
+
       if (!targetSessionId) {
         // Auto-create a session if none selected
         const userMsg = { id: generateId(), role: 'user', content: text, ...(images && { images }), ...(contextFiles && { contextFiles }) };
@@ -725,7 +848,7 @@ function App() {
         if (llmProfileId) {
           setSessionLlmProfiles((prev) => ({ ...prev, [newSession.id]: llmProfileId }));
         }
-        setTimeout(() => streamResponse(newSession.id, [userMsg], { agentId, llmProfileId }), 0);
+        scheduleStreamResponse(newSession.id, [userMsg], { agentId, llmProfileId });
         return;
       }
 
@@ -747,16 +870,18 @@ function App() {
         // Schedule stream outside of state updater
         const session = updated.find((c) => c.id === sessionId);
         if (session) {
-          setTimeout(() => streamResponse(sessionId, session.messages), 0);
+          scheduleStreamResponse(sessionId, session.messages);
         }
         return updated;
       });
     },
-    [activeSessionId, streamResponse, lastAgentId, agentList, currentLlmProfileId, getAgentDefaultLlmId]
+    [activeSessionId, scheduleStreamResponse, lastAgentId, agentList, currentLlmProfileId, getAgentDefaultLlmId]
   );
 
   const handleSendMessage = useCallback(
     (text, images, contextFiles) => {
+      if (factoryResetInProgressRef.current) return;
+
       if (streaming && activeSessionId) {
         setMessageQueue((prev) => [
           ...prev,
@@ -781,6 +906,8 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (factoryResetInProgressRef.current) return;
+
     const justFinishedStreaming = wasStreamingRef.current && !streaming;
     wasStreamingRef.current = streaming;
     if (!justFinishedStreaming || messageQueue.length === 0) return;
@@ -791,7 +918,7 @@ function App() {
   }, [streaming, messageQueue, sendMessageNow]);
 
   const handleEditMessage = useCallback((messageId, text) => {
-    if (streaming || !activeSessionId) return;
+    if (factoryResetInProgressRef.current || streaming || !activeSessionId) return;
     const sessionId = activeSessionId;
     const session = sessions.find((c) => c.id === sessionId);
     if (!session) return;
@@ -816,8 +943,8 @@ function App() {
       ))
     );
 
-    setTimeout(() => streamResponse(sessionId, trimmedMessages), 0);
-  }, [activeSessionId, sessions, streaming, streamResponse]);
+    scheduleStreamResponse(sessionId, trimmedMessages);
+  }, [activeSessionId, sessions, streaming, scheduleStreamResponse]);
 
   const handleSelectLLM = useCallback(async (profileId) => {
     const nextProfileId = profileId || null;
@@ -842,6 +969,104 @@ function App() {
     );
   }, [activeSessionId]);
 
+  const performFactoryReset = useCallback(async () => {
+    if (factoryResetInProgressRef.current) return;
+    factoryResetInProgressRef.current = true;
+    const cancelledStreamStarts = cancelPendingStreamStarts();
+    const streamCompletion = streamCompletionRef.current;
+    let resumeAutoSync;
+    let resetComplete = false;
+    let configResetStarted = false;
+    const coordinator = sessionSaveCoordinatorRef.current;
+    let releaseSessionBarrier;
+    try {
+      resumeAutoSync = suspendAutoSync();
+      abortRef.current?.abort();
+      if (streamCompletion) await streamCompletion;
+      await waitForSyncIdle();
+      releaseSessionBarrier = await coordinator.beginBarrier();
+      coordinator.cancelScheduled();
+      // Drain config's independent persistence queue and synchronously fence
+      // any later Settings writes before deleting the OPFS tree. Otherwise a
+      // queued config.set() could recreate API keys after clearAll().
+      await config.clearForFactoryReset();
+      configResetStarted = true;
+      await clearAll();
+      sessionPersistenceReadyRef.current = false;
+      const emptySessions = [];
+      persistedSessionsRef.current = emptySessions;
+      skipNextSessionSaveRef.current = emptySessions;
+      sessionsRef.current = emptySessions;
+      setSessions(emptySessions);
+      setActiveSessionId(null);
+      setMessageQueue([]);
+      resetComplete = true;
+      setTimeout(() => window.location.reload(), 500);
+    } finally {
+      // Keep auto-sync paused after a successful reset so stale in-memory
+      // credentials cannot repopulate storage before the reload.
+      if (!resetComplete) {
+        if (configResetStarted) config.cancelFactoryReset();
+        factoryResetInProgressRef.current = false;
+        releaseSessionBarrier?.();
+        resumeAutoSync?.();
+        for (const pendingStart of cancelledStreamStarts) {
+          scheduleStreamResponse(
+            pendingStart.sessionId,
+            pendingStart.sessionMessages,
+            pendingStart.opts
+          );
+        }
+        // If aborting the active stream made a queued message eligible while
+        // the gate was closed, retrigger the queue effect now.
+        if (streamCompletion && cancelledStreamStarts.length === 0) {
+          setMessageQueue((current) => [...current]);
+        }
+      }
+    }
+  }, [cancelPendingStreamStarts, scheduleStreamResponse]);
+
+  const handleStartupBackup = useCallback(async () => {
+    if (startupRecoveryBusyRef.current) return;
+    startupRecoveryBusyRef.current = true;
+    setStartupRecoveryBusy('export');
+    setStartupRecoveryError(null);
+    const resumeAutoSync = suspendAutoSync();
+    try {
+      await waitForSyncIdle();
+      const blob = await exportToZip({ materializeSessionRecovery: true });
+      downloadBlobFile(
+        `vertex-agent-recovery-${new Date().toISOString().slice(0, 10)}.zip`,
+        blob
+      );
+    } catch (error) {
+      setStartupRecoveryError(`Backup export failed: ${error.message}`);
+    } finally {
+      resumeAutoSync();
+      startupRecoveryBusyRef.current = false;
+      setStartupRecoveryBusy(null);
+    }
+  }, []);
+
+  const handleStartupFactoryReset = useCallback(async () => {
+    if (startupRecoveryBusyRef.current) return;
+    if (!window.confirm(
+      'Factory reset permanently deletes all local VertexAgent data. '
+      + 'Export a recovery backup first if you may need this data. Continue?'
+    )) return;
+
+    startupRecoveryBusyRef.current = true;
+    setStartupRecoveryBusy('reset');
+    setStartupRecoveryError(null);
+    try {
+      await performFactoryReset();
+    } catch (error) {
+      setStartupRecoveryError(`Factory reset failed: ${error.message}`);
+      startupRecoveryBusyRef.current = false;
+      setStartupRecoveryBusy(null);
+    }
+  }, [performFactoryReset]);
+
   // Track online/offline status
   useEffect(() => {
     const goOffline = () => setIsOffline(true);
@@ -860,10 +1085,42 @@ function App() {
   if (!loaded) {
     return <div className="app" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column' }}>
       {initError ? (
-        <>
+        <div style={{ width: 'min(560px, calc(100vw - 32px))', textAlign: 'center' }}>
+          <h2 style={{ margin: '0 0 8px' }}>Local data needs recovery</h2>
           <p style={{ color: '#e53935', margin: 0 }}>Initialization failed: {initError}</p>
-          <button onClick={() => window.location.reload()} style={{ marginTop: 16, padding: '8px 16px', borderRadius: 6, border: '1px solid #ccc', background: '#fff', cursor: 'pointer' }}>Reload</button>
-        </>
+          <p style={{ margin: '12px 0 0', lineHeight: 1.5 }}>
+            Reloading may help after a temporary storage error. If it does not,
+            export a backup before resetting. Recovery backups can contain API keys and other private data.
+          </p>
+          {startupRecoveryError && (
+            <p role="alert" style={{ color: '#e53935', margin: '12px 0 0' }}>
+              {startupRecoveryError}
+            </p>
+          )}
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'center', marginTop: 16 }}>
+            <button
+              disabled={Boolean(startupRecoveryBusy)}
+              onClick={() => window.location.reload()}
+              style={{ padding: '8px 16px', borderRadius: 6, border: '1px solid #ccc', background: '#fff', cursor: startupRecoveryBusy ? 'default' : 'pointer' }}
+            >
+              Reload
+            </button>
+            <button
+              disabled={Boolean(startupRecoveryBusy)}
+              onClick={handleStartupBackup}
+              style={{ padding: '8px 16px', borderRadius: 6, border: '1px solid #888', background: '#fff', cursor: startupRecoveryBusy ? 'default' : 'pointer' }}
+            >
+              {startupRecoveryBusy === 'export' ? 'Exporting backup…' : 'Export recovery backup'}
+            </button>
+            <button
+              disabled={Boolean(startupRecoveryBusy)}
+              onClick={handleStartupFactoryReset}
+              style={{ padding: '8px 16px', borderRadius: 6, border: '1px solid #c62828', background: '#c62828', color: '#fff', cursor: startupRecoveryBusy ? 'default' : 'pointer' }}
+            >
+              {startupRecoveryBusy === 'reset' ? 'Resetting…' : 'Factory reset'}
+            </button>
+          </div>
+        </div>
       ) : 'Loading...'}
     </div>;
   }
@@ -905,6 +1162,7 @@ function App() {
         onRemoveQueuedMessage={handleRemoveQueuedMessage}
         onEditMessage={handleEditMessage}
         onRetry={() => {
+          if (factoryResetInProgressRef.current) return;
           const sessionId = activeSessionId;
           const session = sessions.find((c) => c.id === sessionId);
           if (!session) return;
@@ -912,7 +1170,7 @@ function App() {
           if (lastUserIdx === -1) return;
           const trimmed = session.messages.slice(0, lastUserIdx + 1);
           setSessions((prev) => prev.map((c) => c.id === sessionId ? { ...c, messages: trimmed } : c));
-          setTimeout(() => streamResponse(sessionId, trimmed), 0);
+          scheduleStreamResponse(sessionId, trimmed);
         }}
         streaming={streaming}
         onStopStreaming={handleStopStreaming}
@@ -1003,10 +1261,16 @@ function App() {
           }
         }}
         onE2bChange={async (apiKey) => {
-          const oldKey = config.get('e2b.apiKey');
-          await config.set('e2b.apiKey', apiKey || null);
-          if (apiKey && !oldKey) {
-            // E2B was just enabled — start sandbox and update agent list
+          const nextKey = apiKey || null;
+          const oldKey = config.get('e2b.apiKey') || null;
+          // A connected lifecycle belongs to the credentials that created it.
+          // Retire it before replacing or clearing the key so commands can
+          // never continue in the old account under a new Settings value.
+          if (!nextKey || (oldKey && oldKey !== nextKey)) await stopE2bSandbox();
+          await config.set('e2b.apiKey', nextKey);
+          if (nextKey) {
+            // startSandbox is single-flight; this also retries a prior failed
+            // connection when the user corrects/re-enters credentials.
             const { connected, error } = await enableE2b();
             const e2bSandboxInfo = getSandboxStatus();
             const e2bAgent = { url: E2B_AGENT_ID, name: 'E2B Cloud', status: connected ? 'connected' : 'error', isE2b: true, sandboxId: e2bSandboxInfo.sandboxId };
@@ -1015,24 +1279,17 @@ function App() {
               return updated;
             });
             if (error) throw new Error(`E2B sandbox failed: ${error}`);
-          } else if (!apiKey && oldKey) {
-            // E2B was just disabled — stop sandbox
-            cleanupE2b();
+          } else if (oldKey) {
             setAgents((prev) => prev.filter((a) => a.url !== E2B_AGENT_ID));
             if (selectedAgentUrl === E2B_AGENT_ID) {
               setSelectedAgentUrl(null);
               selectedAgentRef.current = null;
-              config.set('selectedAgent', null);
+              await config.set('selectedAgent', null);
             }
           }
         }}
         onExecuteCommand={(cmd) => executeCommand(cmd, selectedAgentUrl)}
-        onFactoryReset={async () => {
-          await clearAll();
-          setSessions([]);
-          setActiveSessionId(null);
-          setTimeout(() => window.location.reload(), 500);
-        }}
+        onFactoryReset={performFactoryReset}
         showFileManage={showFileManage}
         onToggleFileManage={() => setShowFileManage(!showFileManage)}
         userNickname={userNickname}
@@ -1124,6 +1381,7 @@ function App() {
           }
         }}
         onStorageRestored={refreshFromStorage}
+        onBeforeStorageSync={beginSessionStorageBarrier}
         storageVersion={storageVersion}
       />
       {showFileManage && (

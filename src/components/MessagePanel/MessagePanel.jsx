@@ -613,6 +613,8 @@ const MessagePanel = forwardRef(({
   onAgentListChange,
   activeSessionId,
   onStorageRestored,
+  onBeforeStorageSync,
+  storageVersion,
 }, ref) => {
   const { t } = useI18n();
   const [input, setInput] = useState('');
@@ -1050,6 +1052,8 @@ const MessagePanel = forwardRef(({
             agentList={agentList}
             onAgentListChange={onAgentListChange}
             onStorageRestored={onStorageRestored}
+            onBeforeStorageSync={onBeforeStorageSync}
+            storageVersion={storageVersion}
           />
         </Suspense>
       )}

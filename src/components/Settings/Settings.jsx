@@ -2,16 +2,62 @@ import { useState, useRef, useEffect } from 'react';
 import { checkAgentAvailable, connectAgent } from '../../models/agent';
 import { exportToZip, getOpfsDataStats, importFromZip } from '../../vfs/opfs';
 import config from '../../config/config';
-import { pullSync, pushSync, syncNow, syncResultChangedLocal, testSyncConnection } from '../../sync/syncManager';
+import {
+  cancelPendingAutoSync,
+  pullSync,
+  pushSync,
+  suspendAutoSync,
+  syncNow,
+  syncResultChangedLocal,
+  testSyncConnection,
+  waitForSyncIdle,
+} from '../../sync/syncManager';
+import {
+  normalizeProviderPreset,
+  pathStyleForProviderPreset,
+  validateProviderConfig,
+  validateSyncPrefix,
+} from '../../sync/providerPresets';
 import { useI18n } from '../../i18n/context';
 import { SUPPORTED_LOCALES } from '../../i18n/locales';
 import { X, Lock, Plug, Sun, Moon, Monitor, UploadCloud, DownloadCloud, AlertTriangle, Globe, ChevronDown, User, Cloud, HardDrive, Layers, Refresh, Upload, Download } from '../Icons/Icons';
 import { listAllSkills, setSkillEnabled } from '../../agent/skills';
 import { listAllTools, setToolEnabled } from '../../agent/tools';
 import { createAgent, deleteAgent, updateAgentName, updateAgentConfig, listAgents } from '../../agents/agents';
+import { enqueueStorageOperation } from './storageOperationQueue';
+import { manifestModeChangeLocked } from './syncDestination';
 import './Settings.css';
 
 const AVATAR_SIZE = 256;
+
+function providerPresetOrDefault(value) {
+  try {
+    return normalizeProviderPreset(value);
+  } catch {
+    // Keep Settings usable so an invalid imported configuration can be fixed.
+    return 's3';
+  }
+}
+
+function derivedAliyunEndpoint(region = 'cn-beijing') {
+  return `https://s3.oss-${String(region || 'cn-beijing').trim() || 'cn-beijing'}.aliyuncs.com`;
+}
+
+function endpointForSyncForm(saved = {}, providerPreset = 's3') {
+  const endpoint = String(saved.endpoint || '').trim();
+  if (
+    providerPreset === 'aliyun-oss'
+    && !saved.bucketEndpoint
+    && endpoint === derivedAliyunEndpoint(saved.region)
+  ) return '';
+  return endpoint;
+}
+
+function validatedSyncConfigForStorage(candidate) {
+  const hasExplicitEndpoint = Boolean(String(candidate.endpoint || '').trim());
+  const validated = validateProviderConfig(candidate);
+  return hasExplicitEndpoint ? validated : { ...validated, endpoint: null };
+}
 
 function formatDataSize(bytes) {
   const value = Number(bytes);
@@ -77,6 +123,7 @@ const Settings = ({
   agentList = [],
   onAgentListChange,
   onStorageRestored,
+  onBeforeStorageSync,
   storageVersion = 0,
 }) => {
   const { t, localePref, changeLocale } = useI18n();
@@ -113,6 +160,7 @@ const Settings = ({
     totalBytes: 0,
   });
   const [factoryResetting, setFactoryResetting] = useState(false);
+  const dataOperationBusyRef = useRef(false);
   const zipInputRef = useRef(null);
   const [localNickname, setLocalNickname] = useState(userNickname || '');
   const [localAvatar, setLocalAvatar] = useState(avatar || '');
@@ -139,10 +187,14 @@ const Settings = ({
     prefix: 'vertex-agent',
     accessKeyId: '',
     secretAccessKey: '',
+    sessionToken: '',
+    clearSessionToken: false,
     forcePathStyle: false,
+    bucketEndpoint: false,
     autoOnStart: false,
     autoIntervalMinutes: '',
     maxConcurrentRequests: '4',
+    manifestMode: 'conditional',
   });
   const [syncBusy, setSyncBusy] = useState(null);
   const [syncMessage, setSyncMessage] = useState(null);
@@ -277,19 +329,29 @@ const Settings = ({
     setLocalAvatar(avatar || '');
     setAvatarError(null);
     const savedSync = config.get('sync') || {};
+    const providerPreset = providerPresetOrDefault(savedSync.providerPreset);
     setSyncForm({
       enabled: Boolean(savedSync.enabled),
-      providerPreset: savedSync.providerPreset || 's3',
-      endpoint: savedSync.endpoint || '',
-      region: savedSync.region || 'us-east-1',
+      providerPreset,
+      endpoint: endpointForSyncForm(savedSync, providerPreset),
+      region: savedSync.region || (providerPreset === 'aliyun-oss' ? 'cn-beijing' : 'us-east-1'),
       bucket: savedSync.bucket || '',
       prefix: savedSync.prefix || 'vertex-agent',
       accessKeyId: savedSync.accessKeyId || '',
       secretAccessKey: '',
-      forcePathStyle: Boolean(savedSync.forcePathStyle),
+      sessionToken: '',
+      clearSessionToken: false,
+      forcePathStyle: pathStyleForProviderPreset(
+        providerPreset,
+        savedSync.forcePathStyle
+      ),
+      bucketEndpoint: Boolean(savedSync.bucketEndpoint),
       autoOnStart: Boolean(savedSync.autoOnStart),
       autoIntervalMinutes: savedSync.autoIntervalMinutes != null ? String(savedSync.autoIntervalMinutes) : '',
       maxConcurrentRequests: savedSync.maxConcurrentRequests != null ? String(savedSync.maxConcurrentRequests) : '4',
+      manifestMode: providerPreset === 'aliyun-oss'
+        ? 'sharded'
+        : (savedSync.manifestMode || 'conditional'),
     });
     setSyncMessage(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -572,46 +634,104 @@ const Settings = ({
     if (next) handleEditLlmProfile(next.id);
   };
 
+  const manifestModeChangeLockedFor = (candidate) => {
+    const saved = config.get('sync') || {};
+    return manifestModeChangeLocked(saved, candidate);
+  };
+
   const syncConfigFromForm = () => {
     const saved = config.get('sync') || {};
     const intervalText = String(syncForm.autoIntervalMinutes).trim();
     const interval = Number(intervalText);
     const concurrencyText = String(syncForm.maxConcurrentRequests).trim();
     const concurrency = Number(concurrencyText);
-    return {
+    const providerPreset = normalizeProviderPreset(syncForm.providerPreset);
+    const next = {
       ...saved,
       enabled: Boolean(syncForm.enabled),
-      providerPreset: syncForm.providerPreset || 's3',
+      providerPreset,
       endpoint: syncForm.endpoint.trim() || null,
       region: syncForm.region.trim() || 'us-east-1',
       bucket: syncForm.bucket.trim(),
-      prefix: syncForm.prefix.trim() || 'vertex-agent',
+      prefix: validateSyncPrefix(
+        syncForm.prefix.trim() || 'vertex-agent',
+        providerPreset
+      ),
       accessKeyId: syncForm.accessKeyId.trim(),
       secretAccessKey: syncForm.secretAccessKey || saved.secretAccessKey || '',
+      sessionToken: syncForm.clearSessionToken
+        ? ''
+        : (syncForm.sessionToken || saved.sessionToken || ''),
       forcePathStyle: Boolean(syncForm.forcePathStyle),
+      bucketEndpoint: Boolean(syncForm.bucketEndpoint),
       autoOnStart: Boolean(syncForm.autoOnStart),
       autoIntervalMinutes: intervalText && Number.isFinite(interval) && interval >= 0 ? Math.floor(interval) : null,
       maxConcurrentRequests: concurrencyText && Number.isFinite(concurrency) && concurrency >= 1
         ? Math.min(8, Math.floor(concurrency))
         : 4,
+      manifestMode: providerPreset === 'aliyun-oss'
+        ? 'sharded'
+        : (syncForm.manifestMode || 'conditional'),
     };
+    if (manifestModeChangeLockedFor(next)) {
+      throw new Error(t('syncSettings.manifestModeChangeBlocked'));
+    }
+    return next;
   };
 
+  const runWithStorageBarrier = (operation) => enqueueStorageOperation(async () => {
+    const resumeAutoSync = suspendAutoSync();
+    let releaseSessionBarrier;
+    try {
+      await waitForSyncIdle();
+      releaseSessionBarrier = await onBeforeStorageSync?.();
+      return await operation();
+    } finally {
+      releaseSessionBarrier?.();
+      resumeAutoSync();
+    }
+  });
+
   const handleSaveSync = async () => {
-    const next = syncConfigFromForm();
-    await config.set('sync', next);
-    setSyncForm((form) => ({ ...form, secretAccessKey: '' }));
-    setSyncMessage({ type: 'success', text: t('syncSettings.saveSuccess') });
+    setSyncMessage(null);
+    try {
+      let next = syncConfigFromForm();
+      if (next.enabled) next = validatedSyncConfigForStorage(next);
+      await enqueueStorageOperation(() => config.set('sync', next));
+      setSyncForm((form) => ({
+        ...form,
+        secretAccessKey: '',
+        sessionToken: '',
+        clearSessionToken: false,
+      }));
+      setSyncMessage({ type: 'success', text: t('syncSettings.saveSuccess') });
+    } catch (err) {
+      setSyncMessage({ type: 'error', text: t('syncSettings.actionFailed', { error: err.message }) });
+    }
   };
 
   const runSyncAction = async (action, fn) => {
     setSyncBusy(action);
     setSyncMessage(null);
     try {
-      const next = syncConfigFromForm();
-      await config.set('sync', next);
-      const result = await fn(next);
-      if (syncResultChangedLocal(result)) await onStorageRestored?.();
+      const next = validatedSyncConfigForStorage(syncConfigFromForm());
+      const result = await runWithStorageBarrier(async () => {
+        try {
+          await config.set('sync', next);
+          // The config mutation re-arms the normal auto-sync debounce. This
+          // explicit action already defines its direction (including Test/Pull),
+          // so do not follow it with an implicit full sync.
+          cancelPendingAutoSync();
+          const actionResult = await fn(next);
+          if (syncResultChangedLocal(actionResult)) await onStorageRestored?.();
+          return actionResult;
+        } finally {
+          // Pull/imported OPFS writes and refresh-time config notifications can
+          // re-arm the hook after the first cancellation. Directional manual
+          // actions must never be followed by an implicit full push.
+          cancelPendingAutoSync();
+        }
+      });
       setSyncMessage({ type: 'success', text: t(`syncSettings.${action}Success`, { summary: JSON.stringify(result) }) });
     } catch (err) {
       setSyncMessage({ type: 'error', text: t('syncSettings.actionFailed', { error: err.message }) });
@@ -1128,12 +1248,14 @@ const Settings = ({
                   </div>
                   <button
                     className="data-action-btn"
-                    disabled={dataExporting}
+                    disabled={dataExporting || dataImporting || factoryResetting}
                     onClick={async () => {
+                      if (dataOperationBusyRef.current) return;
+                      dataOperationBusyRef.current = true;
                       setDataExporting(true);
                       setDataMessage(null);
                       try {
-                        const blob = await exportToZip();
+                        const blob = await runWithStorageBarrier(() => exportToZip());
                         const url = URL.createObjectURL(blob);
                         const a = document.createElement('a');
                         a.href = url;
@@ -1147,6 +1269,7 @@ const Settings = ({
                         setDataMessage({ type: 'error', text: t('dataSettings.exportFailed', { error: err.message }) });
                       } finally {
                         setDataExporting(false);
+                        dataOperationBusyRef.current = false;
                       }
                     }}
                   >
@@ -1170,23 +1293,47 @@ const Settings = ({
                     onChange={async (e) => {
                       const file = e.target.files?.[0];
                       if (!file) return;
+                      if (dataOperationBusyRef.current) {
+                        e.target.value = '';
+                        return;
+                      }
+                      dataOperationBusyRef.current = true;
                       setDataImporting(true);
                       setDataMessage(null);
                       try {
-                        await importFromZip(file);
-                        await onStorageRestored?.();
+                        await runWithStorageBarrier(async () => {
+                          try {
+                            cancelPendingAutoSync();
+                            let importError = null;
+                            try {
+                              await importFromZip(file);
+                            } catch (error) {
+                              importError = error;
+                            }
+                            try {
+                              await onStorageRestored?.();
+                            } catch (refreshError) {
+                              if (!importError) throw refreshError;
+                              console.warn('Storage refresh after partial import failed:', refreshError);
+                            }
+                            if (importError) throw importError;
+                          } finally {
+                            cancelPendingAutoSync();
+                          }
+                        });
                         setDataMessage({ type: 'success', text: t('dataSettings.importSuccess') });
                       } catch (err) {
                         setDataMessage({ type: 'error', text: t('dataSettings.importFailed', { error: err.message }) });
                       } finally {
                         setDataImporting(false);
+                        dataOperationBusyRef.current = false;
                         if (zipInputRef.current) zipInputRef.current.value = '';
                       }
                     }}
                   />
                   <button
                     className="data-action-btn"
-                    disabled={dataImporting}
+                    disabled={dataExporting || dataImporting || factoryResetting}
                     onClick={() => zipInputRef.current?.click()}
                   >
                     {dataImporting ? t('dataSettings.importing') : t('dataSettings.import')}
@@ -1203,18 +1350,21 @@ const Settings = ({
                   </div>
                   <button
                     className="data-action-btn danger"
-                    disabled={factoryResetting}
+                    disabled={dataExporting || dataImporting || factoryResetting}
                     onClick={async () => {
+                      if (dataOperationBusyRef.current) return;
                       if (!window.confirm(t('dataSettings.factoryResetConfirm'))) return;
+                      dataOperationBusyRef.current = true;
                       setFactoryResetting(true);
                       setDataMessage(null);
                       try {
-                        await onFactoryReset();
+                        await enqueueStorageOperation(() => onFactoryReset());
                         setDataMessage({ type: 'success', text: t('dataSettings.factoryResetSuccess') });
                       } catch (err) {
                         setDataMessage({ type: 'error', text: t('dataSettings.factoryResetFailed', { error: err.message }) });
                       } finally {
                         setFactoryResetting(false);
+                        dataOperationBusyRef.current = false;
                       }
                     }}
                   >
@@ -1255,7 +1405,14 @@ const Settings = ({
                   setSyncForm((f) => ({
                     ...f,
                     providerPreset: preset,
-                    forcePathStyle: preset === 'minio' ? true : f.forcePathStyle,
+                    region: preset === 'aliyun-oss' && (!f.region || f.region === 'us-east-1')
+                      ? 'cn-beijing'
+                      : f.region,
+                    forcePathStyle: pathStyleForProviderPreset(preset, f.forcePathStyle),
+                    bucketEndpoint: (preset === 'aliyun-oss' || preset === 'custom')
+                      ? f.bucketEndpoint
+                      : false,
+                    manifestMode: preset === 'aliyun-oss' ? 'sharded' : f.manifestMode,
                   }));
                 }}
               >
@@ -1322,14 +1479,63 @@ const Settings = ({
                 </label>
               </div>
 
+              <label>
+                {t('syncSettings.sessionToken')}
+                <input
+                  type="password"
+                  placeholder={config.get('sync.sessionToken') ? t('syncSettings.tokenSaved') : t('syncSettings.sessionTokenPlaceholder')}
+                  value={syncForm.sessionToken}
+                  disabled={syncForm.clearSessionToken}
+                  onChange={(e) => setSyncForm((f) => ({
+                    ...f,
+                    sessionToken: e.target.value,
+                    clearSessionToken: false,
+                  }))}
+                />
+              </label>
+              {config.get('sync.sessionToken') && (
+                <label className="settings-checkbox-row">
+                  <input
+                    type="checkbox"
+                    checked={syncForm.clearSessionToken}
+                    onChange={(e) => setSyncForm((f) => ({
+                      ...f,
+                      clearSessionToken: e.target.checked,
+                      ...(e.target.checked ? { sessionToken: '' } : {}),
+                    }))}
+                  />
+                  <span>{t('syncSettings.clearSessionToken')}</span>
+                </label>
+              )}
+
               <label className="settings-checkbox-row">
                 <input
                   type="checkbox"
                   checked={syncForm.forcePathStyle}
-                  onChange={(e) => setSyncForm((f) => ({ ...f, forcePathStyle: e.target.checked }))}
+                  disabled={syncForm.providerPreset !== 'custom' || syncForm.bucketEndpoint}
+                  onChange={(e) => setSyncForm((f) => ({
+                    ...f,
+                    forcePathStyle: e.target.checked,
+                    ...(e.target.checked ? { bucketEndpoint: false } : {}),
+                  }))}
                 />
                 <span>{t('syncSettings.forcePathStyle')}</span>
               </label>
+
+              <label className="settings-checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={syncForm.bucketEndpoint}
+                  disabled={!['aliyun-oss', 'custom'].includes(syncForm.providerPreset)}
+                  onChange={(e) => setSyncForm((f) => ({
+                    ...f,
+                    bucketEndpoint: e.target.checked,
+                    ...(e.target.checked ? { forcePathStyle: false } : {}),
+                  }))}
+                />
+                <span>{t('syncSettings.bucketEndpoint')}</span>
+              </label>
+              <p className="settings-hint">{t('syncSettings.bucketEndpointHint')}</p>
 
               <div className="settings-two-col">
                 <label className="settings-checkbox-row inline">
@@ -1364,6 +1570,27 @@ const Settings = ({
                   onChange={(e) => setSyncForm((f) => ({ ...f, maxConcurrentRequests: e.target.value }))}
                 />
               </label>
+
+              <label>{t('syncSettings.manifestMode')}</label>
+              <select
+                value={syncForm.providerPreset === 'aliyun-oss' ? 'sharded' : syncForm.manifestMode}
+                disabled={syncForm.providerPreset === 'aliyun-oss'}
+                onChange={(e) => setSyncForm((f) => ({ ...f, manifestMode: e.target.value }))}
+              >
+                <option
+                  value="conditional"
+                  disabled={manifestModeChangeLockedFor({ ...syncForm, manifestMode: 'conditional' })}
+                >
+                  {t('syncSettings.manifestConditional')}
+                </option>
+                <option
+                  value="sharded"
+                  disabled={manifestModeChangeLockedFor({ ...syncForm, manifestMode: 'sharded' })}
+                >
+                  {t('syncSettings.manifestSharded')}
+                </option>
+              </select>
+              <p className="settings-hint">{t('syncSettings.manifestModeHint')}</p>
 
               <div className="sync-actions">
                 <button className="settings-secondary" disabled={Boolean(syncBusy)} onClick={() => runSyncAction('test', testSyncConnection)}>

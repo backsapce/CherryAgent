@@ -13,11 +13,6 @@ const E2B_TEMPLATE = 'base';
 const E2B_META_KEY = 'vertexsandbox';
 const E2B_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 
-let _sandbox = null;   // Sandbox instance
-let _status = 'none';  // 'none' | 'starting' | 'connected' | 'error'
-let _error = null;
-let _sandboxId = null;  // persistent sandbox ID (across sessions)
-
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /**
@@ -38,19 +33,200 @@ function getOrCreateId() {
  * Try to find an existing sandbox by metadata.
  * Returns the sandbox info if found, null otherwise.
  */
-async function findExistingSandbox(apiKey) {
-  try {
-    const id = getOrCreateId();
-    const paginator = await Sandbox.list({ apiKey, query:{metadata: { [E2B_META_KEY]: id } }});
-    const firstPage = await paginator.nextItems()
-    if (firstPage && firstPage.length > 0) {
-      return firstPage[0]; // return the first matching sandbox
-    }
-  } catch {
-    // listing failed, fall through to create
+async function findExistingSandbox(apiKey, metaId = getOrCreateId()) {
+  const paginator = await Sandbox.list({
+    apiKey,
+    query: { metadata: { [E2B_META_KEY]: metaId } },
+  });
+  const firstPage = await paginator.nextItems();
+  if (firstPage && firstPage.length > 0) {
+    return firstPage[0]; // return the first matching sandbox
   }
   return null;
 }
+
+function lifecycleAbortError() {
+  return new DOMException('Sandbox startup was superseded', 'AbortError');
+}
+
+function sameSandbox(left, right) {
+  if (!left || !right) return false;
+  if (left === right) return true;
+  return Boolean(left.sandboxId && right.sandboxId && left.sandboxId === right.sandboxId);
+}
+
+/**
+ * Coordinate sandbox startup and shutdown without depending on the E2B SDK.
+ * Keeping this state machine injected makes its cancellation races deterministic
+ * in tests and prevents concurrent callers from creating duplicate sandboxes.
+ */
+function createSandboxLifecycle({ open, close }) {
+  let sandbox = null;
+  let status = 'none';
+  let error = null;
+  let startup = null;
+  let generation = 0;
+  let connectedCleanup = Promise.resolve();
+  const cleanupJobs = new Set();
+
+  const isCurrentStartup = (record) => (
+    startup === record && generation === record.generation
+  );
+
+  const observeCleanup = (operation) => {
+    let job;
+    job = Promise.resolve()
+      .then(operation)
+      .catch(() => {})
+      .finally(() => cleanupJobs.delete(job));
+    cleanupJobs.add(job);
+  };
+
+  const retireStaleSandbox = async (candidate, staleGeneration) => {
+    // A newer startup may connect to the same persistent remote sandbox. Let it
+    // claim the sandbox before deciding whether the stale SDK handle is safe to
+    // kill, otherwise cleanup from an old generation could kill the new one.
+    while (startup && startup.generation > staleGeneration) {
+      const newerStartup = startup;
+      await newerStartup.promise.catch(() => {});
+      if (startup === newerStartup) break;
+    }
+    if (sameSandbox(candidate, sandbox)) return;
+    await close(candidate);
+  };
+
+  const start = () => {
+    if (sandbox) return Promise.resolve(sandbox);
+    if (startup) return startup.promise;
+
+    status = 'starting';
+    error = null;
+    const record = {
+      generation: ++generation,
+      promise: null,
+    };
+    const cleanupSnapshot = connectedCleanup;
+    startup = record;
+
+    // Defer opening until after the record is installed. This makes even a
+    // synchronous throw from an injected SDK operation follow normal cleanup.
+    record.promise = cleanupSnapshot
+      .then(() => {
+        if (!isCurrentStartup(record)) throw lifecycleAbortError();
+        // Do not reconnect to a persistent sandbox while an older handle is
+        // still being killed. Otherwise a late kill could terminate the newly
+        // connected generation after it has already been published as ready.
+        return open();
+      })
+      .then((candidate) => {
+        if (!isCurrentStartup(record)) {
+          observeCleanup(() => retireStaleSandbox(candidate, record.generation));
+          throw lifecycleAbortError();
+        }
+        sandbox = candidate;
+        status = 'connected';
+        error = null;
+        return candidate;
+      })
+      .catch((err) => {
+        if (!isCurrentStartup(record)) throw lifecycleAbortError();
+        sandbox = null;
+        status = 'error';
+        error = err instanceof Error ? err.message : String(err);
+        throw err;
+      })
+      .finally(() => {
+        if (startup === record) startup = null;
+      });
+
+    return record.promise;
+  };
+
+  const stop = async () => {
+    generation += 1;
+    const pendingStartup = startup;
+    const connectedSandbox = sandbox;
+
+    // Invalidate synchronously so a fire-and-forget disable/cleanup cannot be
+    // undone by a late connect/create resolution.
+    startup = null;
+    sandbox = null;
+    status = 'none';
+    error = null;
+
+    // The invalidated startup is still allowed to settle, but its rejection is
+    // always observed and any late sandbox is retired by the startup handler.
+    pendingStartup?.promise.catch(() => {});
+    if (!connectedSandbox) return;
+
+    const closing = Promise.resolve()
+      .then(() => close(connectedSandbox))
+      .catch(() => {
+        // Remote cleanup is best effort. Local state is already disconnected.
+      });
+    connectedCleanup = closing;
+    await closing;
+    if (connectedCleanup === closing) connectedCleanup = Promise.resolve();
+  };
+
+  return {
+    start,
+    stop,
+    ensure() {
+      return sandbox ? Promise.resolve(sandbox) : start();
+    },
+    getSandbox() {
+      return sandbox;
+    },
+    getStatus() {
+      return {
+        status,
+        sandboxId: sandbox?.sandboxId || null,
+        error,
+      };
+    },
+    async drainCleanups() {
+      while (cleanupJobs.size > 0) {
+        await Promise.all([...cleanupJobs]);
+      }
+    },
+  };
+}
+
+async function openPersistentSandbox({
+  apiKey,
+  metaId,
+  find = findExistingSandbox,
+  connect = (sandboxId, options) => Sandbox.connect(sandboxId, options),
+  create = (options) => Sandbox.create(options),
+}) {
+  const existing = await find(apiKey, metaId);
+  if (existing) {
+    return connect(existing.sandboxId, { apiKey });
+  }
+
+  return create({
+    template: E2B_TEMPLATE,
+    apiKey,
+    metadata: { [E2B_META_KEY]: metaId },
+    timeoutMs: E2B_TIMEOUT_MS,
+  });
+}
+
+async function openConfiguredSandbox() {
+  const apiKey = config.get('e2b.apiKey');
+  if (!apiKey) throw new Error('E2B API key not configured');
+
+  return openPersistentSandbox({
+    apiKey,
+    metaId: getOrCreateId(),
+  });
+}
+
+const sandboxLifecycle = createSandboxLifecycle({
+  open: openConfiguredSandbox,
+  close: (sandbox) => sandbox.kill(),
+});
 
 // ─── Sandbox lifecycle ───────────────────────────────────────────────────────
 
@@ -58,63 +234,15 @@ async function findExistingSandbox(apiKey) {
  * Create or resume an E2B sandbox.
  * Reuses an existing sandbox tagged with our metadata, or creates a new one.
  */
-export async function startSandbox() {
-  if (_sandbox) return _sandbox;
-
-  _status = 'starting';
-  _error = null;
-
-  try {
-    const apiKey = config.get('e2b.apiKey');
-    if (!apiKey) throw new Error('E2B API key not configured');
-
-    const metaId = getOrCreateId();
-
-    // Try to find and resume existing sandbox
-    const existing = await findExistingSandbox(apiKey);
-    if (existing) {
-      _sandbox = await Sandbox.connect(existing.sandboxId, { apiKey });
-      _sandboxId = existing.sandboxId;
-      _status = 'connected';
-      return _sandbox;
-    }
-
-    // No existing sandbox — create a new one
-    _sandbox = await Sandbox.create({
-      template: E2B_TEMPLATE,
-      apiKey,
-      metadata: { [E2B_META_KEY]: metaId },
-      timeoutMs: E2B_TIMEOUT_MS,
-    });
-
-    _sandboxId = _sandbox.sandboxId;
-    _status = 'connected';
-    return _sandbox;
-  } catch (err) {
-    _status = 'error';
-    _error = err.message;
-    _sandbox = null;
-    _sandboxId = null;
-    throw err;
-  }
+export function startSandbox() {
+  return sandboxLifecycle.start();
 }
 
 /**
  * Close the current E2B sandbox.
  */
 export async function stopSandbox() {
-  if (!_sandbox) return;
-
-  try {
-    await _sandbox.kill();
-  } catch {
-    // ignore cleanup errors
-  } finally {
-    _sandbox = null;
-    _sandboxId = null;
-    _status = 'none';
-    _error = null;
-  }
+  await sandboxLifecycle.stop();
 }
 
 /**
@@ -122,10 +250,18 @@ export async function stopSandbox() {
  * @param {string} cmd - Shell command to run.
  * @returns {Promise<{ stdout: string, stderr: string, code: number }>}
  */
-export async function executeInSandbox(cmd) {
-  await ensureSandbox();
+export async function executeInSandbox(cmd, options = {}) {
+  const result = await runUntilAbort(async () => {
+    const sandbox = await ensureSandbox();
+    // A sandbox startup can outlive the caller. Do not launch a command when
+    // startup finishes after navigation or factory reset already aborted it.
+    if (options.signal?.aborted) throw commandAbortError();
 
-  const result = await _sandbox.commands.run(cmd);
+    // The E2B SDK does not expose a portable cancellation handle for this
+    // one-shot call. Stop awaiting it on abort so navigation/factory reset can
+    // complete; the sandbox command may finish independently server-side.
+    return sandbox.commands.run(cmd);
+  }, options.signal);
 
   return {
     stdout: result.stdout || '',
@@ -140,11 +276,12 @@ export async function executeInSandbox(cmd) {
 export function getSandboxStatus() {
   const apiKey = config.get('e2b.apiKey');
   const hasKey = !!apiKey;
+  const lifecycleStatus = sandboxLifecycle.getStatus();
   return {
     enabled: hasKey,
-    status: hasKey ? _status : 'none',
-    sandboxId: _sandboxId || _sandbox?.sandboxId || null,
-    error: _error,
+    status: hasKey ? lifecycleStatus.status : 'none',
+    sandboxId: lifecycleStatus.sandboxId,
+    error: lifecycleStatus.error,
   };
 }
 
@@ -155,7 +292,7 @@ export function getSandboxStatus() {
 export async function initE2b() {
   const apiKey = config.get('e2b.apiKey');
   if (!apiKey) {
-    _status = 'none';
+    stopSandbox().catch(() => {});
     return { connected: false };
   }
 
@@ -193,9 +330,33 @@ export async function enableE2b() {
 // ─── File operations ────────────────────────────────────────────────────────
 
 async function ensureSandbox() {
-  if (!_sandbox || _status !== 'connected') {
-    await startSandbox();
-  }
+  return sandboxLifecycle.ensure();
+}
+
+function commandAbortError() {
+  return new DOMException('Command execution aborted', 'AbortError');
+}
+
+/**
+ * Stop awaiting an operation when its signal is aborted. Promise.race keeps
+ * observing the SDK promise after the caller is released, preventing a late
+ * startup/command rejection from becoming unhandled.
+ */
+function runUntilAbort(operation, signal) {
+  if (!signal) return Promise.resolve().then(operation);
+  if (signal.aborted) return Promise.reject(commandAbortError());
+
+  let abort;
+  const aborted = new Promise((_resolve, reject) => {
+    abort = () => reject(commandAbortError());
+    signal.addEventListener('abort', abort, { once: true });
+    // Cover an abort between the initial check and listener registration.
+    if (signal.aborted) abort();
+  });
+  const pending = Promise.resolve().then(operation);
+
+  return Promise.race([pending, aborted])
+    .finally(() => signal.removeEventListener('abort', abort));
 }
 
 function sandboxRelativePath(path, options = {}) {
@@ -242,35 +403,50 @@ function isE2bDirectoryEntry(entry) {
   return entry?.type === 'dir' || entry?.type === 'directory';
 }
 
-async function getE2bEntry(path) {
+function isE2bNotFoundError(error) {
+  const status = Number(
+    error?.status ?? error?.statusCode ?? error?.response?.status
+  );
+  const code = String(error?.code || error?.name || '').toLowerCase();
+  return status === 404
+    || code === 'notfound'
+    || code === 'notfounderror'
+    || code === 'filenotfound'
+    || code === 'directorynotfound';
+}
+
+async function getE2bEntry(sandbox, path) {
   const { dir, name } = splitSandboxRelativePath(path);
   try {
-    const entries = await _sandbox.files.list(sandboxApiPath(dir, { allowEmpty: true }));
+    const entries = await sandbox.files.list(sandboxApiPath(dir, { allowEmpty: true }));
     return entries.find((entry) => entry.name === name) || null;
-  } catch {
-    return null;
+  } catch (error) {
+    if (isE2bNotFoundError(error)) return null;
+    // Treating an auth/network failure as "missing" could make move overwrite
+    // an existing target, so ambiguous listing failures must abort the move.
+    throw error;
   }
 }
 
-async function copyE2bFile(sourcePath, targetPath) {
-  const content = await _sandbox.files.read(sandboxApiPath(sourcePath), { format: 'blob' });
+async function copyE2bFile(sandbox, sourcePath, targetPath) {
+  const content = await sandbox.files.read(sandboxApiPath(sourcePath), { format: 'blob' });
   const payload = content && typeof content.arrayBuffer === 'function'
     ? await content.arrayBuffer()
     : content;
-  await _sandbox.files.write(sandboxApiPath(targetPath), payload);
+  await sandbox.files.write(sandboxApiPath(targetPath), payload);
 }
 
-async function copyE2bDirectory(sourcePath, targetPath) {
-  await _sandbox.files.makeDir(sandboxApiPath(targetPath), { force: true });
-  const entries = await _sandbox.files.list(sandboxApiPath(sourcePath));
+async function copyE2bDirectory(sandbox, sourcePath, targetPath) {
+  await sandbox.files.makeDir(sandboxApiPath(targetPath), { force: true });
+  const entries = await sandbox.files.list(sandboxApiPath(sourcePath));
 
   for (const entry of entries) {
     const childSource = joinSandboxRelativePath(sourcePath, entry.name);
     const childTarget = joinSandboxRelativePath(targetPath, entry.name);
     if (isE2bDirectoryEntry(entry)) {
-      await copyE2bDirectory(childSource, childTarget);
+      await copyE2bDirectory(sandbox, childSource, childTarget);
     } else {
-      await copyE2bFile(childSource, childTarget);
+      await copyE2bFile(sandbox, childSource, childTarget);
     }
   }
 }
@@ -281,9 +457,9 @@ async function copyE2bDirectory(sourcePath, targetPath) {
  * @returns {Promise<{id: string, name: string, type: string, size: number, path: string, parentDir: string, children: Array}|Array>}
  */
 export async function listE2bFiles(path = '') {
-  await ensureSandbox();
+  const sandbox = await ensureSandbox();
   const safePath = sandboxRelativePath(path, { allowEmpty: true });
-  const entries = await _sandbox.files.list(sandboxApiPath(safePath, { allowEmpty: true }));
+  const entries = await sandbox.files.list(sandboxApiPath(safePath, { allowEmpty: true }));
   const parentDir = safePath;
   return {
     id: 'root',
@@ -307,8 +483,8 @@ export async function listE2bFiles(path = '') {
  * @returns {Promise<{success: boolean, message: string}>}
  */
 export async function createE2bFile(path, content = '') {
-  await ensureSandbox();
-  await _sandbox.files.write(sandboxApiPath(path), content);
+  const sandbox = await ensureSandbox();
+  await sandbox.files.write(sandboxApiPath(path), content);
   return { success: true, message: 'File created' };
 }
 
@@ -318,8 +494,8 @@ export async function createE2bFile(path, content = '') {
  * @returns {Promise<{success: boolean, message: string}>}
  */
 export async function createE2bDir(path) {
-  await ensureSandbox();
-  await _sandbox.files.makeDir(sandboxApiPath(path), { force: true });
+  const sandbox = await ensureSandbox();
+  await sandbox.files.makeDir(sandboxApiPath(path), { force: true });
   return { success: true, message: 'Directory created' };
 }
 
@@ -329,8 +505,8 @@ export async function createE2bDir(path) {
  * @returns {Promise<{success: boolean, message: string}>}
  */
 export async function deleteE2bFile(path) {
-  await ensureSandbox();
-  await _sandbox.files.remove(sandboxApiPath(path));
+  const sandbox = await ensureSandbox();
+  await sandbox.files.remove(sandboxApiPath(path));
   return { success: true, message: 'Deleted successfully' };
 }
 
@@ -341,7 +517,7 @@ export async function deleteE2bFile(path) {
  * @returns {Promise<{success: boolean, message: string}>}
  */
 export async function moveE2bFile(sourcePath, targetPath) {
-  await ensureSandbox();
+  const sandbox = await ensureSandbox();
   const safeSourcePath = sandboxRelativePath(sourcePath);
   const safeTargetPath = sandboxRelativePath(targetPath);
 
@@ -349,10 +525,10 @@ export async function moveE2bFile(sourcePath, targetPath) {
     return { success: true, message: 'Already at target path' };
   }
 
-  const sourceEntry = await getE2bEntry(safeSourcePath);
+  const sourceEntry = await getE2bEntry(sandbox, safeSourcePath);
   if (!sourceEntry) throw new Error('Source file or directory not found');
 
-  const targetEntry = await getE2bEntry(safeTargetPath);
+  const targetEntry = await getE2bEntry(sandbox, safeTargetPath);
   if (targetEntry) throw new Error('Destination already exists');
 
   if (isE2bDirectoryEntry(sourceEntry) && safeTargetPath.startsWith(`${safeSourcePath}/`)) {
@@ -361,23 +537,23 @@ export async function moveE2bFile(sourcePath, targetPath) {
 
   const { dir: targetParent } = splitSandboxRelativePath(safeTargetPath);
   if (targetParent) {
-    await _sandbox.files.makeDir(sandboxApiPath(targetParent), { force: true });
+    await sandbox.files.makeDir(sandboxApiPath(targetParent), { force: true });
   }
 
   let targetCreated = false;
   try {
     if (isE2bDirectoryEntry(sourceEntry)) {
       targetCreated = true;
-      await copyE2bDirectory(safeSourcePath, safeTargetPath);
+      await copyE2bDirectory(sandbox, safeSourcePath, safeTargetPath);
     } else {
-      await copyE2bFile(safeSourcePath, safeTargetPath);
+      await copyE2bFile(sandbox, safeSourcePath, safeTargetPath);
       targetCreated = true;
     }
-    await _sandbox.files.remove(sandboxApiPath(safeSourcePath));
+    await sandbox.files.remove(sandboxApiPath(safeSourcePath));
     return { success: true, message: 'Moved successfully' };
   } catch (err) {
     if (targetCreated) {
-      try { await _sandbox.files.remove(sandboxApiPath(safeTargetPath)); } catch { /* ignore cleanup */ }
+      try { await sandbox.files.remove(sandboxApiPath(safeTargetPath)); } catch { /* ignore cleanup */ }
     }
     throw err;
   }
@@ -390,9 +566,9 @@ export async function moveE2bFile(sourcePath, targetPath) {
  * @returns {Promise<{success: boolean, message: string}>}
  */
 export async function uploadE2bFile(path, file) {
-  await ensureSandbox();
+  const sandbox = await ensureSandbox();
   const content = await file.arrayBuffer();
-  await _sandbox.files.write(sandboxApiPath(path), content);
+  await sandbox.files.write(sandboxApiPath(path), content);
   return { success: true, message: 'File uploaded' };
 }
 
@@ -402,8 +578,8 @@ export async function uploadE2bFile(path, file) {
  * @returns {Promise<Blob>}
  */
 export async function downloadE2bFile(path) {
-  await ensureSandbox();
-  return _sandbox.files.read(sandboxApiPath(path), { format: 'blob' });
+  const sandbox = await ensureSandbox();
+  return sandbox.files.read(sandboxApiPath(path), { format: 'blob' });
 }
 
 /**
@@ -412,8 +588,8 @@ export async function downloadE2bFile(path) {
  * @returns {Promise<string>}
  */
 export async function readE2bFileText(path) {
-  await ensureSandbox();
-  return _sandbox.files.read(sandboxApiPath(path), { format: 'text' });
+  const sandbox = await ensureSandbox();
+  return sandbox.files.read(sandboxApiPath(path), { format: 'text' });
 }
 
 /**
@@ -423,6 +599,13 @@ export async function readE2bFileText(path) {
  * @returns {Promise<void>}
  */
 export async function writeE2bFileText(path, content) {
-  await ensureSandbox();
-  await _sandbox.files.write(sandboxApiPath(path), content);
+  const sandbox = await ensureSandbox();
+  await sandbox.files.write(sandboxApiPath(path), content);
 }
+
+export const __e2bInternals = {
+  createSandboxLifecycle,
+  isE2bNotFoundError,
+  openPersistentSandbox,
+  runUntilAbort,
+};
