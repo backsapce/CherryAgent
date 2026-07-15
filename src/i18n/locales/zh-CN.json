@@ -252,6 +252,11 @@
         "rename": "点击名称重命名",
         "defaultLlm": "默认 LLM",
         "firstConfiguredLlm": "第一个已配置的 LLM",
+        "runtime": "Agent 运行时",
+        "browserRuntime": "浏览器（默认）",
+        "sandboxRuntime": "Sandbox（后台运行）",
+        "runtimeNeedsSandbox": "Sandbox 运行时需要选择一个 VertexAgent agent server。",
+        "commandOnly": "仅命令执行",
         "sandbox": "沙箱",
         "noSandbox": "不使用沙箱"
     },

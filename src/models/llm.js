@@ -276,6 +276,25 @@ const llm = {
   },
 
   /**
+   * Return the complete profile for execution in a user-selected remote
+   * runtime. Callers must only send this over an authenticated HTTPS channel.
+   */
+  getRuntimeConfig(profileId = activeProfileId) {
+    const profile = getProfile(profileId);
+    const provider = providers[profile?.provider];
+    if (!profile?.provider || !profile?.apiKey) {
+      throw new Error('A configured LLM profile is required for sandbox runtime.');
+    }
+    return {
+      provider: profile.provider,
+      apiKey: profile.apiKey,
+      baseUrl: profile.baseUrl || provider?.defaultBaseUrl || null,
+      model: profile.model || provider?.defaultModel || null,
+      contextWindow: profile.contextWindow || null,
+    };
+  },
+
+  /**
    * Build a Vercel AI SDK model for a saved profile.
    * API keys remain local to the browser and are never returned by
    * getActiveConfig(), which is safe to use for UI rendering.

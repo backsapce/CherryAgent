@@ -166,6 +166,50 @@ export async function executeCommand(cmd, url, opts = {}) {
   return res.json();
 }
 
+function assertRemoteAgentRuntime(url) {
+  if (!url || url === E2B_AGENT_ID) {
+    throw new Error('Sandbox runtime requires an authenticated VertexAgent agent server. Direct E2B command sandboxes do not expose the background run API.');
+  }
+}
+
+async function requestAgentRun(url, path = '', options = {}) {
+  assertRemoteAgentRuntime(url);
+  const endpoint = `${resolveAgentUrl(url)}/runs${path}`;
+  const headers = { ...(options.body ? { 'Content-Type': 'application/json' } : {}) };
+  const token = getAgentToken(url);
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const res = await fetch(endpoint, { ...options, headers: { ...headers, ...options.headers } });
+  const data = await res.json().catch(() => ({ error: 'Invalid agent runtime response' }));
+  if (!res.ok) throw new Error(data.error || `Agent runtime returned ${res.status}`);
+  return data;
+}
+
+/** Start a background run that continues after the browser disconnects. */
+export function startRemoteAgentRun(url, input, signal) {
+  return requestAgentRun(url, '', {
+    method: 'POST',
+    body: JSON.stringify(input),
+    ...(signal ? { signal } : {}),
+  });
+}
+
+/** Read new events and the current durable result for a background run. */
+export function getRemoteAgentRun(url, runId, after = 0, signal) {
+  return requestAgentRun(url, `/${encodeURIComponent(runId)}?after=${Math.max(0, Number(after) || 0)}`, {
+    method: 'GET',
+    ...(signal ? { signal } : {}),
+  });
+}
+
+export function listRemoteAgentRuns(url, sessionId, signal) {
+  const query = sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : '';
+  return requestAgentRun(url, query, { method: 'GET', ...(signal ? { signal } : {}) });
+}
+
+export function abortRemoteAgentRun(url, runId) {
+  return requestAgentRun(url, `/${encodeURIComponent(runId)}`, { method: 'DELETE' });
+}
+
 function executeCommandStreaming(cmd, url, opts = {}) {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(resolveAgentWsUrl(url));

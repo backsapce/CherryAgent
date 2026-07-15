@@ -13,7 +13,7 @@ import {
 } from './vfs/opfs';
 import config from './config/config';
 import llm from './models/llm';
-import { executeCommand, initAgents, enableE2b, E2B_AGENT_ID, getSandboxStatus, stopE2bSandbox } from './models/agent';
+import { executeCommand, initAgents, enableE2b, E2B_AGENT_ID, getSandboxStatus, stopE2bSandbox, startRemoteAgentRun, getRemoteAgentRun, listRemoteAgentRuns, abortRemoteAgentRun } from './models/agent';
 import { runAgentLoop } from './agent/loop';
 import { applyAgentEvent, createAgentEventState } from './agent/events';
 import { buildChatDebugExport, createChatDebugFilename } from './agent/debug';
@@ -85,6 +85,8 @@ Work rules:
 - Be careful with destructive actions and ask before irreversible operations.
 - Use sub-agents only for bounded independent work.
 - When tools fail, use the error output to choose the next useful step.`;
+
+const SANDBOX_AGENT_SYSTEM_PROMPT = `You are running fully inside the selected sandbox. Browser operations, browser OPFS, browser files, browser memory mutation, browser skill mutation, and sub-agent delegation are unavailable. Use only execute_command and sandbox file tools. The browser may disconnect without stopping this run.`;
 
 const FILE_CONTEXT_MARKER = 'Selected file context:';
 const TOOL_HISTORY_MARKER = 'Tool calls performed during this assistant turn:';
@@ -158,6 +160,10 @@ function expandMessagesForLlm(messages) {
   });
 }
 
+function expandMessagesForSandboxRuntime(messages) {
+  return messages.map(({ contextFiles: _contextFiles, toolCalls: _toolCalls, usage: _usage, ...message }) => message);
+}
+
 function OfflineBanner() {
   const { t } = useI18n();
   return (
@@ -199,6 +205,9 @@ function App() {
   const persistedSessionsRef = useRef([]);
   const sessionSaveCoordinatorRef = useRef(null);
   const abortRef = useRef(null);
+  const remoteRunRef = useRef(null);
+  const resumedRemoteRunsRef = useRef(new Set());
+  const remoteDiscoveryRef = useRef(new Set());
   const streamCompletionRef = useRef(null);
   const factoryResetInProgressRef = useRef(false);
   const startupRecoveryBusyRef = useRef(false);
@@ -651,7 +660,7 @@ function App() {
     const sessionAgentId = opts.agentId ?? sessionAgents[sessionId] ?? null;
     const agentConfig = sessionAgentId ? agentList.find((agent) => agent.id === sessionAgentId) : null;
     const llmProfileId = opts.llmProfileId ?? sessionLlmProfiles[sessionId] ?? currentLlmProfileId ?? agentConfig?.llmProfileId ?? llm.getActiveProfileId() ?? getFirstLlmProfileId();
-    if (!llm.isProfileConfigured(llmProfileId)) {
+    if (!opts.resumeRunId && !llm.isProfileConfigured(llmProfileId)) {
       const hintId = generateId();
       setSessions((prev) =>
         sortSessions(prev.map((c) =>
@@ -671,18 +680,20 @@ function App() {
       return;
     }
 
-    const replyId = generateId();
+    const replyId = opts.replyId || generateId();
     // Add empty assistant message for streaming
-    setSessions((prev) =>
-      prev.map((c) =>
-        c.id === sessionId
-          ? {
-              ...c,
-              messages: [...c.messages, { id: replyId, role: 'assistant', content: '', thinking: '', toolCalls: [] }],
-            }
-          : c
-      )
-    );
+    if (!opts.resumeRunId) {
+      setSessions((prev) =>
+        prev.map((c) =>
+          c.id === sessionId
+            ? {
+                ...c,
+                messages: [...c.messages, { id: replyId, role: 'assistant', content: '', thinking: '', toolCalls: [] }],
+              }
+            : c
+        )
+      );
+    }
 
     const controller = new AbortController();
     abortRef.current = controller;
@@ -696,6 +707,14 @@ function App() {
     // Track tool calls for this message
     const toolCalls = [];
     let agentEventState = createAgentEventState();
+
+    const applyStreamEvent = (event) => {
+      agentEventState = applyAgentEvent(agentEventState, event);
+      streamingContentRef.current = agentEventState.content;
+      streamingThinkingRef.current = agentEventState.thinking;
+      toolCalls.splice(0, toolCalls.length, ...agentEventState.toolCalls);
+      scheduleFlush();
+    };
 
     // Helper: update message in state
     const updateMessage = (fields) => {
@@ -734,24 +753,74 @@ function App() {
       const sandboxUrl = opts.sandboxUrl ?? agentConfig?.sandboxUrl ?? null;
       const hasToolContext = sandboxUrl || sessionAgentId;
 
-      const result = await runAgentLoop({
-        messages: expandMessagesForLlm(sessionMessages),
-        systemPrompt: hasToolContext ? AGENT_SYSTEM_PROMPT : '',
-        agentUrl: sandboxUrl,
-        agentId: sessionAgentId,
-        signal: controller.signal,
-        provider: activeConfig.provider,
-        model: activeConfig.model,
-        contextWindow: activeConfig.contextWindow,
-        llmProfileId,
-        onEvent: (event) => {
-          agentEventState = applyAgentEvent(agentEventState, event);
-          streamingContentRef.current = agentEventState.content;
-          streamingThinkingRef.current = agentEventState.thinking;
-          toolCalls.splice(0, toolCalls.length, ...agentEventState.toolCalls);
-          scheduleFlush();
-        },
-      });
+      let result;
+      if (opts.resumeRunId || agentConfig?.runtimeMode === 'sandbox') {
+        if (!sandboxUrl || sandboxUrl === E2B_AGENT_ID) {
+          throw new Error('Sandbox runtime requires a connected VertexAgent agent server; direct E2B sandboxes currently provide command execution only.');
+        }
+        let remoteRun;
+        if (opts.resumeRunId) {
+          remoteRun = { id: opts.resumeRunId, status: 'running' };
+        } else {
+          remoteRun = await startRemoteAgentRun(sandboxUrl, {
+            sessionId,
+            replyId,
+            messages: expandMessagesForSandboxRuntime(sessionMessages),
+            systemPrompt: SANDBOX_AGENT_SYSTEM_PROMPT,
+            agentId: sessionAgentId,
+            modelConfig: llm.getRuntimeConfig(llmProfileId),
+            // Do not copy browser OPFS-backed identity, memory, skills, or
+            // files into sandbox mode. Only non-file routing metadata crosses
+            // the runtime boundary.
+            runtimeContext: {
+              workspaceDirName: sessionAgentId,
+              activeAgent: sessionAgentId ? { id: sessionAgentId, name: agentConfig?.name || sessionAgentId } : null,
+              memorySnapshot: { memory: null, user: null },
+              skillsList: '',
+              agentIdentity: null,
+            },
+          }, controller.signal);
+          setSessions((prev) => prev.map((session) => session.id === sessionId ? {
+            ...session,
+            remoteRun: { id: remoteRun.id, url: sandboxUrl, replyId, status: remoteRun.status },
+            ...sessionTimeFields(),
+          } : session));
+        }
+        remoteRunRef.current = { id: remoteRun.id, url: sandboxUrl };
+        while (remoteRun.status === 'running') {
+          remoteRun = await getRemoteAgentRun(sandboxUrl, remoteRun.id, 0, controller.signal);
+          agentEventState = createAgentEventState();
+          for (const event of remoteRun.events || []) applyStreamEvent(event);
+          setSessions((prev) => prev.map((session) => session.id === sessionId ? {
+            ...session,
+            remoteRun: { id: remoteRun.id, url: sandboxUrl, replyId, status: remoteRun.status },
+          } : session));
+          if (remoteRun.status === 'running') {
+            await new Promise((resolve, reject) => {
+              const timer = setTimeout(resolve, 750);
+              controller.signal.addEventListener('abort', () => {
+                clearTimeout(timer);
+                reject(new DOMException('Polling aborted', 'AbortError'));
+              }, { once: true });
+            });
+          }
+        }
+        if (remoteRun.status !== 'completed') throw new Error(remoteRun.error || `Sandbox run ${remoteRun.status}`);
+        result = remoteRun.result;
+      } else {
+        result = await runAgentLoop({
+          messages: expandMessagesForLlm(sessionMessages),
+          systemPrompt: hasToolContext ? AGENT_SYSTEM_PROMPT : '',
+          agentUrl: sandboxUrl,
+          agentId: sessionAgentId,
+          signal: controller.signal,
+          provider: activeConfig.provider,
+          model: activeConfig.model,
+          contextWindow: activeConfig.contextWindow,
+          llmProfileId,
+          onEvent: applyStreamEvent,
+        });
+      }
 
       // Mark unfinished tool calls as completed.
       for (const tc of toolCalls) {
@@ -783,6 +852,7 @@ function App() {
         rafRef.current = null;
       }
       abortRef.current = null;
+      remoteRunRef.current = null;
       streamingContentRef.current = '';
       streamingThinkingRef.current = '';
       setStreaming(false);
@@ -805,6 +875,64 @@ function App() {
     pendingStreamStartsRef.current.set(timerId, pendingStart);
   }, [streamResponse]);
 
+  // Reattach to runs that were started before a reload/browser close. The
+  // server owns execution; this effect only rebuilds UI state from its log.
+  useEffect(() => {
+    if (!loaded || agentList.length === 0 || abortRef.current) return;
+    const session = sessions.find((item) => item.remoteRun?.status === 'running');
+    if (!session || resumedRemoteRunsRef.current.has(session.remoteRun.id)) return;
+    const agent = agentList.find((item) => item.id === session.agentId);
+    if (!agent) return;
+    resumedRemoteRunsRef.current.add(session.remoteRun.id);
+    void streamResponse(session.id, session.messages, {
+      agentId: session.agentId,
+      llmProfileId: session.llmProfileId,
+      sandboxUrl: session.remoteRun.url,
+      resumeRunId: session.remoteRun.id,
+      replyId: session.remoteRun.replyId,
+    });
+  }, [agentList, loaded, sessions, streamResponse]);
+
+  // A page can close in the narrow interval before the returned run id is
+  // flushed to OPFS. Discover server-owned runs by session id as a fallback.
+  useEffect(() => {
+    if (!loaded || agentList.length === 0) return;
+    for (const session of sessions) {
+      if (session.remoteRun) continue;
+      const agent = agentList.find((item) => item.id === session.agentId);
+      if (agent?.runtimeMode !== 'sandbox' || !agent.sandboxUrl || agent.sandboxUrl === E2B_AGENT_ID) continue;
+      const discoveryKey = `${agent.sandboxUrl}:${session.id}`;
+      if (remoteDiscoveryRef.current.has(discoveryKey)) continue;
+      remoteDiscoveryRef.current.add(discoveryKey);
+      void listRemoteAgentRuns(agent.sandboxUrl, session.id).then(({ runs }) => {
+        const latest = runs?.[0];
+        if (!latest || latest.status === 'aborted' || latest.status === 'error' || latest.status === 'interrupted') return;
+        setSessions((prev) => prev.map((item) => {
+          if (item.id !== session.id || item.remoteRun) return item;
+          const hasReply = item.messages.some((message) => message.id === latest.replyId);
+          return {
+            ...item,
+            messages: hasReply ? item.messages : [...item.messages, {
+              id: latest.replyId || generateId(),
+              role: 'assistant',
+              content: '',
+              thinking: '',
+              toolCalls: [],
+            }],
+            remoteRun: {
+              id: latest.id,
+              url: agent.sandboxUrl,
+              replyId: latest.replyId,
+              // Mark completed discoveries as pending once so streamResponse
+              // fetches their event log and durable result.
+              status: 'running',
+            },
+          };
+        }));
+      }).catch((error) => console.warn('Remote agent run discovery failed:', error));
+    }
+  }, [agentList, loaded, sessions]);
+
   const cancelPendingStreamStarts = useCallback(() => {
     const pendingStarts = [...pendingStreamStartsRef.current.values()];
     for (const timerId of pendingStreamStartsRef.current.keys()) {
@@ -819,6 +947,8 @@ function App() {
   }, [cancelPendingStreamStarts]);
 
   const handleStopStreaming = useCallback(() => {
+    const remote = remoteRunRef.current;
+    if (remote) void abortRemoteAgentRun(remote.url, remote.id).catch(() => {});
     if (abortRef.current) abortRef.current.abort();
   }, []);
 

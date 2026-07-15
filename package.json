@@ -22,6 +22,7 @@
     "build:pages": "cross-env VITE_BASE=/VertexAgent/ vite build",
     "lint": "eslint .",
     "test:sync": "node --test src/config/*.test.js src/components/Settings/*.test.js src/models/*.test.js src/sync/*.test.js src/vfs/opfs.test.js src/sessionRefresh.test.js src/sessionPersistence.test.js",
+    "test:runtime": "node --test server/agent-runtime.test.js",
     "preview": "vite preview",
     "build:docker": "docker buildx build --platform linux/amd64,linux/arm64 -t backsapce/vertex-agent:$(node -p \"require('./package.json').version\") --push ."
   },
