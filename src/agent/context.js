@@ -47,7 +47,7 @@ Runtime isolation:
 - The agent loop, model calls, tool calls, and filesystem operations all run in this sandbox.
 - Browser state, browser OPFS, browser files, browser actions, and other browser-only tools are unavailable and invisible.
 - The only visible filesystem is the sandbox workspace. Use sandbox file tools and execute_command for all inspection and changes.
-- Browser-backed agent identity files, memory, and skills are not copied into this runtime.
+- Browser memory is not copied into this runtime. At run startup, browser-backed AGENTS.md and enabled skills are copied into the sandbox only when their destination paths do not already exist; their identity and compact catalog are also included below in this prompt.
 - The browser is only a client that may disconnect and later replay this run's persisted event log and result.
 
 Operating rules:

@@ -171,7 +171,7 @@
     "syncSettings": {
         "title": "Sync",
         "desc": "Sync OPFS data with an S3-compatible backend. JSON and YAML files merge through Yjs; Markdown and binary files use the newest version.",
-        "warning": "Credentials are stored locally and excluded from synced config; this browser signs requests directly to the storage endpoint. Prefer short-lived STS credentials and a prefix-scoped policy; allow this origin and expose ETag in bucket CORS. OSS also needs list permission for safe multi-device manifests. If bucket versioning is enabled, add lifecycle rules to expire old payload versions. Update every device before reusing a migrated prefix, and rotate credentials if an older version may have synced secrets.",
+        "warning": "LLM API keys are included in synced config so restored profiles work on every client. Anyone with read access to the sync bucket can use those keys. Storage and E2B credentials remain local. Prefer short-lived STS credentials and a prefix-scoped policy; allow this origin and expose ETag in bucket CORS. OSS also needs list permission for safe multi-device manifests. If bucket versioning is enabled, add lifecycle rules to expire old payload versions. Update every device before reusing a migrated prefix.",
         "enabled": "Enable automatic sync",
         "provider": "Provider",
         "providerS3": "AWS S3",

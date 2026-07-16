@@ -157,11 +157,16 @@ test('unchanged local children do not clear remote deleted parent tombstones', (
   assert.equal(manifestFiles['workspace/agent-a/skills/demo'].deleted, true);
 });
 
-test('sync projection removes every locally scoped credential without mutating local config', () => {
+test('sync projection includes LLM keys but removes runtime state and device-only credentials', () => {
   const local = {
     theme: 'dark',
     agentTokens: { 'https://sandbox.test': 'agent-secret' },
-    agents: [{ url: 'https://sandbox.test', name: 'Local sandbox' }],
+    agents: [{
+      url: 'https://sandbox.test',
+      name: 'Shared sandbox',
+      status: 'connected',
+      needsAuth: false,
+    }],
     selectedAgent: 'https://sandbox.test',
     dismissedAgents: ['https://old-sandbox.test'],
     sync: { bucket: 'private', accessKeyId: 'ak', secretAccessKey: 'sk' },
@@ -177,21 +182,23 @@ test('sync projection removes every locally scoped credential without mutating l
 
   const projected = stripLocalOnlyConfig(local);
   assert.equal(projected.theme, 'dark');
-  assert.equal(projected.agentTokens, undefined);
-  assert.equal(projected.agents, undefined);
+  assert.deepEqual(projected.agentTokens, { 'https://sandbox.test': 'agent-secret' });
+  assert.deepEqual(projected.agents, [{ url: 'https://sandbox.test', name: 'Shared sandbox' }]);
   assert.equal(projected.selectedAgent, undefined);
   assert.equal(projected.dismissedAgents, undefined);
   assert.equal(projected.sync, undefined);
   assert.deepEqual(projected.e2b, { timeout: 30 });
-  assert.equal(projected.llm.apiKey, undefined);
-  assert.equal(projected.llm.profiles.p1.apiKey, undefined);
+  assert.equal(projected.llm.apiKey, 'legacy-secret');
+  assert.equal(projected.llm.profiles.p1.apiKey, 'llm-secret');
   assert.equal(local.sync.secretAccessKey, 'sk');
   assert.equal(local.llm.profiles.p1.apiKey, 'llm-secret');
 });
 
-test('remote config merge preserves only this device credentials', () => {
+test('remote config merge applies synced LLM keys while preserving device-only credentials', () => {
   const remote = {
     theme: 'light',
+    agents: [{ url: 'https://remote-sandbox.test', name: 'Remote sandbox' }],
+    agentTokens: { remote: 'remote-agent-token' },
     sync: { bucket: 'attacker-bucket', secretAccessKey: 'remote-secret' },
     e2b: { timeout: 60, apiKey: 'remote-e2b-secret' },
     llm: {
@@ -212,16 +219,16 @@ test('remote config merge preserves only this device credentials', () => {
 
   const merged = preserveLocalOnlyConfig('config.yaml', remote, local);
   assert.deepEqual(merged.sync, local.sync);
-  assert.deepEqual(merged.agentTokens, local.agentTokens);
-  assert.deepEqual(merged.agents, local.agents);
+  assert.deepEqual(merged.agentTokens, remote.agentTokens);
+  assert.deepEqual(merged.agents, remote.agents);
   assert.equal(merged.selectedAgent, local.selectedAgent);
   assert.equal(merged.e2b.apiKey, 'local-e2b-secret');
   assert.equal(merged.e2b.timeout, 60);
-  assert.equal(merged.llm.profiles.p1.apiKey, 'local-llm-secret');
-  assert.equal(merged.llm.profiles.p2.apiKey, undefined);
+  assert.equal(merged.llm.profiles.p1.apiKey, 'remote-llm-secret');
+  assert.equal(merged.llm.profiles.p2.apiKey, 'remote-new-secret');
 });
 
-test('a synced provider or endpoint change cannot inherit a local API key', () => {
+test('a synced provider or endpoint change does not inherit an unrelated local API key', () => {
   const local = {
     llm: {
       provider: 'openai',

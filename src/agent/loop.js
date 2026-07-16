@@ -12,7 +12,7 @@ import { normalizeAiUsage, toModelMessages } from '../models/ai.js';
 import { getEnabledToolSchemas, registry } from './tools.js';
 import { assembleApiMessages } from './context.js';
 import { loadMemory } from './memory.js';
-import { buildSkillsSection } from './skills.js';
+import { buildSandboxSkillFiles, buildSkillsSection } from './skills.js';
 import { compactToolResultForModel } from './toolObservation.js';
 import { AGENT_EVENT_VERSION, createAgentEventState, applyAgentEvent } from './events.js';
 import { createToolLoopGuard } from './loopSafety.js';
@@ -241,23 +241,32 @@ export async function runAgentLoop(opts) {
 }
 
 /**
- * Snapshot the browser-owned agent prompt state before a run is handed to a
- * different runtime. Files themselves are deliberately not included.
+ * Snapshot browser-owned prompt state before a run is handed to a different
+ * runtime. Sandbox mode also includes bounded identity and skill files.
  */
-export async function prepareAgentRuntimeContext(agentId) {
+export async function prepareAgentRuntimeContext(agentId, options = {}) {
   const workspaceDirName = agentId ? await getWorkspaceDirName(agentId) : null;
   const activeAgent = agentId ? await getAgent(agentId) : null;
-  const [memorySnapshot, skillsList, agentIdentity] = await Promise.all([
+  const runtimeMode = options.runtimeMode === 'sandbox' ? 'sandbox' : 'browser';
+  const [memorySnapshot, agentIdentity] = await Promise.all([
     loadMemory(agentId),
-    buildSkillsSection(agentId),
     agentId ? readAgentAgentsFile(agentId) : null,
   ]);
+  const skillsList = await buildSkillsSection(agentId, { runtimeMode });
+  const skillFiles = runtimeMode === 'sandbox' ? await buildSandboxSkillFiles(agentId) : [];
+  const sandboxFiles = runtimeMode === 'sandbox'
+    ? [
+      ...(agentIdentity ? [{ path: 'AGENTS.md', content: agentIdentity }] : []),
+      ...skillFiles,
+    ]
+    : [];
   return {
     workspaceDirName,
     activeAgent: activeAgent ? { id: activeAgent.id, name: activeAgent.name } : null,
     memorySnapshot,
     skillsList,
     agentIdentity,
+    sandboxFiles,
   };
 }
 

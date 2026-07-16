@@ -259,7 +259,7 @@ export async function listAllSkills(includeDisabled = true, agentId) {
  * Build the prompt catalog for enabled skills.
  * @param {string} [agentId]
  */
-export async function buildSkillsSection(agentId) {
+export async function buildSkillsSection(agentId, options = {}) {
   const skills = await listEnabledSkills(agentId);
   if (!skills.length) return '';
 
@@ -272,12 +272,38 @@ export async function buildSkillsSection(agentId) {
     })
     .join('\n');
 
+  const location = options.runtimeMode === 'sandbox'
+    ? 'Enabled skills are snapshotted into the sandbox under skills/<skill-name>/. Read skills/<skill-name>/SKILL.md with the sandbox file tools before applying detailed instructions; read referenced files from that skill\'s references/ directory only when needed.'
+    : 'Available skills are listed below. Skills are stored in browser OPFS, not in the sandbox runtime and not inside workspace/<active-agent>/files/. Global skills are read-only to AI tools. Use the `skill` tool with action "read" before applying detailed skill instructions; create or edit active-agent skills only by writing files under workspace/<active-agent>/skills/.';
+
   return [
     '<skill_catalog>',
-    'Available skills are listed below. Skills are stored in browser OPFS, not in the sandbox runtime and not inside workspace/<active-agent>/files/. Global skills are read-only to AI tools. Use the `skill` tool with action "read" before applying detailed skill instructions; create or edit active-agent skills only by writing files under workspace/<active-agent>/skills/.',
+    location,
     list,
     '</skill_catalog>',
   ].join('\n');
+}
+
+/**
+ * Snapshot enabled browser-owned skills for a sandbox runtime. Agent-local
+ * skills retain their normal precedence over global skills.
+ * @param {string} [agentId]
+ * @returns {Promise<Array<{ path: string, content: string }>>}
+ */
+export async function buildSandboxSkillFiles(agentId) {
+  const files = [];
+  for (const skill of await listEnabledSkills(agentId)) {
+    const resolved = await resolveSkill(skill.name, agentId);
+    if (!resolved) continue;
+    files.push({ path: `skills/${skill.name}/SKILL.md`, content: resolved.content });
+    for (const ref of resolved.skill.references) {
+      const content = await readReference(resolved, ref.name);
+      if (content != null) {
+        files.push({ path: `skills/${skill.name}/references/${ref.name}`, content });
+      }
+    }
+  }
+  return files;
 }
 
 // ─── Internal loading ───────────────────────────────────────────────────────

@@ -14,7 +14,7 @@ import {
 import config from './config/config';
 import llm from './models/llm';
 import { executeCommand, initAgents, enableE2b, E2B_AGENT_ID, getSandboxStatus, stopE2bSandbox, startRemoteAgentRun, getRemoteAgentRun, listRemoteAgentRuns, abortRemoteAgentRun } from './models/agent';
-import { runAgentLoop } from './agent/loop';
+import { prepareAgentRuntimeContext, runAgentLoop } from './agent/loop';
 import { applyAgentEvent, createAgentEventState } from './agent/events';
 import { buildChatDebugExport, createChatDebugFilename } from './agent/debug';
 import { ensureDefaultSkills } from './agent/skills';
@@ -86,7 +86,7 @@ Work rules:
 - Use sub-agents only for bounded independent work.
 - When tools fail, use the error output to choose the next useful step.`;
 
-const SANDBOX_AGENT_SYSTEM_PROMPT = `You are running fully inside the selected sandbox. Browser operations, browser OPFS, browser files, browser memory mutation, browser skill mutation, and sub-agent delegation are unavailable. Use only execute_command and sandbox file tools. The browser may disconnect without stopping this run.`;
+const SANDBOX_AGENT_SYSTEM_PROMPT = `You are running fully inside the selected sandbox. Browser operations, browser OPFS, browser files, browser memory mutation, browser skill mutation, and sub-agent delegation are unavailable. A startup snapshot of the browser agent identity and enabled skills is available as AGENTS.md and skills/ when those paths did not already exist. Use only execute_command and sandbox file tools. The browser may disconnect without stopping this run.`;
 
 const FILE_CONTEXT_MARKER = 'Selected file context:';
 const TOOL_HISTORY_MARKER = 'Tool calls performed during this assistant turn:';
@@ -332,6 +332,15 @@ function App() {
 
       const savedAgents = await listAgents();
       setAgentList(savedAgents);
+
+      // config.yaml may have gained or lost sandbox hosts during sync/import.
+      // Rebuild the runtime view so Settings and sandbox selectors reflect the
+      // restored config without requiring a page reload. The global
+      // file-manager selection remains local to this device.
+      const { agents: restoredSandboxes, selectedUrl } = await initAgents();
+      setAgents(restoredSandboxes);
+      setSelectedAgentUrl(selectedUrl);
+      selectedAgentRef.current = selectedUrl;
       setStorageVersion((prev) => prev + 1);
     } finally {
       saveCoordinator.resume();
@@ -762,6 +771,7 @@ function App() {
         if (opts.resumeRunId) {
           remoteRun = { id: opts.resumeRunId, status: 'running' };
         } else {
+          const runtimeContext = await prepareAgentRuntimeContext(sessionAgentId, { runtimeMode: 'sandbox' });
           remoteRun = await startRemoteAgentRun(sandboxUrl, {
             sessionId,
             replyId,
@@ -769,15 +779,11 @@ function App() {
             systemPrompt: SANDBOX_AGENT_SYSTEM_PROMPT,
             agentId: sessionAgentId,
             modelConfig: llm.getRuntimeConfig(llmProfileId),
-            // Do not copy browser OPFS-backed identity, memory, skills, or
-            // files into sandbox mode. Only non-file routing metadata crosses
-            // the runtime boundary.
             runtimeContext: {
-              workspaceDirName: sessionAgentId,
-              activeAgent: sessionAgentId ? { id: sessionAgentId, name: agentConfig?.name || sessionAgentId } : null,
+              ...runtimeContext,
+              // Memory stays browser-only; identity and enabled skills are a
+              // bounded startup snapshot for the isolated runtime.
               memorySnapshot: { memory: null, user: null },
-              skillsList: '',
-              agentIdentity: null,
             },
           }, controller.signal);
           setSessions((prev) => prev.map((session) => session.id === sessionId ? {
