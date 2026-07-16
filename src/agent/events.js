@@ -103,6 +103,12 @@ export function applyAgentEvent(state, event) {
       return withTool(next, event, {
         status: event.status || 'running',
         ...(event.output !== undefined ? { result: String(event.output) } : {}),
+        ...(event.terminalOutput !== undefined ? { terminalOutput: String(event.terminalOutput) } : {}),
+        ...(event.exitCode !== undefined ? { exitCode: event.exitCode } : {}),
+        ...(event.platform !== undefined ? { platform: event.platform } : {}),
+        ...(event.shell !== undefined ? { shell: event.shell } : {}),
+        ...(event.cwd !== undefined ? { cwd: event.cwd } : {}),
+        ...(event.filesRoot !== undefined ? { filesRoot: event.filesRoot } : {}),
         ...(event.summary !== undefined ? { summary: event.summary } : {}),
       });
     case 'tool-result':

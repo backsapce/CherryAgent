@@ -143,7 +143,10 @@ export async function executeCommand(cmd, url, opts = {}) {
       return await executeCommandStreaming(cmd, url, opts);
     } catch (err) {
       if (opts.signal?.aborted) throw err;
-      if (opts.requireStreaming) throw err;
+      // Retrying after the command was submitted could execute a mutating
+      // command twice. HTTP fallback is only safe when the socket never
+      // opened (for example, when a proxy does not support WebSockets).
+      if (opts.requireStreaming || err?.agentCommandStarted) throw err;
       console.warn('[agent] WebSocket command stream failed; falling back to HTTP:', err);
     }
   }
@@ -231,6 +234,7 @@ function executeCommandStreaming(cmd, url, opts = {}) {
       finished = true;
       cleanup();
       try { ws.close(); } catch { /* ignore */ }
+      if (err && typeof err === 'object') err.agentCommandStarted = started;
       reject(err);
     };
 
@@ -245,8 +249,12 @@ function executeCommandStreaming(cmd, url, opts = {}) {
     opts.signal?.addEventListener('abort', abort, { once: true });
 
     ws.addEventListener('open', () => {
-      started = true;
-      ws.send(JSON.stringify({ cmd, token }));
+      try {
+        ws.send(JSON.stringify({ cmd, token }));
+        started = true;
+      } catch (err) {
+        fail(err);
+      }
     });
 
     ws.addEventListener('message', (event) => {

@@ -481,10 +481,16 @@ registry.register({
   async handler({ command }, ctx) {
     const result = await executeCommand(command, ctx.agentUrl, {
       stream: true,
-      requireStreaming: true,
       signal: ctx?.signal,
       onStdout: (chunk) => ctx?.onToolUpdate?.({ stdout: chunk }),
       onStderr: (chunk) => ctx?.onToolUpdate?.({ stderr: chunk }),
+    });
+    ctx?.onToolUpdate?.({
+      exitCode: result.code,
+      platform: result.platform,
+      shell: result.shell,
+      cwd: result.cwd,
+      filesRoot: result.filesRoot,
     });
     let out = `Exit code: ${result.code}`;
     if (result.platform || result.shell || result.cwd || result.filesRoot) {
