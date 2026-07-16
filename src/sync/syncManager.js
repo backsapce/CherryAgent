@@ -50,7 +50,9 @@ const MAX_MANIFEST_OBJECT_BYTES = 16 * 1024 * 1024;
 const MAX_STRUCTURED_CANDIDATES = 32;
 const MAX_REMOTE_PAYLOAD_BYTES = 512 * 1024 * 1024;
 const MAX_PAYLOAD_DEDUPE_CACHE_BYTES = 64 * 1024 * 1024;
-const CONFIG_REDACTION_VERSION = 2;
+// Version 3 keeps storage/E2B credentials local, but intentionally includes
+// LLM API keys so a restored profile is immediately usable on another client.
+const CONFIG_REDACTION_VERSION = 3;
 const LARGE_FILE_BYTES = 16 * 1024 * 1024;
 const VERY_LARGE_FILE_BYTES = 64 * 1024 * 1024;
 const SHARD_ATTEMPT_ID_HEX_LENGTH = 16;
@@ -524,11 +526,22 @@ function isConfigPath(path) {
 function stripLocalOnlyConfig(data) {
   if (!data || typeof data !== 'object' || Array.isArray(data)) return data;
   const next = { ...data };
-  delete next.agentTokens;
   delete next.sync;
-  delete next.agents;
   delete next.selectedAgent;
   delete next.dismissedAgents;
+
+  // Sandbox hosts and their agentTokens are portable configuration. Hosts are
+  // referenced by synced agentsList[].sandboxUrl defaults, and another client
+  // needs the matching token to authenticate. Keep only durable host metadata;
+  // reachability remains device-local.
+  if (Array.isArray(next.agents)) {
+    next.agents = next.agents
+      .filter((agent) => agent && typeof agent === 'object' && typeof agent.url === 'string')
+      .map((agent) => ({
+        url: agent.url,
+        name: typeof agent.name === 'string' ? agent.name : agent.url,
+      }));
+  }
 
   if (next.e2b && typeof next.e2b === 'object' && !Array.isArray(next.e2b)) {
     next.e2b = { ...next.e2b };
@@ -536,27 +549,7 @@ function stripLocalOnlyConfig(data) {
     if (Object.keys(next.e2b).length === 0) delete next.e2b;
   }
 
-  if (next.llm && typeof next.llm === 'object' && !Array.isArray(next.llm)) {
-    const llm = { ...next.llm };
-    delete llm.apiKey;
-    if (llm.profiles && typeof llm.profiles === 'object' && !Array.isArray(llm.profiles)) {
-      llm.profiles = Object.fromEntries(Object.entries(llm.profiles).map(([id, profile]) => {
-        if (!profile || typeof profile !== 'object' || Array.isArray(profile)) return [id, profile];
-        const sanitized = { ...profile };
-        delete sanitized.apiKey;
-        return [id, sanitized];
-      }));
-    }
-    next.llm = llm;
-  }
   return next;
-}
-
-function credentialTargetMatches(localValue, remoteValue) {
-  if (!localValue || typeof localValue !== 'object' || Array.isArray(localValue)) return false;
-  if (!remoteValue || typeof remoteValue !== 'object' || Array.isArray(remoteValue)) return false;
-  return String(localValue.provider || '') === String(remoteValue.provider || '')
-    && normalizeEndpoint(localValue.baseUrl) === normalizeEndpoint(remoteValue.baseUrl);
 }
 
 function preserveLocalOnlyConfig(path, mergedData, localData = {}) {
@@ -567,7 +560,7 @@ function preserveLocalOnlyConfig(path, mergedData, localData = {}) {
   const next = stripLocalOnlyConfig(mergedData);
   if (!localData || typeof localData !== 'object' || Array.isArray(localData)) return next;
 
-  for (const key of ['agentTokens', 'sync', 'agents', 'selectedAgent', 'dismissedAgents']) {
+  for (const key of ['sync', 'selectedAgent', 'dismissedAgents']) {
     if (Object.prototype.hasOwnProperty.call(localData, key)) next[key] = localData[key];
   }
 
@@ -581,32 +574,6 @@ function preserveLocalOnlyConfig(path, mergedData, localData = {}) {
     }
   }
 
-  if (next.llm && typeof next.llm === 'object' && !Array.isArray(next.llm)) {
-    const localLlm = localData.llm && typeof localData.llm === 'object' && !Array.isArray(localData.llm)
-      ? localData.llm
-      : {};
-    if (
-      Object.prototype.hasOwnProperty.call(localLlm, 'apiKey')
-      && credentialTargetMatches(localLlm, next.llm)
-    ) {
-      next.llm.apiKey = localLlm.apiKey;
-    }
-    if (next.llm.profiles && typeof next.llm.profiles === 'object' && !Array.isArray(next.llm.profiles)) {
-      const localProfiles = localLlm.profiles && typeof localLlm.profiles === 'object' && !Array.isArray(localLlm.profiles)
-        ? localLlm.profiles
-        : {};
-      next.llm.profiles = Object.fromEntries(Object.entries(next.llm.profiles).map(([id, profile]) => {
-        const localProfile = localProfiles[id];
-        if (
-          !profile || typeof profile !== 'object' || Array.isArray(profile)
-          || !localProfile || typeof localProfile !== 'object' || Array.isArray(localProfile)
-          || !Object.prototype.hasOwnProperty.call(localProfile, 'apiKey')
-          || !credentialTargetMatches(localProfile, profile)
-        ) return [id, profile];
-        return [id, { ...profile, apiKey: localProfile.apiKey }];
-      }));
-    }
-  }
   return next;
 }
 

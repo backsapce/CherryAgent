@@ -948,7 +948,7 @@ test('an unsynced local delete keeps its logical version while pull sees the old
   }
 });
 
-test('config sync strips local secrets and stores only one structured representation', async () => {
+test('config sync includes LLM keys, strips device-only secrets, and stores one structured representation', async () => {
   useMemoryOpfs();
   const backend = new MemoryBackend();
   const restoreBackend = installBackend(backend);
@@ -958,6 +958,7 @@ test('config sync strips local secrets and stores only one structured representa
       theme: 'dark',
       sync: { bucket: 'secret-bucket', accessKeyId: 'ak-secret', secretAccessKey: 'sk-secret' },
       agentTokens: { sandbox: 'agent-secret' },
+      agents: [{ url: 'https://sandbox.test', name: 'Shared sandbox', status: 'connected' }],
       e2b: { apiKey: 'e2b-secret' },
       llm: { profiles: { p1: { id: 'p1', model: 'gpt', apiKey: 'llm-secret' } } },
     };
@@ -971,9 +972,10 @@ test('config sync strips local secrets and stores only one structured representa
     const remoteData = readStructuredUpdate(backend.objects.get(entry.yjsKey));
     assert.equal(remoteData.theme, 'dark');
     assert.equal(remoteData.sync, undefined);
-    assert.equal(remoteData.agentTokens, undefined);
+    assert.deepEqual(remoteData.agentTokens, { sandbox: 'agent-secret' });
+    assert.deepEqual(remoteData.agents, [{ url: 'https://sandbox.test', name: 'Shared sandbox' }]);
     assert.equal(remoteData.e2b, undefined);
-    assert.equal(remoteData.llm.profiles.p1.apiKey, undefined);
+    assert.equal(remoteData.llm.profiles.p1.apiKey, 'llm-secret');
     assert.equal(backend.countPayloadPuts(), 1);
     assert.equal((await readPathText('config.yaml')).includes('sk-secret'), true);
   } finally {
@@ -1356,7 +1358,7 @@ test('structured metadata repair reuses an unchanged encoded payload', async () 
     backend.resetRequests();
     await syncNow(SYNC_CONFIG);
     const repaired = backend.json(manifestKey).files['config.yaml'];
-    assert.equal(repaired.redactionVersion, 2);
+    assert.equal(repaired.redactionVersion, 3);
     assert.equal(repaired.yjsKey, originalKey);
     assert.equal(backend.countPayloadPuts(), 0);
   } finally {

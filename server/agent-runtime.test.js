@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { createAgentRunManager, REMOTE_TOOL_SCHEMAS } from './agent-runtime.js';
+import { createAgentRunManager, materializeRuntimeFiles, REMOTE_TOOL_SCHEMAS } from './agent-runtime.js';
 
 function createManager(runsDir) {
   return createAgentRunManager({
@@ -19,6 +19,33 @@ test('sandbox runtime exposes no browser-owned tools', () => {
   assert.deepEqual(
     REMOTE_TOOL_SCHEMAS.map((tool) => tool.name),
     ['execute_command', 'list_sandbox_files', 'read_sandbox_file', 'write_sandbox_file']
+  );
+});
+
+test('sandbox startup snapshot writes only missing identity and skill files', async () => {
+  const stored = new Map([['AGENTS.md', 'sandbox identity']]);
+  await materializeRuntimeFiles([
+    { path: 'AGENTS.md', content: 'browser identity' },
+    { path: 'skills/review/SKILL.md', content: '# Review' },
+    { path: 'skills/review/references/checks.md', content: 'Check everything.' },
+  ], {
+    fileExists: async (path) => stored.has(path),
+    readFile: async (path) => stored.get(path),
+    writeFile: async (path, content) => stored.set(path, content),
+  });
+
+  assert.equal(stored.get('AGENTS.md'), 'sandbox identity');
+  assert.equal(stored.get('skills/review/SKILL.md'), '# Review');
+  assert.equal(stored.get('skills/review/references/checks.md'), 'Check everything.');
+});
+
+test('sandbox startup snapshot rejects paths outside identity and skills', async () => {
+  await assert.rejects(
+    materializeRuntimeFiles(
+      [{ path: 'skills/../secret', content: 'nope' }],
+      { fileExists: async () => false, readFile: async () => '', writeFile: async () => {} }
+    ),
+    /AGENTS\.md or skills/
   );
 });
 

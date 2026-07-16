@@ -347,6 +347,9 @@ const agentRunManager = createAgentRunManager({
     mkdirSync(join(resolvedPath, '..'), { recursive: true });
     writeFileSync(resolvedPath, content, 'utf8');
   },
+  async fileExists(inputPath) {
+    return existsSync(runtimePath(inputPath));
+  },
 });
 
 function json(res, status, data, req) {

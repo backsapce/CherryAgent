@@ -6,6 +6,9 @@ import { runAgentLoop } from '../src/agent/loop.js';
 
 const MAX_MESSAGES = 2_000;
 const MAX_EVENT_BYTES = 20 * 1024 * 1024;
+const MAX_RUNTIME_FILES = 500;
+const MAX_RUNTIME_FILE_BYTES = 256 * 1024;
+const MAX_RUNTIME_FILES_BYTES = 10 * 1024 * 1024;
 
 const REMOTE_TOOL_SCHEMAS = [
   {
@@ -49,7 +52,7 @@ const REMOTE_TOOL_SCHEMAS = [
   },
 ];
 
-export function createAgentRunManager({ runsDir, execCommand, listFiles, readFile, writeFile }) {
+export function createAgentRunManager({ runsDir, execCommand, listFiles, readFile, writeFile, fileExists }) {
   mkdirSync(runsDir, { recursive: true });
   const runs = new Map();
   loadPersistedRuns(runsDir, runs);
@@ -112,6 +115,7 @@ export function createAgentRunManager({ runsDir, execCommand, listFiles, readFil
 
     Promise.resolve().then(async () => {
       try {
+        await materializeRuntimeFiles(input.runtimeContext?.sandboxFiles, { fileExists, readFile, writeFile });
         const modelConfig = input.modelConfig;
         const result = await runAgentLoop({
           messages: input.messages,
@@ -173,6 +177,53 @@ function validateRunInput(input) {
   if (!Array.isArray(input.messages) || input.messages.length > MAX_MESSAGES) throw new Error('messages must be a bounded array.');
   const model = input.modelConfig;
   if (!model?.provider || !model?.model || !model?.apiKey) throw new Error('A complete modelConfig is required.');
+  validateRuntimeFiles(input.runtimeContext?.sandboxFiles);
+}
+
+function validateRuntimeFiles(files = []) {
+  if (!Array.isArray(files) || files.length > MAX_RUNTIME_FILES) {
+    throw new Error(`runtimeContext.sandboxFiles must contain at most ${MAX_RUNTIME_FILES} files.`);
+  }
+  let totalBytes = 0;
+  for (const file of files) {
+    const path = String(file?.path || '');
+    const content = file?.content;
+    const safePath = path === 'AGENTS.md'
+      || (path.startsWith('skills/')
+        && !path.includes('\\')
+        && !path.includes('\0')
+        && path.split('/').every((part) => part && part !== '.' && part !== '..'));
+    if (!safePath || typeof content !== 'string') {
+      throw new Error('Sandbox snapshot files must be UTF-8 text under AGENTS.md or skills/.');
+    }
+    const bytes = Buffer.byteLength(content);
+    if (bytes > MAX_RUNTIME_FILE_BYTES) {
+      throw new Error(`Sandbox snapshot file ${path} exceeds ${MAX_RUNTIME_FILE_BYTES} bytes.`);
+    }
+    totalBytes += bytes;
+  }
+  if (totalBytes > MAX_RUNTIME_FILES_BYTES) {
+    throw new Error(`Sandbox snapshot exceeds ${MAX_RUNTIME_FILES_BYTES} bytes.`);
+  }
+}
+
+/** Materialize browser-owned startup files without replacing sandbox state. */
+export async function materializeRuntimeFiles(files = [], { fileExists, readFile, writeFile }) {
+  validateRuntimeFiles(files);
+  for (const file of files) {
+    let exists = false;
+    if (fileExists) {
+      exists = await fileExists(file.path);
+    } else {
+      try {
+        await readFile(file.path);
+        exists = true;
+      } catch {
+        exists = false;
+      }
+    }
+    if (!exists) await writeFile(file.path, file.content);
+  }
 }
 
 function normalizeRuntimeContext(value = {}) {
