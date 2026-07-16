@@ -18,8 +18,28 @@ function createManager(runsDir) {
 test('sandbox runtime exposes no browser-owned tools', () => {
   assert.deepEqual(
     REMOTE_TOOL_SCHEMAS.map((tool) => tool.name),
-    ['execute_command', 'list_sandbox_files', 'read_sandbox_file', 'write_sandbox_file']
+    ['execute_command', 'list_sandbox_files', 'read_sandbox_file', 'display_sandbox_image', 'write_sandbox_file']
   );
+});
+
+test('sandbox image display returns a reference without image content', async () => {
+  const dispatch = createRuntimeToolDispatcher({
+    execCommand: async () => ({ stdout: '', stderr: '', code: 0 }),
+    listFiles: async () => [{ name: 'result.png', type: 'file', size: 1234 }],
+    readFile: async () => '',
+    writeFile: async () => {},
+  });
+
+  const result = await dispatch('display_sandbox_image', { path: 'images/result.png', alt: 'Result' });
+  assert.deepEqual(JSON.parse(result), {
+    kind: 'image_reference',
+    source: 'sandbox',
+    path: 'images/result.png',
+    name: 'result.png',
+    mime_type: 'image/png',
+    size: 1234,
+  });
+  assert.doesNotMatch(result, /base64|data_url|data:image/i);
 });
 
 test('sandbox command dispatch passes cancellation as an exec option', async () => {

@@ -20,14 +20,13 @@ import {
   getSkill,
   searchSkills,
 } from './skills.js';
-import { downloadE2bFile, downloadRemoteFile, executeCommand, listFiles, readFileText, writeFile } from '../models/agent.js';
+import { executeCommand, listFiles, readFileText, writeFile } from '../models/agent.js';
 import {
   getAgentFileInfo,
   getAgentSkillFileInfo,
   listAgentFiles,
   listAgentSkillFiles,
   readAgentFile,
-  readAgentFileBlob,
   readAgentSkillPath,
   writeAgentFile,
   writeAgentSkillPath,
@@ -37,13 +36,7 @@ import { getAgent, listAgents, updateAgentConfig } from '../agents/agents.js';
 
 const DEFAULT_READ_FILE_MAX_BYTES = 256 * 1024;
 const ABSOLUTE_READ_FILE_MAX_BYTES = 1024 * 1024;
-const DEFAULT_IMAGE_MAX_SOURCE_BYTES = 10 * 1024 * 1024;
 const ABSOLUTE_IMAGE_MAX_SOURCE_BYTES = 25 * 1024 * 1024;
-const DEFAULT_IMAGE_MAX_DIMENSION = 1024;
-const ABSOLUTE_IMAGE_MAX_DIMENSION = 2048;
-const DEFAULT_IMAGE_QUALITY = 0.82;
-const MAX_IMAGE_DATA_URL_BYTES = 1_500_000;
-const E2B_AGENT_ID = '__e2b__';
 const TOOL_RESULT_MAX_CHARS = 80_000;
 const TOOL_RESULT_HEAD_RATIO = 0.62;
 
@@ -242,24 +235,6 @@ function clampReadLimit(maxBytes) {
   return Math.min(Math.floor(parsed), ABSOLUTE_READ_FILE_MAX_BYTES);
 }
 
-function clampImageSourceLimit(maxBytes) {
-  const parsed = Number(maxBytes);
-  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_IMAGE_MAX_SOURCE_BYTES;
-  return Math.min(Math.floor(parsed), ABSOLUTE_IMAGE_MAX_SOURCE_BYTES);
-}
-
-function clampImageDimension(maxDimension) {
-  const parsed = Number(maxDimension);
-  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_IMAGE_MAX_DIMENSION;
-  return Math.min(Math.floor(parsed), ABSOLUTE_IMAGE_MAX_DIMENSION);
-}
-
-function clampImageQuality(quality) {
-  const parsed = Number(quality);
-  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_IMAGE_QUALITY;
-  return Math.min(Math.max(parsed, 0.1), 0.95);
-}
-
 function formatBytes(bytes) {
   if (!Number.isFinite(bytes)) return 'unknown size';
   if (bytes < 1024) return `${bytes} B`;
@@ -338,124 +313,14 @@ function isSupportedImageMime(type) {
   return ['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/svg+xml', 'image/bmp'].includes(String(type || '').toLowerCase());
 }
 
-function getImageOutputType(format) {
-  return ['image/jpeg', 'image/png', 'image/webp'].includes(format) ? format : 'image/jpeg';
-}
-
-function blobToDataUrl(blob) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result || ''));
-    reader.onerror = () => reject(reader.error || new Error('Failed to read image data URL'));
-    reader.readAsDataURL(blob);
-  });
-}
-
-function loadImageElement(blob) {
-  return new Promise((resolve, reject) => {
-    const url = URL.createObjectURL(blob);
-    const image = new Image();
-    image.onload = () => {
-      URL.revokeObjectURL(url);
-      resolve(image);
-    };
-    image.onerror = () => {
-      URL.revokeObjectURL(url);
-      reject(new Error('Unsupported or corrupt image file'));
-    };
-    image.src = url;
-  });
-}
-
-function canvasToBlob(canvas, outputType, quality) {
-  return new Promise((resolve, reject) => {
-    canvas.toBlob((blob) => {
-      if (blob) resolve(blob);
-      else reject(new Error(`Could not encode image as ${outputType}`));
-    }, outputType, quality);
-  });
-}
-
-async function resizeImageBlob(blob, options = {}) {
-  const sourceType = isSupportedImageMime(blob.type)
-    ? blob.type
-    : inferImageMimeFromPath(options.path);
-  if (!isSupportedImageMime(sourceType)) {
-    return { error: `Unsupported image type: ${blob.type || 'unknown'}` };
-  }
-
-  const maxDimension = clampImageDimension(options.maxDimension);
-  const quality = clampImageQuality(options.quality);
-  const outputType = getImageOutputType(options.outputFormat);
-  const sourceBlob = blob.type === sourceType ? blob : new Blob([blob], { type: sourceType });
-  const image = await loadImageElement(sourceBlob);
-  const originalWidth = image.naturalWidth || image.width;
-  const originalHeight = image.naturalHeight || image.height;
-  if (!originalWidth || !originalHeight) {
-    return { error: 'Could not determine image dimensions.' };
-  }
-
-  const scale = Math.min(1, maxDimension / Math.max(originalWidth, originalHeight));
-  const width = Math.max(1, Math.round(originalWidth * scale));
-  const height = Math.max(1, Math.round(originalHeight * scale));
-  const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = height;
-  const context = canvas.getContext('2d');
-  if (!context) return { error: 'Could not prepare image canvas.' };
-  context.fillStyle = '#ffffff';
-  context.fillRect(0, 0, width, height);
-  context.drawImage(image, 0, 0, width, height);
-
-  const resizedBlob = await canvasToBlob(canvas, outputType, quality);
-  const dataUrl = await blobToDataUrl(resizedBlob);
-  if (new Blob([dataUrl]).size > MAX_IMAGE_DATA_URL_BYTES) {
-    return {
-      error: `Refusing to return image data URL: encoded result is ${formatBytes(new Blob([dataUrl]).size)}, above ${formatBytes(MAX_IMAGE_DATA_URL_BYTES)}. Try a smaller max_dimension or lower quality.`,
-    };
-  }
-
-  return {
-    dataUrl,
-    originalWidth,
-    originalHeight,
-    width,
-    height,
-    inputBytes: blob.size,
-    outputBytes: resizedBlob.size,
-    mimeType: outputType,
-  };
-}
-
-async function readSandboxImageBlob(path, ctx) {
-  if (ctx?.agentUrl === E2B_AGENT_ID) {
-    return downloadE2bFile(path);
-  }
-  return downloadRemoteFile(path, ctx?.agentUrl);
-}
-
-async function readBrowserImageBlob(path, ctx) {
-  return readAgentFileBlob(ctx.agentId, path);
-}
-
-async function readImageToolResult(path, blob, options) {
-  const maxSourceBytes = clampImageSourceLimit(options.maxSourceBytes);
-  if (blob.size > maxSourceBytes) {
-    return `Refusing to read image ${path}: file is ${formatBytes(blob.size)}, above the image source limit of ${formatBytes(maxSourceBytes)}.`;
-  }
-
-  const result = await resizeImageBlob(blob, { ...options, path });
-  if (result.error) return result.error;
+function imageReferenceResult(source, path, metadata = {}) {
   return JSON.stringify({
+    kind: 'image_reference',
+    source,
     path,
-    mime_type: result.mimeType,
-    original_width: result.originalWidth,
-    original_height: result.originalHeight,
-    width: result.width,
-    height: result.height,
-    input_bytes: result.inputBytes,
-    output_bytes: result.outputBytes,
-    data_url: result.dataUrl,
+    ...(metadata.name ? { name: metadata.name } : {}),
+    ...(metadata.mimeType ? { mime_type: metadata.mimeType } : {}),
+    ...(Number.isFinite(metadata.size) ? { size: metadata.size } : {}),
   });
 }
 
@@ -572,13 +437,13 @@ registry.register({
 });
 
 registry.register({
-  name: 'read_browser_image',
+  name: 'display_browser_image',
   category: 'files',
   readOnly: true,
   parallelSafe: true,
   schema: {
     description:
-      'Read an image from workspace/<active-agent>/files/ in browser OPFS and return a compact data URL with metadata. This cannot read OPFS root or sandbox files.',
+      'Display an image stored in workspace/<active-agent>/files/ in the conversation UI. The tool returns only a durable file reference and never puts image bytes or base64 in the conversation. This cannot display sandbox files.',
     parameters: {
       type: 'object',
       properties: {
@@ -586,22 +451,9 @@ registry.register({
           type: 'string',
           description: 'Image path relative to workspace/<active-agent>/files/.',
         },
-        max_dimension: {
-          type: 'number',
-          description: `Maximum width or height in pixels. Defaults to ${DEFAULT_IMAGE_MAX_DIMENSION} and is capped at ${ABSOLUTE_IMAGE_MAX_DIMENSION}.`,
-        },
-        quality: {
-          type: 'number',
-          description: `Encoding quality for jpeg/webp from 0.1 to 0.95. Defaults to ${DEFAULT_IMAGE_QUALITY}.`,
-        },
-        output_format: {
+        alt: {
           type: 'string',
-          enum: ['image/jpeg', 'image/png', 'image/webp'],
-          description: 'Output image MIME type. Defaults to image/jpeg.',
-        },
-        max_source_bytes: {
-          type: 'number',
-          description: `Maximum source file size to read. Defaults to ${DEFAULT_IMAGE_MAX_SOURCE_BYTES} bytes and is capped at ${ABSOLUTE_IMAGE_MAX_SOURCE_BYTES} bytes.`,
+          description: 'Short accessible description of the image.',
         },
       },
       required: ['path'],
@@ -609,17 +461,17 @@ registry.register({
     },
   },
   checkAvailable: (ctx) => !!ctx?.agentId,
-  async handler({ path, max_dimension: maxDimension, quality, output_format: outputFormat, max_source_bytes: maxSourceBytes }, ctx) {
+  async handler({ path }, ctx) {
     try {
-      const blob = await readBrowserImageBlob(path, ctx);
-      return await readImageToolResult(path, blob, {
-        maxDimension,
-        quality,
-        outputFormat,
-        maxSourceBytes,
-      });
+      const info = await getAgentFileInfo(ctx.agentId, path);
+      const mimeType = info.type || inferImageMimeFromPath(path);
+      if (!isSupportedImageMime(mimeType)) return `Unsupported image type: ${mimeType || 'unknown'}`;
+      if (info.size > ABSOLUTE_IMAGE_MAX_SOURCE_BYTES) {
+        return `Refusing to display image ${path}: file is ${formatBytes(info.size)}, above ${formatBytes(ABSOLUTE_IMAGE_MAX_SOURCE_BYTES)}.`;
+      }
+      return imageReferenceResult('browser', path, { name: info.name, mimeType, size: info.size });
     } catch (err) {
-      return `Error reading browser image ${path}: ${err.message}`;
+      return `Error displaying browser image ${path}: ${err.message}`;
     }
   },
 });
@@ -833,13 +685,13 @@ registry.register({
 });
 
 registry.register({
-  name: 'read_sandbox_image',
+  name: 'display_sandbox_image',
   category: 'sandbox-files',
   readOnly: true,
   parallelSafe: true,
   schema: {
     description:
-      'Read an image from the sandbox runtime workdir and return a compact data URL with metadata. Use read_browser_image for images under workspace/<active-agent>/files/.',
+      'Display an image stored in the sandbox runtime workdir in the conversation UI. The tool returns only a sandbox file reference and never puts image bytes or base64 in the conversation. Use display_browser_image for browser files.',
     parameters: {
       type: 'object',
       properties: {
@@ -847,22 +699,9 @@ registry.register({
           type: 'string',
           description: 'Sandbox workdir image path.',
         },
-        max_dimension: {
-          type: 'number',
-          description: `Maximum width or height in pixels. Defaults to ${DEFAULT_IMAGE_MAX_DIMENSION} and is capped at ${ABSOLUTE_IMAGE_MAX_DIMENSION}.`,
-        },
-        quality: {
-          type: 'number',
-          description: `Encoding quality for jpeg/webp from 0.1 to 0.95. Defaults to ${DEFAULT_IMAGE_QUALITY}.`,
-        },
-        output_format: {
+        alt: {
           type: 'string',
-          enum: ['image/jpeg', 'image/png', 'image/webp'],
-          description: 'Output image MIME type. Defaults to image/jpeg.',
-        },
-        max_source_bytes: {
-          type: 'number',
-          description: `Maximum source file size to read. Defaults to ${DEFAULT_IMAGE_MAX_SOURCE_BYTES} bytes and is capped at ${ABSOLUTE_IMAGE_MAX_SOURCE_BYTES} bytes.`,
+          description: 'Short accessible description of the image.',
         },
       },
       required: ['path'],
@@ -870,17 +709,18 @@ registry.register({
     },
   },
   checkAvailable: (ctx) => !!ctx?.agentUrl,
-  async handler({ path, max_dimension: maxDimension, quality, output_format: outputFormat, max_source_bytes: maxSourceBytes }, ctx) {
+  async handler({ path }, ctx) {
     try {
-      const blob = await readSandboxImageBlob(path, ctx);
-      return await readImageToolResult(path, blob, {
-        maxDimension,
-        quality,
-        outputFormat,
-        maxSourceBytes,
-      });
+      const entry = await findSandboxListedFile(path, ctx);
+      if (!entry || entry.type === 'directory') return `Sandbox image not found: ${path}`;
+      const mimeType = inferImageMimeFromPath(path);
+      if (!isSupportedImageMime(mimeType)) return `Unsupported image type: ${mimeType || 'unknown'}`;
+      if (Number.isFinite(entry.size) && entry.size > ABSOLUTE_IMAGE_MAX_SOURCE_BYTES) {
+        return `Refusing to display image ${path}: file is ${formatBytes(entry.size)}, above ${formatBytes(ABSOLUTE_IMAGE_MAX_SOURCE_BYTES)}.`;
+      }
+      return imageReferenceResult('sandbox', path, { name: entry.name, mimeType, size: entry.size });
     } catch (err) {
-      return `Error reading sandbox image ${path}: ${err.message}`;
+      return `Error displaying sandbox image ${path}: ${err.message}`;
     }
   },
 });

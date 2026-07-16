@@ -1001,6 +1001,40 @@
   color: #ef4444;
 }
 
+.tool-image-artifact {
+  padding: 10px 12px 12px;
+  background: var(--color-bg);
+}
+
+.tool-image-link {
+  display: inline-block;
+  max-width: 100%;
+}
+
+.tool-image {
+  display: block;
+  max-width: min(100%, 640px);
+  max-height: 520px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  object-fit: contain;
+}
+
+.tool-image-loading,
+.tool-image-error {
+  color: var(--color-text-secondary);
+  font-size: 12px;
+}
+
+.tool-image-error {
+  color: var(--color-error, #ef4444);
+}
+
+.blocked-markdown-image {
+  color: var(--color-text-secondary);
+  font-size: 0.9em;
+}
+
 .image-generation-tool {
   border-color: color-mix(in srgb, #10a37f 28%, var(--color-border));
 }
