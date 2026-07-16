@@ -480,6 +480,24 @@ const OldExecuteTerminalOutput = ({ result }) => {
   return <ToolTerminal output={output} />;
 };
 
+function executeTerminalOutput(toolCall) {
+  if (toolCall?.terminalOutput !== undefined) return String(toolCall.terminalOutput || '');
+  const result = toolCall?.result;
+  if (result && typeof result === 'object') {
+    return [result.stdout, result.stderr].filter(Boolean).join(result.stdout && result.stderr ? '\n' : '');
+  }
+  if (typeof result !== 'string') return '';
+  try {
+    const parsed = JSON.parse(result);
+    if (parsed && typeof parsed === 'object' && ('stdout' in parsed || 'stderr' in parsed)) {
+      return [parsed.stdout, parsed.stderr].filter(Boolean).join(parsed.stdout && parsed.stderr ? '\n' : '');
+    }
+  } catch {
+    // Current command results are already terminal-friendly text.
+  }
+  return result;
+}
+
 const ToolBlock = ({ toolCall, onStopStreaming }) => {
   const { t } = useI18n();
   const isLegacyExecute = !!toolCall?.cmd;
@@ -518,7 +536,7 @@ const ToolBlock = ({ toolCall, onStopStreaming }) => {
   }
 
   // New tool call format: { name, status?, result?, summary? }
-  const { name, status, result, summary, command } = toolCall;
+  const { name, status, result, summary, command, exitCode } = toolCall;
   const showShutdown = name === 'execute_command' && ['pending', 'running'].includes(status) && onStopStreaming;
   const renderTerminal = name === 'execute_command';
   const isImageGeneration = isImageGenerationToolName(name);
@@ -535,7 +553,12 @@ const ToolBlock = ({ toolCall, onStopStreaming }) => {
         {status === 'pending' && <span className="tool-exit-code">{t('message.running')}</span>}
         {status === 'writing' && <span className="tool-exit-code writing">{t('message.writing')}</span>}
         {status === 'running' && <span className="tool-exit-code">{t('message.running')}</span>}
-        {status === 'completed' && <span className="tool-exit-code success">{t('message.completed')}</span>}
+        {status === 'completed' && exitCode !== undefined && (
+          <span className={`tool-exit-code ${exitCode === 0 ? 'success' : 'error'}`}>
+            {t('message.exitCode', { code: exitCode })}
+          </span>
+        )}
+        {status === 'completed' && exitCode === undefined && <span className="tool-exit-code success">{t('message.completed')}</span>}
         {status === 'error' && <span className="tool-exit-code error">{t('message.error')}</span>}
         {status === 'blocked' && <span className="tool-exit-code blocked">{t('message.blocked')}</span>}
         {status === 'aborted' && <span className="tool-exit-code aborted">{t('message.aborted')}</span>}
@@ -556,7 +579,7 @@ const ToolBlock = ({ toolCall, onStopStreaming }) => {
       </div>
       {effectiveExpanded && (result || (renderTerminal && ['pending', 'running'].includes(status))) && (
         <div className={`tool-output ${renderTerminal ? 'terminal-output' : ''}`}>
-          {renderTerminal ? <ToolTerminal output={result} /> : <pre>{result}</pre>}
+          {renderTerminal ? <ToolTerminal output={executeTerminalOutput(toolCall)} /> : <pre>{result}</pre>}
         </div>
       )}
     </div>

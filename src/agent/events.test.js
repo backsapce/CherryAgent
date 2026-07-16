@@ -49,6 +49,43 @@ test('agent events preserve separate model-step segments', () => {
   assert.equal(state.thinking, 'First reason.\n\nSecond reason.');
 });
 
+test('agent events retain streamed terminal output and exit metadata', () => {
+  let state = createAgentEventState();
+  state = applyAgentEvent(state, {
+    type: 'tool-call',
+    toolCallId: 'call-terminal',
+    toolName: 'execute_command',
+    input: { command: 'build' },
+  });
+  state = applyAgentEvent(state, {
+    type: 'tool-status',
+    toolCallId: 'call-terminal',
+    toolName: 'execute_command',
+    status: 'running',
+    terminalOutput: 'compiling...\n',
+  });
+  state = applyAgentEvent(state, {
+    type: 'tool-status',
+    toolCallId: 'call-terminal',
+    toolName: 'execute_command',
+    status: 'running',
+    terminalOutput: 'compiling...\ndone\n',
+    exitCode: 0,
+    cwd: 'workspace',
+  });
+  state = applyAgentEvent(state, {
+    type: 'tool-result',
+    toolCallId: 'call-terminal',
+    toolName: 'execute_command',
+    output: 'Exit code: 0\nStdout:\ncompiling...\ndone\n',
+  });
+
+  assert.equal(state.toolCalls[0].terminalOutput, 'compiling...\ndone\n');
+  assert.equal(state.toolCalls[0].exitCode, 0);
+  assert.equal(state.toolCalls[0].cwd, 'workspace');
+  assert.equal(state.toolCalls[0].status, 'completed');
+});
+
 test('agent events record a replayable run lifecycle and streamed tool input', () => {
   let state = createAgentEventState();
   const apply = (event) => {

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { createAgentRunManager, materializeRuntimeFiles, REMOTE_TOOL_SCHEMAS } from './agent-runtime.js';
+import { createAgentRunManager, createRuntimeToolDispatcher, materializeRuntimeFiles, REMOTE_TOOL_SCHEMAS } from './agent-runtime.js';
 
 function createManager(runsDir) {
   return createAgentRunManager({
@@ -20,6 +20,50 @@ test('sandbox runtime exposes no browser-owned tools', () => {
     REMOTE_TOOL_SCHEMAS.map((tool) => tool.name),
     ['execute_command', 'list_sandbox_files', 'read_sandbox_file', 'write_sandbox_file']
   );
+});
+
+test('sandbox command dispatch passes cancellation as an exec option', async () => {
+  const controller = new AbortController();
+  let received;
+  const dispatch = createRuntimeToolDispatcher({
+    execCommand: async (command, options) => {
+      received = { command, options };
+      options.onStdout('first\n');
+      options.onStderr('warning\n');
+      options.onStdout('last\n');
+      return { stdout: 'first\nlast\n', stderr: 'warning\n', code: 0 };
+    },
+    listFiles: async () => [],
+    readFile: async () => '',
+    writeFile: async () => {},
+  });
+
+  const updates = [];
+  const result = await dispatch(
+    'execute_command',
+    { command: 'printf ok' },
+    { signal: controller.signal, onToolUpdate: (update) => updates.push(update) }
+  );
+
+  assert.equal(received.command, 'printf ok');
+  assert.strictEqual(received.options.signal, controller.signal);
+  assert.match(result, /Exit code: 0/);
+  assert.match(result, /Stdout:\nfirst\nlast/);
+  assert.match(result, /Stderr:\nwarning/);
+  assert.equal(typeof received.options.onStdout, 'function');
+  assert.equal(typeof received.options.onStderr, 'function');
+  assert.deepEqual(updates.slice(0, -1), [
+    { stdout: 'first\n' },
+    { stderr: 'warning\n' },
+    { stdout: 'last\n' },
+  ]);
+  assert.deepEqual(updates.at(-1), {
+    exitCode: 0,
+    platform: undefined,
+    shell: undefined,
+    cwd: undefined,
+    filesRoot: undefined,
+  });
 });
 
 test('sandbox startup snapshot writes only missing identity and skill files', async () => {

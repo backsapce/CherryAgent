@@ -225,9 +225,47 @@ function isSameOrChildResolvedPath(path, parentPath) {
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-function execCommand(cmd, timeout = MAX_TIMEOUT) {
+function execCommand(cmd, { timeout = MAX_TIMEOUT, signal, onStdout, onStderr, onStart } = {}) {
+  if (onStdout || onStderr || onStart) {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let child;
+
+      const cleanup = () => signal?.removeEventListener('abort', abort);
+      const finish = (callback, value) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        callback(value);
+      };
+      const abort = () => {
+        child?.kill('SIGTERM');
+        finish(reject, new DOMException('Command execution aborted', 'AbortError'));
+      };
+
+      if (signal?.aborted) {
+        abort();
+        return;
+      }
+      signal?.addEventListener('abort', abort, { once: true });
+      child = streamCommand(cmd, {
+        onStart,
+        onStdout,
+        onStderr,
+        onError: (error) => finish(reject, error),
+        onExit: (result) => finish(resolve, result),
+      }, timeout);
+    });
+  }
+
   return new Promise((resolve) => {
-    exec(cmd, { timeout, maxBuffer: 10 * 1024 * 1024, shell: COMMAND_SHELL, cwd: WORKSPACE_DIR }, (error, stdout, stderr) => {
+    exec(cmd, {
+      timeout,
+      signal,
+      maxBuffer: 10 * 1024 * 1024,
+      shell: COMMAND_SHELL,
+      cwd: WORKSPACE_DIR,
+    }, (error, stdout, stderr) => {
       resolve({
         stdout: stdout || '',
         stderr: stderr || '',

@@ -310,16 +310,24 @@ function createAgentTools(schemas, toolContext, emit) {
 async function executeAgentTool({ toolCallId, toolName, input, signal, toolContext, emit }) {
   let streamingStdout = '';
   let streamingStderr = '';
+  let terminalOutput = '';
   const baseEvent = { toolCallId, toolName, input };
 
   const updateRunningOutput = (chunk) => {
     if (chunk?.stdout) streamingStdout = appendStreamingOutput(streamingStdout, chunk.stdout, 'stdout');
     if (chunk?.stderr) streamingStderr = appendStreamingOutput(streamingStderr, chunk.stderr, 'stderr');
+    if (chunk?.stdout) terminalOutput = appendStreamingOutput(terminalOutput, chunk.stdout, 'terminal');
+    if (chunk?.stderr) terminalOutput = appendStreamingOutput(terminalOutput, chunk.stderr, 'terminal');
     emit({
       type: 'tool-status',
       ...baseEvent,
       status: runningToolStatus(toolName),
-      output: formatStreamingCommandResult(streamingStdout, streamingStderr),
+      ...(terminalOutput ? { terminalOutput } : {}),
+      ...(chunk?.exitCode !== undefined ? { exitCode: chunk.exitCode } : {}),
+      ...(chunk?.platform ? { platform: chunk.platform } : {}),
+      ...(chunk?.shell ? { shell: chunk.shell } : {}),
+      ...(chunk?.cwd ? { cwd: chunk.cwd } : {}),
+      ...(chunk?.filesRoot ? { filesRoot: chunk.filesRoot } : {}),
     });
   };
 
@@ -615,13 +623,6 @@ function appendStreamingOutput(existing, chunk, streamName) {
   const notice = `[${streamName} streaming output trimmed to latest ${STREAMING_TOOL_OUTPUT_MAX_CHARS} chars]\n`;
   const tailBudget = Math.max(1, STREAMING_TOOL_OUTPUT_MAX_CHARS - notice.length);
   return `${notice}${combined.slice(-tailBudget)}`;
-}
-
-function formatStreamingCommandResult(stdout, stderr) {
-  let output = 'Running...';
-  if (stdout) output += `\nStdout:\n${stdout}`;
-  if (stderr) output += `\nStderr:\n${stderr}`;
-  return output;
 }
 
 function formatAbortResult(stdout, stderr) {

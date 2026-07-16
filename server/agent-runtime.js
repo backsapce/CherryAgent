@@ -79,19 +79,7 @@ export function createAgentRunManager({ runsDir, execCommand, listFiles, readFil
     }
   };
 
-  const dispatchTool = async (name, input, context) => {
-    if (name === 'execute_command') {
-      const result = await execCommand(input.command, context?.signal);
-      return JSON.stringify(result, null, 2);
-    }
-    if (name === 'list_sandbox_files') return JSON.stringify(await listFiles(input.path || ''), null, 2);
-    if (name === 'read_sandbox_file') return readFile(input.path);
-    if (name === 'write_sandbox_file') {
-      await writeFile(input.path, input.content);
-      return `Successfully wrote sandbox file ${input.path}`;
-    }
-    throw new Error(`Tool is unavailable in sandbox runtime: ${name}`);
-  };
+  const dispatchTool = createRuntimeToolDispatcher({ execCommand, listFiles, readFile, writeFile });
 
   const start = (input) => {
     validateRunInput(input);
@@ -169,6 +157,43 @@ export function createAgentRunManager({ runsDir, execCommand, listFiles, readFil
       return serializeRun(run);
     },
   };
+}
+
+export function createRuntimeToolDispatcher({ execCommand, listFiles, readFile, writeFile }) {
+  return async (name, input, context) => {
+    if (name === 'execute_command') {
+      const result = await execCommand(input.command, {
+        signal: context?.signal,
+        onStdout: (chunk) => context?.onToolUpdate?.({ stdout: chunk }),
+        onStderr: (chunk) => context?.onToolUpdate?.({ stderr: chunk }),
+      });
+      context?.onToolUpdate?.({
+        exitCode: result.code,
+        platform: result.platform,
+        shell: result.shell,
+        cwd: result.cwd,
+        filesRoot: result.filesRoot,
+      });
+      return formatCommandResult(result);
+    }
+    if (name === 'list_sandbox_files') return JSON.stringify(await listFiles(input.path || ''), null, 2);
+    if (name === 'read_sandbox_file') return readFile(input.path);
+    if (name === 'write_sandbox_file') {
+      await writeFile(input.path, input.content);
+      return `Successfully wrote sandbox file ${input.path}`;
+    }
+    throw new Error(`Tool is unavailable in sandbox runtime: ${name}`);
+  };
+}
+
+function formatCommandResult(result) {
+  let output = `Exit code: ${result.code}`;
+  if (result.platform || result.shell || result.cwd || result.filesRoot) {
+    output += `\nEnvironment: platform=${result.platform || 'unknown'}, shell=${result.shell || 'unknown'}, cwd=${result.cwd || 'unknown'}, filesRoot=${result.filesRoot || 'unknown'}`;
+  }
+  if (result.stdout) output += `\nStdout:\n${result.stdout}`;
+  if (result.stderr) output += `\nStderr:\n${result.stderr}`;
+  return output;
 }
 
 function validateRunInput(input) {
