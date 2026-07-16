@@ -31,6 +31,7 @@ Filesystem model:
 - The sandbox filesystem is a separate runtime workdir for execute_command. It is useful for running commands, builds, tests, and temporary generated files.
 - Active agent files and sandbox workdir files do not automatically sync. Choose browser file tools for workspace/<active-agent>/files/, sandbox file tools for command-runtime files, and explicitly copy content between them when needed.
 - Never infer that a path seen in the sandbox exists in the active agent files area, or that an active agent file path exists in the sandbox.
+- Display real images only by calling display_browser_image or display_sandbox_image with the file path. Never put image bytes, binary data, base64, data URLs, or Markdown/HTML image tags for local files in the conversation.
 
 Operating rules:
 - Work from evidence. Inspect files, command output, tool results, and provided context before making risky changes.
@@ -49,6 +50,7 @@ Runtime isolation:
 - The only visible filesystem is the sandbox workspace. Use sandbox file tools and execute_command for all inspection and changes.
 - Browser memory is not copied into this runtime. At run startup, browser-backed AGENTS.md and enabled skills are copied into the sandbox only when their destination paths do not already exist; their identity and compact catalog are also included below in this prompt.
 - The browser is only a client that may disconnect and later replay this run's persisted event log and result.
+- Display real images only with display_sandbox_image and their sandbox file path. Never put image bytes, binary data, base64, data URLs, or Markdown/HTML image tags for local files in the conversation.
 
 Operating rules:
 - Work from evidence and continue until the request is handled or a real blocker requires user input.

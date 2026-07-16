@@ -1,7 +1,7 @@
 import { forwardRef, lazy, Suspense, useImperativeHandle, useState, useRef, useEffect, useLayoutEffect, useMemo } from 'react';
 import { useI18n } from '../../i18n/context';
-import { getAgentDir, normalizeWorkspaceRelativePath } from '../../vfs/opfs';
-import { listFiles, readFileText } from '../../models/agent';
+import { getAgentDir, normalizeWorkspaceRelativePath, readAgentFileBlob } from '../../vfs/opfs';
+import { downloadE2bFile, downloadRemoteFile, E2B_AGENT_ID, listFiles, readFileText } from '../../models/agent';
 import { getSyncStatus, subscribeSyncStatus } from '../../sync/syncManager';
 import { ChevronRight, Settings as SettingsIcon, Folder, File, FileEdit, Copy, MessageSquare, Plus, X, Send, Stop, Plug, PieChart, Cloud, User, ImageGenerate, Refresh } from '../Icons/Icons';
 import ReactMarkdown from 'react-markdown';
@@ -30,7 +30,12 @@ const MARKDOWN_REHYPE_PLUGINS = [
 ];
 const MARKDOWN_COMPONENTS = {
   pre: CodeBlock,
+  img: BlockedMarkdownImage,
 };
+
+function BlockedMarkdownImage({ alt }) {
+  return <span className="blocked-markdown-image">[{alt || 'image'}: use an image display tool]</span>;
+}
 
 function contextSourceLabel(source) {
   return source === CONTEXT_SOURCE_SANDBOX ? 'sandbox' : 'workspace';
@@ -498,7 +503,83 @@ function executeTerminalOutput(toolCall) {
   return result;
 }
 
-const ToolBlock = ({ toolCall, onStopStreaming }) => {
+function parseImageReference(toolCall) {
+  if (!['display_browser_image', 'display_sandbox_image'].includes(toolCall?.name)) return null;
+  try {
+    const reference = JSON.parse(toolCall.result || '');
+    if (reference?.kind !== 'image_reference' || !reference.path) return null;
+    return {
+      ...reference,
+      alt: toolCall.parsedArgs?.alt || reference.name || reference.path,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function imageMimeFromPath(path) {
+  const extension = String(path || '').split('.').pop()?.toLowerCase();
+  if (extension === 'png') return 'image/png';
+  if (extension === 'jpg' || extension === 'jpeg') return 'image/jpeg';
+  if (extension === 'webp') return 'image/webp';
+  if (extension === 'gif') return 'image/gif';
+  if (extension === 'svg') return 'image/svg+xml';
+  if (extension === 'bmp') return 'image/bmp';
+  return '';
+}
+
+const ToolImageReference = ({ reference, agentId, sandboxUrl }) => {
+  const [imageUrl, setImageUrl] = useState('');
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    let disposed = false;
+    let objectUrl = '';
+    setImageUrl('');
+    setError('');
+
+    const load = async () => {
+      try {
+        let blob;
+        if (reference.source === 'browser') {
+          if (!agentId) throw new Error('Browser agent workspace is unavailable.');
+          blob = await readAgentFileBlob(agentId, reference.path);
+        } else if (reference.source === 'sandbox') {
+          if (!sandboxUrl) throw new Error('Sandbox runtime is disconnected.');
+          blob = sandboxUrl === E2B_AGENT_ID
+            ? await downloadE2bFile(reference.path)
+            : await downloadRemoteFile(reference.path, sandboxUrl);
+        } else {
+          throw new Error(`Unsupported image source: ${reference.source}`);
+        }
+
+        if (disposed) return;
+        const mimeType = reference.mime_type || blob.type || imageMimeFromPath(reference.path);
+        const displayBlob = blob.type || !mimeType ? blob : new Blob([blob], { type: mimeType });
+        objectUrl = URL.createObjectURL(displayBlob);
+        setImageUrl(objectUrl);
+      } catch (loadError) {
+        if (!disposed) setError(loadError?.message || String(loadError));
+      }
+    };
+
+    void load();
+    return () => {
+      disposed = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [agentId, reference.mime_type, reference.path, reference.source, sandboxUrl]);
+
+  if (error) return <div className="tool-image-error">{error}</div>;
+  if (!imageUrl) return <div className="tool-image-loading">Loading image…</div>;
+  return (
+    <a className="tool-image-link" href={imageUrl} target="_blank" rel="noreferrer">
+      <img className="tool-image" src={imageUrl} alt={reference.alt} />
+    </a>
+  );
+};
+
+const ToolBlock = ({ toolCall, onStopStreaming, agentId, sandboxUrl }) => {
   const { t } = useI18n();
   const isLegacyExecute = !!toolCall?.cmd;
   const isRunningExecute = isLegacyExecute
@@ -540,6 +621,7 @@ const ToolBlock = ({ toolCall, onStopStreaming }) => {
   const showShutdown = name === 'execute_command' && ['pending', 'running'].includes(status) && onStopStreaming;
   const renderTerminal = name === 'execute_command';
   const isImageGeneration = isImageGenerationToolName(name);
+  const imageReference = parseImageReference(toolCall);
   const label = renderTerminal ? t('message.execute') : (isImageGeneration ? t('message.imageGeneration') : name);
 
   return (
@@ -577,6 +659,11 @@ const ToolBlock = ({ toolCall, onStopStreaming }) => {
           </button>
         )}
       </div>
+      {imageReference && (
+        <div className="tool-image-artifact">
+          <ToolImageReference reference={imageReference} agentId={agentId} sandboxUrl={sandboxUrl} />
+        </div>
+      )}
       {effectiveExpanded && (result || (renderTerminal && ['pending', 'running'].includes(status))) && (
         <div className={`tool-output ${renderTerminal ? 'terminal-output' : ''}`}>
           {renderTerminal ? <ToolTerminal output={executeTerminalOutput(toolCall)} /> : <pre>{result}</pre>}
@@ -1207,6 +1294,8 @@ const MessagePanel = forwardRef(({
                       key={tc.id || i}
                       toolCall={tc}
                       onStopStreaming={onStopStreaming}
+                      agentId={agentId}
+                      sandboxUrl={selectedAgentUrl}
                     />
                   ))
                 )}

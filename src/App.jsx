@@ -74,10 +74,11 @@ Filesystem model:
 - Browser file tools cannot access other agents, OPFS root files, AGENTS.md, memory files, or skill files by path.
 - Use the skill tool for catalog/read operations, and skill file tools for explicit edits under workspace/<active-agent>/skills/.
 - The sandbox filesystem is only the runtime workdir for execute_command. It is separate from browser OPFS and does not automatically contain AGENTS.md, memory, skills, or browser workspace files.
-- Use browser file tools only for persistent files in the active agent's files area: list_browser_files, read_browser_file, read_browser_image, write_browser_file.
+- Use browser file tools only for persistent files in the active agent's files area: list_browser_files, read_browser_file, display_browser_image, write_browser_file.
 - Use skill file tools only for active-agent skills: list_skill_files, read_skill_file, write_skill_file.
-- Use sandbox file tools only for files created or needed inside the command runtime: list_sandbox_files, read_sandbox_file, read_sandbox_image, write_sandbox_file.
+- Use sandbox file tools only for files created or needed inside the command runtime: list_sandbox_files, read_sandbox_file, display_sandbox_image, write_sandbox_file.
 - If data must move between the active agent files area and sandbox runtime, explicitly read from one side and write to the other side.
+- To show an image to the user, always call display_browser_image or display_sandbox_image with its real file path. Never emit Markdown/HTML image tags for local paths, and never place image bytes, binary data, base64, or data URLs in a response or tool result.
 
 Work rules:
 - Inspect the correct filesystem before editing when current state matters.
@@ -86,7 +87,7 @@ Work rules:
 - Use sub-agents only for bounded independent work.
 - When tools fail, use the error output to choose the next useful step.`;
 
-const SANDBOX_AGENT_SYSTEM_PROMPT = `You are running fully inside the selected sandbox. Browser operations, browser OPFS, browser files, browser memory mutation, browser skill mutation, and sub-agent delegation are unavailable. A startup snapshot of the browser agent identity and enabled skills is available as AGENTS.md and skills/ when those paths did not already exist. Use only execute_command and sandbox file tools. The browser may disconnect without stopping this run.`;
+const SANDBOX_AGENT_SYSTEM_PROMPT = `You are running fully inside the selected sandbox. Browser operations, browser OPFS, browser files, browser memory mutation, browser skill mutation, and sub-agent delegation are unavailable. A startup snapshot of the browser agent identity and enabled skills is available as AGENTS.md and skills/ when those paths did not already exist. Use only execute_command and sandbox file tools. To show an image, always call display_sandbox_image with its real sandbox path; never emit Markdown/HTML image tags for local paths and never put image bytes, binary data, base64, or data URLs in the conversation. The browser may disconnect without stopping this run.`;
 
 const FILE_CONTEXT_MARKER = 'Selected file context:';
 const TOOL_HISTORY_MARKER = 'Tool calls performed during this assistant turn:';

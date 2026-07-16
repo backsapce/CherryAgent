@@ -2298,6 +2298,7 @@ export async function getAgentFileInfo(agentId, path) {
   const file = await fileHandle.getFile();
   return {
     name: file.name,
+    type: file.type,
     size: file.size,
     lastModified: file.lastModified,
   };

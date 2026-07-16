@@ -41,6 +41,19 @@ const REMOTE_TOOL_SCHEMAS = [
     },
   },
   {
+    name: 'display_sandbox_image',
+    description: 'Display an image from the sandbox runtime in the browser conversation UI. Returns only a file reference; image bytes and base64 are never included in the conversation.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Image path relative to the sandbox workspace.' },
+        alt: { type: 'string', description: 'Short accessible description of the image.' },
+      },
+      required: ['path'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'write_sandbox_file',
     description: 'Write a UTF-8 text file in the sandbox runtime.',
     parameters: {
@@ -178,12 +191,46 @@ export function createRuntimeToolDispatcher({ execCommand, listFiles, readFile, 
     }
     if (name === 'list_sandbox_files') return JSON.stringify(await listFiles(input.path || ''), null, 2);
     if (name === 'read_sandbox_file') return readFile(input.path);
+    if (name === 'display_sandbox_image') {
+      const { parent, filename } = splitFilePath(input.path);
+      const listing = await listFiles(parent);
+      const entries = Array.isArray(listing) ? listing : listing?.children;
+      const entry = entries?.find((item) => item.name === filename);
+      if (!entry || entry.type === 'directory') return `Sandbox image not found: ${input.path}`;
+      const mimeType = inferImageMime(input.path);
+      if (!mimeType) return `Unsupported image type: ${input.path}`;
+      return JSON.stringify({
+        kind: 'image_reference',
+        source: 'sandbox',
+        path: input.path,
+        name: entry.name,
+        mime_type: mimeType,
+        ...(Number.isFinite(entry.size) ? { size: entry.size } : {}),
+      });
+    }
     if (name === 'write_sandbox_file') {
       await writeFile(input.path, input.content);
       return `Successfully wrote sandbox file ${input.path}`;
     }
     throw new Error(`Tool is unavailable in sandbox runtime: ${name}`);
   };
+}
+
+function splitFilePath(path) {
+  const parts = String(path || '').replace(/\\/g, '/').split('/').filter(Boolean);
+  const filename = parts.pop() || '';
+  return { parent: parts.join('/'), filename };
+}
+
+function inferImageMime(path) {
+  const extension = String(path || '').split('.').pop()?.toLowerCase();
+  if (extension === 'png') return 'image/png';
+  if (extension === 'jpg' || extension === 'jpeg') return 'image/jpeg';
+  if (extension === 'webp') return 'image/webp';
+  if (extension === 'gif') return 'image/gif';
+  if (extension === 'svg') return 'image/svg+xml';
+  if (extension === 'bmp') return 'image/bmp';
+  return '';
 }
 
 function formatCommandResult(result) {
