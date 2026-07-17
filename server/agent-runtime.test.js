@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { createAgentRunManager, createRuntimeToolDispatcher, materializeRuntimeFiles, REMOTE_TOOL_SCHEMAS } from './agent-runtime.js';
+import { createAgentRunManager, createRuntimeToolDispatcher, materializeMessageImages, materializeRuntimeFiles, REMOTE_TOOL_SCHEMAS } from './agent-runtime.js';
 
 function createManager(runsDir) {
   return createAgentRunManager({
@@ -111,6 +111,42 @@ test('sandbox startup snapshot rejects paths outside identity and skills', async
     ),
     /AGENTS\.md or skills/
   );
+});
+
+test('message images are materialized as binary sandbox attachments with model-visible paths', async () => {
+  const stored = new Map();
+  const messages = [{
+    id: 'user/message 1',
+    role: 'user',
+    content: 'Use this image',
+    images: [{ name: 'source photo.png', dataUrl: 'data:image/png;base64,aGVsbG8=' }],
+  }];
+
+  const result = await materializeMessageImages(messages, {
+    fileExists: async (path) => stored.has(path),
+    writeFile: async (path, content) => stored.set(path, content),
+  });
+
+  const path = 'attachments/user-message-1/1-source-photo.png';
+  assert.equal(stored.get(path).toString('utf8'), 'hello');
+  assert.match(result[0].content, /Sandbox attachment files/);
+  assert.match(result[0].content, new RegExp(path));
+  assert.equal(result[0].images[0].dataUrl, messages[0].images[0].dataUrl);
+});
+
+test('existing sandbox attachments are reused on later runs', async () => {
+  let writes = 0;
+  const result = await materializeMessageImages([{
+    id: 'stable-id',
+    role: 'user',
+    images: [{ name: 'photo.jpg', dataUrl: 'data:image/jpeg;base64,aGVsbG8=' }],
+  }], {
+    fileExists: async () => true,
+    writeFile: async () => { writes += 1; },
+  });
+
+  assert.equal(writes, 0);
+  assert.match(result[0].content, /attachments\/stable-id\/1-photo\.jpg/);
 });
 
 test('persisted runs and event logs can be recovered after reconnect', () => {
