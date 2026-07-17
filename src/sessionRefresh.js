@@ -7,11 +7,15 @@ function timestampFromGeneratedId(id) {
 
 function sessionTimestamp(session) {
   if (Number.isFinite(session?.updatedAtMs)) return session.updatedAtMs;
-  const messageTimes = (session?.messages || []).map((message) => timestampFromGeneratedId(message.id));
-  return Math.max(timestampFromGeneratedId(session?.id), ...messageTimes, 0);
+  let latest = timestampFromGeneratedId(session?.id);
+  for (const message of session?.messages || []) {
+    latest = Math.max(latest, timestampFromGeneratedId(message.id));
+  }
+  return latest;
 }
 
 function sessionDataChanged(left, right) {
+  if (left === right) return false;
   return JSON.stringify(left) !== JSON.stringify(right);
 }
 

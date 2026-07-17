@@ -285,7 +285,11 @@ function App() {
         sessionsRef.current,
         persistedBeforeRefresh
       );
-      persistedSessionsRef.current = snapshotSessions(savedSessions);
+      // The freshly loaded objects are already an immutable persisted
+      // baseline. Sharing them avoids cloning the entire history during sync
+      // refresh; React replaces changed session branches instead of mutating
+      // this baseline.
+      persistedSessionsRef.current = savedSessions;
       // Reconcile again inside the functional update. React may have accepted
       // streaming chunks or another local edit while OPFS was being read, and
       // sessionsRef intentionally only updates after a committed render.
@@ -382,8 +386,10 @@ function App() {
               const sorted = recoveryJournal
                 ? reconcileSessionRecoveryJournal(sortedSaved, recoveryJournal).sessions
                 : sortedSaved;
-              const persistedSnapshot = snapshotSessions(sortedSaved);
-              persistedSessionsRef.current = persistedSnapshot;
+              // Keep the loaded value itself as the initial immutable
+              // baseline. Deep-cloning hundreds of MB of history here can
+              // exhaust the tab before the first render.
+              persistedSessionsRef.current = sortedSaved;
               // Even a stale recovery journal gets one normal save. Only that
               // durable save is allowed to clear the isolated checkpoint.
               skipNextSessionSaveRef.current = recoveryJournal ? null : sorted;
@@ -1529,6 +1535,7 @@ function App() {
             refreshTrigger={storageVersion}
             width={fileManageWidth}
             onWidthChange={setFileManageWidth}
+            sandboxUrl={activeSandboxUrl}
           />
         </Suspense>
       )}

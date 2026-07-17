@@ -36,6 +36,20 @@ let sessionMetadataWriteSnapshot = null;
 const sessionMessageWriteSnapshots = new Map();
 let sessionWriteCacheRoot = null;
 
+// Keep only a compact change fingerprint here. Retaining the full serialized
+// message body duplicated every conversation (including image data URLs) for
+// the lifetime of the tab and made session persistence a major heap consumer.
+function sessionMessageFingerprint(serialized) {
+  let hashA = 0x811c9dc5;
+  let hashB = 0x9e3779b9;
+  for (let index = 0; index < serialized.length; index += 1) {
+    const code = serialized.charCodeAt(index);
+    hashA = Math.imul(hashA ^ code, 0x01000193);
+    hashB = Math.imul(hashB ^ code, 0x85ebca6b);
+  }
+  return `${serialized.length}:${hashA >>> 0}:${hashB >>> 0}`;
+}
+
 async function ensureSessionWriteCacheRoot(root) {
   let sameRoot = root === sessionWriteCacheRoot;
   if (!sameRoot && root?.isSameEntry && sessionWriteCacheRoot) {
@@ -196,10 +210,14 @@ async function readSessionJSON(dirHandle, filename) {
  * @param {any} data
  */
 async function writeJSON(dirHandle, filename, data, options = {}) {
+  return writeSerializedJSON(dirHandle, filename, JSON.stringify(data, null, 2), options);
+}
+
+async function writeSerializedJSON(dirHandle, filename, serialized, options = {}) {
   const fileHandle = await dirHandle.getFileHandle(filename, { create: true });
   const writable = await fileHandle.createWritable();
   try {
-    await writable.write(JSON.stringify(data, null, 2));
+    await writable.write(serialized);
     await writable.close();
   } catch (error) {
     try { await writable.abort?.(); } catch { /* preserve the original error */ }
@@ -727,33 +745,54 @@ export async function loadSessions() {
   const sessionDir = await getDirectory(SESSIONS_DIR);
   let legacyDir = null;
 
-  const loaded = await Promise.all(
-    sessions.map(async (session) => {
-      if (session?.id == null) throw new Error(`${SESSION_FILE} contains a session without an id`);
-      let messages = await readSessionJSON(sessionDir, `${session.id}.json`);
-      const loadedPrimaryMessages = messages !== MISSING_SESSION_JSON;
-      if (messages === MISSING_SESSION_JSON) {
-        legacyDir ||= await getDirectory(LEGACY_MESSAGES_DIR);
-        messages = await readSessionJSON(legacyDir, `${session.id}.json`);
+  const loaded = new Array(sessions.length);
+  let nextSessionIndex = 0;
+  let loadError = null;
+  const loadWorkers = Array.from(
+    // file.text() and JSON.parse() temporarily hold both the serialized body
+    // and parsed messages. Loading every session with Promise.all doubled the
+    // peak for large histories, so keep that transient working set bounded.
+    { length: Math.min(2, sessions.length) },
+    async () => {
+      while (!loadError && nextSessionIndex < sessions.length) {
+        const index = nextSessionIndex;
+        nextSessionIndex += 1;
+        const session = sessions[index];
+        try {
+          if (session?.id == null) {
+            throw new Error(`${SESSION_FILE} contains a session without an id`);
+          }
+          let messages = await readSessionJSON(sessionDir, `${session.id}.json`);
+          const loadedPrimaryMessages = messages !== MISSING_SESSION_JSON;
+          if (messages === MISSING_SESSION_JSON) {
+            legacyDir ||= await getDirectory(LEGACY_MESSAGES_DIR);
+            messages = await readSessionJSON(legacyDir, `${session.id}.json`);
+          }
+          if (messages !== MISSING_SESSION_JSON && !Array.isArray(messages)) {
+            throw new Error(`Session messages for ${session.id} must contain a JSON array`);
+          }
+          loaded[index] = {
+            session: {
+              ...session,
+              messages: messages === MISSING_SESSION_JSON ? [] : messages,
+            },
+            loadedPrimaryMessages,
+          };
+        } catch (error) {
+          loadError ||= error;
+        }
       }
-      if (messages !== MISSING_SESSION_JSON && !Array.isArray(messages)) {
-        throw new Error(`Session messages for ${session.id} must contain a JSON array`);
-      }
-      return {
-        session: {
-          ...session,
-          messages: messages === MISSING_SESSION_JSON ? [] : messages,
-        },
-        loadedPrimaryMessages,
-      };
-    })
+    }
   );
+  await Promise.all(loadWorkers);
+  if (loadError) throw loadError;
 
   sessionMetadataWriteSnapshot = loadedPrimaryIndex ? JSON.stringify(sessions) : null;
   sessionMessageWriteSnapshots.clear();
   for (const { session, loadedPrimaryMessages } of loaded) {
     if (loadedPrimaryMessages) {
-      sessionMessageWriteSnapshots.set(String(session.id), JSON.stringify(session.messages || []));
+      const serialized = JSON.stringify(session.messages || []);
+      sessionMessageWriteSnapshots.set(String(session.id), sessionMessageFingerprint(serialized));
     }
   }
   return loaded.map(({ session }) => session);
@@ -784,21 +823,26 @@ export async function saveSessions(sessions) {
   const changedPaths = [];
   const metadataChanged = metadataSnapshot !== sessionMetadataWriteSnapshot;
 
-  const changedMessages = [...nextMessagesById].filter(([id, messages]) => (
-    JSON.stringify(messages) !== sessionMessageWriteSnapshots.get(id)
-  ));
+  const messageEntries = [...nextMessagesById];
+  const writtenMessageSnapshots = [];
   let nextIndex = 0;
   let firstError = null;
   const workers = Array.from(
-    { length: Math.min(8, changedMessages.length) },
+    // Each worker temporarily owns a serialized conversation. Two workers
+    // keep OPFS responsive without multiplying large image/chat bodies eightfold.
+    { length: Math.min(2, messageEntries.length) },
     async () => {
-      while (!firstError && nextIndex < changedMessages.length) {
+      while (!firstError && nextIndex < messageEntries.length) {
         const index = nextIndex;
         nextIndex += 1;
-        const [id, messages] = changedMessages[index];
+        const [id, messages] = messageEntries[index];
         try {
-          await writeJSON(sessionDir, `${id}.json`, messages, { internal: true });
+          const serialized = JSON.stringify(messages);
+          const fingerprint = sessionMessageFingerprint(serialized);
+          if (fingerprint === sessionMessageWriteSnapshots.get(id)) continue;
+          await writeSerializedJSON(sessionDir, `${id}.json`, serialized, { internal: true });
           changedPaths.push(`${SESSIONS_DIR}/${id}.json`);
+          writtenMessageSnapshots.push([id, fingerprint]);
         } catch (err) {
           firstError ||= err;
         }
@@ -817,8 +861,8 @@ export async function saveSessions(sessions) {
 
   notifyOpfsMutation(changedPaths, 'write');
   if (changedPaths.includes(SESSION_FILE)) sessionMetadataWriteSnapshot = metadataSnapshot;
-  for (const [id, messages] of changedMessages) {
-    sessionMessageWriteSnapshots.set(id, JSON.stringify(messages));
+  for (const [id, fingerprint] of writtenMessageSnapshots) {
+    sessionMessageWriteSnapshots.set(id, fingerprint);
   }
 }
 

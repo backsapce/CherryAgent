@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { executeCommand } from './agent.js';
+import { executeCommand, listFiles, listRemoteFiles } from './agent.js';
 
 function installBrowserMocks(WebSocketMock, fetchMock) {
   const previous = {
@@ -71,6 +71,38 @@ test('executeCommand does not retry after submitting a command over WebSocket', 
       /Agent WebSocket connection failed/
     );
     assert.equal(fetchCalls, 0);
+  } finally {
+    restore();
+  }
+});
+
+test('sandbox file requests route configured loopback hosts through the page proxy', async () => {
+  let requestedUrl = null;
+  const restore = installBrowserMocks(undefined, async (url) => {
+    requestedUrl = url;
+    return { ok: true, json: async () => [] };
+  });
+  window.location.href = 'https://192.168.1.20:5173/';
+  window.location.origin = 'https://192.168.1.20:5173';
+
+  try {
+    await listRemoteFiles('', 'http://localhost:3099');
+    assert.equal(requestedUrl, '/agent/files');
+  } finally {
+    restore();
+  }
+});
+
+test('sandbox file requests honor an explicit session sandbox URL', async () => {
+  let requestedUrl = null;
+  const restore = installBrowserMocks(undefined, async (url) => {
+    requestedUrl = url;
+    return { ok: true, json: async () => [] };
+  });
+
+  try {
+    await listFiles('src', 'https://sandbox.example');
+    assert.equal(requestedUrl, 'https://sandbox.example/agent/files?path=src');
   } finally {
     restore();
   }

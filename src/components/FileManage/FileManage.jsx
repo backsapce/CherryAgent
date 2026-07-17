@@ -44,7 +44,7 @@ function readDraggedTreeItem(dataTransfer) {
   }
 }
 
-const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange }) => {
+const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandboxUrl }) => {
   const { t } = useI18n();
   const [fileSource, setFileSource] = useState('local');
   const [isMobile, setIsMobile] = useState(false);
@@ -91,36 +91,36 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange }) => 
       download: (name, path) => getFileBlob(name, path || null),
       upload: (name, blob, path) => saveFile(name, blob, path || null),
     } : {
-      list: () => listFiles(''),
-      createFile: (name, path) => createRemoteFile(joinFileManagerPath(path, name), '', false),
-      createDir: (name, path) => createRemoteFile(joinFileManagerPath(path, name), '', true),
+      list: () => listFiles('', sandboxUrl),
+      createFile: (name, path) => createRemoteFile(joinFileManagerPath(path, name), '', false, sandboxUrl),
+      createDir: (name, path) => createRemoteFile(joinFileManagerPath(path, name), '', true, sandboxUrl),
       delete: (name, path) => {
         const fullPath = joinFileManagerPath(path, name);
-        return deleteRemoteFile(fullPath);
+        return deleteRemoteFile(fullPath, sandboxUrl);
       },
       move: (item, targetPath) => {
         const fullTargetPath = joinFileManagerPath(targetPath, item.name);
-        return moveRemoteFile(item.path, fullTargetPath);
+        return moveRemoteFile(item.path, fullTargetPath, sandboxUrl);
       },
       download: (name, path) => {
         const fullPath = joinFileManagerPath(path, name);
-        return downloadRemoteFile(fullPath);
+        return downloadRemoteFile(fullPath, sandboxUrl);
       },
       upload: (name, file, path) => {
         const fullPath = joinFileManagerPath(path, name);
-        return uploadRemoteFile(fullPath, file);
+        return uploadRemoteFile(fullPath, file, sandboxUrl);
       },
     };
-  }, [fileSource]);
+  }, [fileSource, sandboxUrl]);
 
   const listDirectoryChildren = useCallback(async (path) => {
     const dirPath = normalizeFileManagerPath(path);
     let children = fileSource === 'local'
       ? await loadFiles(dirPath)
-      : await listFiles(dirPath);
+      : await listFiles(dirPath, sandboxUrl);
     if (!Array.isArray(children) && children?.children) children = children.children;
     return Array.isArray(children) ? children : [];
-  }, [fileSource]);
+  }, [fileSource, sandboxUrl]);
 
   const hydrateExpandedDirs = useCallback(async (rootDir, expandedIds) => {
     const existingDirIds = new Set([ROOT_ID]);
@@ -736,7 +736,7 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange }) => 
       {!isMobile && (
         <div className={`filemanage-resize-handle ${isResizing ? 'resizing' : ''}`} onMouseDown={handleMouseDown} />
       )}
-      <FileEditor show={editorOpen} onClose={handleEditorClose} fileName={editingFile?.fileName} filePath={editingFile?.filePath} fileSource={fileSource} onSave={handleEditorSave} />
+      <FileEditor show={editorOpen} onClose={handleEditorClose} fileName={editingFile?.fileName} filePath={editingFile?.filePath} fileSource={fileSource} sandboxUrl={sandboxUrl} onSave={handleEditorSave} />
     </div>
     </>
   );
