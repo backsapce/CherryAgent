@@ -9,6 +9,9 @@ const MAX_EVENT_BYTES = 20 * 1024 * 1024;
 const MAX_RUNTIME_FILES = 500;
 const MAX_RUNTIME_FILE_BYTES = 256 * 1024;
 const MAX_RUNTIME_FILES_BYTES = 10 * 1024 * 1024;
+const MAX_SANDBOX_IMAGE_BYTES = 6 * 1024 * 1024;
+const MAX_SANDBOX_IMAGES_BYTES = 64 * 1024 * 1024;
+const SANDBOX_ATTACHMENTS_MARKER = 'Sandbox attachment files (available to shell commands and sandbox file tools):';
 
 const REMOTE_TOOL_SCHEMAS = [
   {
@@ -117,9 +120,10 @@ export function createAgentRunManager({ runsDir, execCommand, listFiles, readFil
     Promise.resolve().then(async () => {
       try {
         await materializeRuntimeFiles(input.runtimeContext?.sandboxFiles, { fileExists, readFile, writeFile });
+        const runtimeMessages = await materializeMessageImages(input.messages, { fileExists, writeFile });
         const modelConfig = input.modelConfig;
         const result = await runAgentLoop({
-          messages: input.messages,
+          messages: runtimeMessages,
           systemPrompt: input.systemPrompt || '',
           agentId: input.agentId || null,
           provider: modelConfig.provider,
@@ -170,6 +174,76 @@ export function createAgentRunManager({ runsDir, execCommand, listFiles, readFil
       return serializeRun(run);
     },
   };
+}
+
+function sandboxImageExtension(mimeType) {
+  const extensions = {
+    'image/jpeg': 'jpg',
+    'image/png': 'png',
+    'image/gif': 'gif',
+    'image/webp': 'webp',
+    'image/bmp': 'bmp',
+    'image/svg+xml': 'svg',
+  };
+  return extensions[String(mimeType || '').toLowerCase()] || 'img';
+}
+
+function safeAttachmentSegment(value, fallback) {
+  const safe = String(value || '')
+    .replace(/[^a-zA-Z0-9._-]+/g, '-')
+    .replace(/^[-.]+|[-.]+$/g, '')
+    .slice(0, 80);
+  return safe || fallback;
+}
+
+function decodeImageDataUrl(dataUrl) {
+  const match = String(dataUrl || '').match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,([a-zA-Z0-9+/=\s]+)$/);
+  if (!match) return null;
+  const content = Buffer.from(match[2].replace(/\s/g, ''), 'base64');
+  if (content.length === 0 || content.length > MAX_SANDBOX_IMAGE_BYTES) return null;
+  return { mimeType: match[1].toLowerCase(), content };
+}
+
+/**
+ * Copy multimodal message images into stable sandbox paths and tell the model
+ * where they are. The original image parts remain in the message, so the model
+ * can both see the image and pass its local path to command-line tools.
+ */
+export async function materializeMessageImages(messages = [], { fileExists, writeFile }) {
+  let totalBytes = 0;
+  const output = [];
+
+  for (let messageIndex = 0; messageIndex < messages.length; messageIndex += 1) {
+    const message = messages[messageIndex];
+    const images = Array.isArray(message?.images) ? message.images : [];
+    const attachmentLines = [];
+
+    for (let imageIndex = 0; imageIndex < images.length; imageIndex += 1) {
+      const decoded = decodeImageDataUrl(images[imageIndex]?.dataUrl);
+      if (!decoded || totalBytes + decoded.content.length > MAX_SANDBOX_IMAGES_BYTES) continue;
+      totalBytes += decoded.content.length;
+
+      const messageId = safeAttachmentSegment(message?.id, `message-${messageIndex + 1}`);
+      const originalStem = String(images[imageIndex]?.name || `image-${imageIndex + 1}`).replace(/\.[^.]*$/, '');
+      const fileStem = safeAttachmentSegment(originalStem, `image-${imageIndex + 1}`);
+      const path = `attachments/${messageId}/${imageIndex + 1}-${fileStem}.${sandboxImageExtension(decoded.mimeType)}`;
+      const exists = fileExists ? await fileExists(path) : false;
+      if (!exists) await writeFile(path, decoded.content);
+      attachmentLines.push(`- Image ${imageIndex + 1}: ${path}`);
+    }
+
+    if (attachmentLines.length === 0) {
+      output.push(message);
+      continue;
+    }
+
+    const content = [String(message.content || ''), SANDBOX_ATTACHMENTS_MARKER, ...attachmentLines]
+      .filter(Boolean)
+      .join('\n\n');
+    output.push({ ...message, content });
+  }
+
+  return output;
 }
 
 export function createRuntimeToolDispatcher({ execCommand, listFiles, readFile, writeFile }) {
