@@ -2,6 +2,8 @@ import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { useI18n } from '../../i18n/context';
 import { loadFiles, saveFile, createFile, createDirectory, deleteFile as deleteLocalFile, moveFile as moveLocalFile, getFileBlob } from '../../vfs/opfs';
 import { listFiles, createFile as createRemoteFile, deleteFile as deleteRemoteFile, moveFile as moveRemoteFile, uploadFile as uploadRemoteFile, downloadFile as downloadRemoteFile } from '../../models/agent';
+import { suspendAutoSync, waitForSyncIdle } from '../../sync/syncManager';
+import { enqueueStorageOperation } from '../Settings/storageOperationQueue';
 import { ChevronRight, ChevronDown, Folder, File, FilePlus, FolderPlus, Refresh, X, Upload, Cloud, HardDrive, Trash, Download, FileEdit, Spinner, MultiSelect } from '../Icons/Icons';
 import FileEditor from './FileEditor';
 import { joinFileManagerPath, normalizeFileManagerPath } from './pathUtils';
@@ -201,15 +203,29 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange }) => 
     const fileArray = Array.from(files);
     let successCount = 0;
     let failCount = 0;
+    // A sync hashes OPFS files into in-memory ArrayBuffers. Writing a browser
+    // File at the same time can keep both copies alive and has caused the tab
+    // process to be killed before JavaScript can report an exception. Local
+    // uploads therefore wait outside the active sync window. Remote sandbox
+    // uploads use separate storage and do not need this barrier.
+    const resumeAutoSync = fileSource === 'local' ? suspendAutoSync() : null;
 
     try {
-      for (const file of fileArray) {
-        try {
-          await fileOps.upload(file.name, file, targetPath);
-          successCount++;
-        } catch { failCount++; }
-      }
-      await refreshTree();
+      const performUploads = async () => {
+        if (fileSource === 'local') await waitForSyncIdle();
+        for (const file of fileArray) {
+          try {
+            await fileOps.upload(file.name, file, targetPath);
+            successCount++;
+          } catch { failCount++; }
+        }
+        await refreshTree();
+      };
+      // Join the same queue used by manual sync/import/reset. Besides waiting
+      // for an already-running sync, this prevents a newly clicked manual sync
+      // from starting halfway through a local upload batch.
+      if (fileSource === 'local') await enqueueStorageOperation(performUploads);
+      else await performUploads();
 
       if (failCount === 0) alert(t('filemanage.uploadSuccess').replace('{count}', successCount));
       else if (successCount > 0) alert(t('filemanage.uploadPartialSuccess').replace('{success}', successCount).replace('{fail}', failCount));
@@ -217,6 +233,7 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange }) => 
     } catch {
       alert(fileSource === 'local' ? t('filemanage.uploadLocalError') : t('filemanage.uploadRemoteError'));
     } finally {
+      resumeAutoSync?.();
       setUploading(false);
     }
   }, [fileOps, refreshTree, fileSource, t]);

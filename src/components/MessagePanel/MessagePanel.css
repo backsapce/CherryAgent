@@ -393,6 +393,10 @@
   max-width: 860px;
   margin-left: auto;
   margin-right: auto;
+  /* Long conversations otherwise keep every Markdown/code subtree in the
+     mobile layout and paint pipeline while the user types. */
+  content-visibility: auto;
+  contain-intrinsic-block-size: auto 160px;
 }
 
 .message-avatar {

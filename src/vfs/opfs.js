@@ -373,22 +373,40 @@ export async function listOpfsFiles(options = {}) {
   const files = [];
 
   async function walk(dir, prefix = '') {
-    for (const { name, kind } of await listEntries(dir)) {
+    const entries = await listEntries(dir);
+    const fileTasks = [];
+    const dirTasks = [];
+    for (const { name, kind } of entries) {
       const path = prefix ? `${prefix}/${name}` : name;
       if (!options.includeSync && isInternalSyncPath(path)) continue;
       if (kind === 'directory') {
-        await walk(await dir.getDirectoryHandle(name), path);
-        continue;
+        // Recurse subdirectories concurrently. Each branch pushes its own
+        // results, so the only ordering guarantee is that a directory's
+        // direct files precede its descendants' files; all callers consume
+        // the list as a set, never depending on traversal order.
+        dirTasks.push((async () => {
+          await walk(await dir.getDirectoryHandle(name), path);
+        })());
+      } else {
+        // getFile() returns a lazy File reference (metadata only, no content
+        // buffered), so reading many files concurrently stays memory-safe.
+        fileTasks.push((async () => {
+          const file = await (await dir.getFileHandle(name)).getFile();
+          return { path, file, hash: options.hash ? await hashBlob(file) : null };
+        })());
       }
-      const file = await (await dir.getFileHandle(name)).getFile();
+    }
+    const fileResults = await Promise.all(fileTasks);
+    for (const { path, file, hash } of fileResults) {
       files.push({
         path,
         size: file.size,
         lastModified: file.lastModified,
-        hash: options.hash ? await hashBlob(file) : null,
+        hash,
         ...(options.includeBlob ? { blob: file } : {}),
       });
     }
+    await Promise.all(dirTasks);
   }
 
   await walk(root);

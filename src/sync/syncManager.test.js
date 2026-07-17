@@ -58,8 +58,22 @@ test('transfer concurrency defaults to four and is bounded', () => {
 test('large files reduce concurrency to bound browser memory pressure', () => {
   const config = { maxConcurrentRequests: 8 };
   assert.equal(maxConcurrentRequestsForEntries(config, [{ size: 1024 }]), 8);
+  assert.equal(maxConcurrentRequestsForEntries(config, [{ size: 12 * 1024 * 1024 }]), 2);
   assert.equal(maxConcurrentRequestsForEntries(config, [{ size: 16 * 1024 * 1024 }]), 2);
   assert.equal(maxConcurrentRequestsForEntries(config, [{ size: 64 * 1024 * 1024 }]), 1);
+});
+
+test('mobile devices use a smaller request and payload working set', () => {
+  const previousMatchMedia = globalThis.matchMedia;
+  globalThis.matchMedia = () => ({ matches: true });
+  try {
+    const config = { maxConcurrentRequests: 8 };
+    assert.equal(maxConcurrentRequests(config), 2);
+    assert.equal(maxConcurrentRequestsForEntries(config, [{ size: 12 * 1024 * 1024 }]), 1);
+  } finally {
+    if (previousMatchMedia) globalThis.matchMedia = previousMatchMedia;
+    else delete globalThis.matchMedia;
+  }
 });
 
 test('transfer scheduler waits for started work after an error', async () => {
