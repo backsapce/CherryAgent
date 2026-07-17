@@ -55,6 +55,13 @@ const MAX_PAYLOAD_DEDUPE_CACHE_BYTES = 64 * 1024 * 1024;
 const CONFIG_REDACTION_VERSION = 3;
 const LARGE_FILE_BYTES = 16 * 1024 * 1024;
 const VERY_LARGE_FILE_BYTES = 64 * 1024 * 1024;
+// WebCrypto hashing and S3 response handling materialize payloads as
+// ArrayBuffers. Keep their combined working set bounded as well as limiting
+// the raw request count; otherwise several medium files can exhaust a browser
+// process even though none of them crosses the "large file" threshold.
+const MAX_CONCURRENT_PAYLOAD_BYTES = 32 * 1024 * 1024;
+const CONSTRAINED_MAX_CONCURRENT_PAYLOAD_BYTES = 12 * 1024 * 1024;
+const CONSTRAINED_MAX_CONCURRENT_REQUESTS = 2;
 const SHARD_ATTEMPT_ID_HEX_LENGTH = 16;
 
 let unsubscribeHook = null;
@@ -123,15 +130,41 @@ export function syncResultChangedLocal(result) {
 
 function maxConcurrentRequests(syncConfig = {}) {
   const requested = Number(syncConfig.maxConcurrentRequests);
-  if (!Number.isFinite(requested)) return DEFAULT_MAX_CONCURRENT_REQUESTS;
-  return Math.min(MAX_CONCURRENT_REQUESTS, Math.max(1, Math.floor(requested)));
+  const configured = !Number.isFinite(requested)
+    ? DEFAULT_MAX_CONCURRENT_REQUESTS
+    : Math.min(MAX_CONCURRENT_REQUESTS, Math.max(1, Math.floor(requested)));
+  return isConstrainedSyncDevice()
+    ? Math.min(CONSTRAINED_MAX_CONCURRENT_REQUESTS, configured)
+    : configured;
+}
+
+function isConstrainedSyncDevice() {
+  const navigatorInfo = globalThis.navigator;
+  const deviceMemory = Number(navigatorInfo?.deviceMemory);
+  const hardwareConcurrency = Number(navigatorInfo?.hardwareConcurrency);
+  if (Number.isFinite(deviceMemory) && deviceMemory > 0 && deviceMemory <= 4) return true;
+  if (Number.isFinite(hardwareConcurrency) && hardwareConcurrency > 0 && hardwareConcurrency <= 4) return true;
+  try {
+    return Boolean(globalThis.matchMedia?.('(max-width: 768px) and (pointer: coarse)').matches);
+  } catch {
+    return false;
+  }
 }
 
 function maxConcurrentRequestsForEntries(syncConfig = {}, entries = []) {
   const configured = maxConcurrentRequests(syncConfig);
+  const payloadBudget = isConstrainedSyncDevice()
+    ? CONSTRAINED_MAX_CONCURRENT_PAYLOAD_BYTES
+    : MAX_CONCURRENT_PAYLOAD_BYTES;
   const largest = entries.reduce((max, entry) => Math.max(max, Number(entry?.size) || 0), 0);
   if (largest >= VERY_LARGE_FILE_BYTES) return 1;
-  if (largest >= LARGE_FILE_BYTES) return Math.min(2, configured);
+  if (largest > 0) {
+    return Math.min(
+      largest >= LARGE_FILE_BYTES ? 2 : configured,
+      configured,
+      Math.max(1, Math.floor(payloadBudget / largest))
+    );
+  }
   return configured;
 }
 

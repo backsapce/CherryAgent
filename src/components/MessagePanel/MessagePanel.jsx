@@ -18,6 +18,7 @@ const Settings = lazy(() => import('../Settings/Settings'));
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024; // 4 MB target (well under 10 MB API limit)
 const MAX_DIMENSION = 2048;
 const MESSAGE_HISTORY_PAGE_SIZE = 100;
+const MOBILE_MESSAGE_HISTORY_PAGE_SIZE = 40;
 const AUTO_SCROLL_BOTTOM_THRESHOLD = 48;
 const LOAD_HISTORY_TOP_THRESHOLD = 24;
 const SCROLL_DIRECTION_EPSILON = 2;
@@ -32,6 +33,16 @@ const MARKDOWN_COMPONENTS = {
   pre: CodeBlock,
   img: BlockedMarkdownImage,
 };
+
+function messageHistoryPageSize() {
+  try {
+    return window.matchMedia('(max-width: 768px)').matches
+      ? MOBILE_MESSAGE_HISTORY_PAGE_SIZE
+      : MESSAGE_HISTORY_PAGE_SIZE;
+  } catch {
+    return MESSAGE_HISTORY_PAGE_SIZE;
+  }
+}
 
 function BlockedMarkdownImage({ alt }) {
   return <span className="blocked-markdown-image">[{alt || 'image'}: use an image display tool]</span>;
@@ -742,7 +753,7 @@ const MessagePanel = forwardRef(({
   const [mentionActiveIndex, setMentionActiveIndex] = useState(0);
   const [showSettings, setShowSettings] = useState(false);
   const [syncStatus, setSyncStatus] = useState(() => getSyncStatus());
-  const [visibleMessageCount, setVisibleMessageCount] = useState(MESSAGE_HISTORY_PAGE_SIZE);
+  const [visibleMessageCount, setVisibleMessageCount] = useState(messageHistoryPageSize);
   const messageListRef = useRef(null);
   const shouldAutoScrollRef = useRef(true);
   const scrollRafRef = useRef(null);
@@ -798,7 +809,7 @@ const MessagePanel = forwardRef(({
 
   useEffect(() => {
     shouldAutoScrollRef.current = true;
-    setVisibleMessageCount(MESSAGE_HISTORY_PAGE_SIZE);
+    setVisibleMessageCount(messageHistoryPageSize());
     if (scrollRafRef.current) cancelAnimationFrame(scrollRafRef.current);
     scrollRafRef.current = requestAnimationFrame(() => {
       const list = messageListRef.current;
@@ -839,7 +850,7 @@ const MessagePanel = forwardRef(({
         scrollTop: list.scrollTop,
       };
       shouldAutoScrollRef.current = false;
-      setVisibleMessageCount((count) => Math.min(messages.length, count + MESSAGE_HISTORY_PAGE_SIZE));
+      setVisibleMessageCount((count) => Math.min(messages.length, count + messageHistoryPageSize()));
     }
     if (isScrollingUp) {
       shouldAutoScrollRef.current = false;
