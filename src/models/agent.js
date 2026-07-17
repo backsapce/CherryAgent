@@ -23,7 +23,8 @@ const DEFAULT_AGENT_PATH = '/agent';
 function resolveAgentUrl(url) {
   if (!url) return DEFAULT_AGENT_PATH;
   const u = url.replace(/\/+$/, '');
-  return u.endsWith('/agent') ? u : `${u}/agent`;
+  const endpoint = u.endsWith('/agent') ? u : `${u}/agent`;
+  return isLoopbackAgentUrl(endpoint) ? DEFAULT_AGENT_PATH : endpoint;
 }
 
 function resolveAgentWsUrl(url) {
@@ -42,7 +43,7 @@ function resolveAgentWsUrl(url) {
 function isLoopbackAgentUrl(url) {
   if (!url) return true;
   try {
-    const parsed = new URL(resolveAgentUrl(url), window.location.href);
+    const parsed = new URL(url, window.location.href);
     return ['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname)
       && (parsed.port === '3099' || parsed.pathname.startsWith('/agent'));
   } catch {
@@ -479,8 +480,8 @@ export async function listFiles(path = '', url = getSelectedAgent()) {
  * @param {boolean} [isDirectory] - If true, creates a directory
  * @returns {Promise<{success: boolean, message: string}>}
  */
-export async function createFile(path, content = '', isDirectory = false) {
-  const selected = getSelectedAgent();
+export async function createFile(path, content = '', isDirectory = false, url = getSelectedAgent()) {
+  const selected = url;
   if (selected === E2B_AGENT_ID) {
     return isDirectory ? createE2bDir(path) : createE2bFile(path, content);
   }
@@ -492,8 +493,8 @@ export async function createFile(path, content = '', isDirectory = false) {
  * @param {string} path - Path relative to files root
  * @returns {Promise<{success: boolean, message: string}>}
  */
-export async function deleteFile(path) {
-  const selected = getSelectedAgent();
+export async function deleteFile(path, url = getSelectedAgent()) {
+  const selected = url;
   if (selected === E2B_AGENT_ID) {
     return deleteE2bFile(path);
   }
@@ -506,8 +507,8 @@ export async function deleteFile(path) {
  * @param {string} targetPath - Destination path relative to files root
  * @returns {Promise<{success: boolean, message: string}>}
  */
-export async function moveFile(sourcePath, targetPath) {
-  const selected = getSelectedAgent();
+export async function moveFile(sourcePath, targetPath, url = getSelectedAgent()) {
+  const selected = url;
   if (selected === E2B_AGENT_ID) {
     return moveE2bFile(sourcePath, targetPath);
   }
@@ -520,8 +521,8 @@ export async function moveFile(sourcePath, targetPath) {
  * @param {Blob|File} file - The file to upload
  * @returns {Promise<{success: boolean, message: string}>}
  */
-export async function uploadFile(path, file) {
-  const selected = getSelectedAgent();
+export async function uploadFile(path, file, url = getSelectedAgent()) {
+  const selected = url;
   if (selected === E2B_AGENT_ID) {
     return uploadE2bFile(path, file);
   }
@@ -533,8 +534,8 @@ export async function uploadFile(path, file) {
  * @param {string} path - Path relative to files root
  * @returns {Promise<Blob>}
  */
-export async function downloadFile(path) {
-  const selected = getSelectedAgent();
+export async function downloadFile(path, url = getSelectedAgent()) {
+  const selected = url;
   if (selected === E2B_AGENT_ID) {
     return downloadE2bFile(path);
   }

@@ -243,6 +243,32 @@ test('session deletion stays committed when orphan-body cleanup fails', async ()
   );
 });
 
+test('unchanged session messages are not rewritten after save or reload', async () => {
+  const origin = useMemoryOpfs();
+  const sessions = [{
+    id: 'stable',
+    title: 'Stable',
+    messages: [{ role: 'user', content: 'large body '.repeat(1000) }],
+  }];
+
+  await saveSessions(sessions);
+  const appRoot = await origin.getDirectoryHandle('vertex-agent');
+  const sessionDir = await appRoot.getDirectoryHandle('sessions');
+  const bodyHandle = await sessionDir.getFileHandle('stable.json');
+  const firstModified = bodyHandle.lastModified;
+
+  await saveSessions(structuredClone(sessions));
+  assert.equal(bodyHandle.lastModified, firstModified);
+
+  const reloaded = await loadSessions();
+  await saveSessions(structuredClone(reloaded));
+  assert.equal(bodyHandle.lastModified, firstModified);
+
+  reloaded[0].messages.push({ role: 'assistant', content: 'changed' });
+  await saveSessions(reloaded);
+  assert.ok(bodyHandle.lastModified > firstModified);
+});
+
 test('session recovery journal round-trips strictly and remains local to .sync', async () => {
   useMemoryOpfs();
   const baseline = [{ id: 'one', title: 'Before', messages: [] }];

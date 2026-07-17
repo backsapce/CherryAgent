@@ -24,7 +24,7 @@ const EDITABLE_EXTENSIONS = [
   'dockerfile', 'makefile', 'cmake', 'r', 'm', 'swift', 'kt', 'kts'
 ];
 
-const FileEditor = ({ show, onClose, fileName, filePath, fileSource, onSave }) => {
+const FileEditor = ({ show, onClose, fileName, filePath, fileSource, sandboxUrl, onSave }) => {
   const { t } = useI18n();
   const [content, setContent] = useState('');
   const [loading, setLoading] = useState(false);
@@ -83,7 +83,7 @@ const FileEditor = ({ show, onClose, fileName, filePath, fileSource, onSave }) =
       loadFileContent();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [show, fileName, filePath, fileSource]);
+  }, [show, fileName, filePath, fileSource, sandboxUrl]);
 
   const loadFileContent = async () => {
     setLoading(true);
@@ -96,7 +96,7 @@ const FileEditor = ({ show, onClose, fileName, filePath, fileSource, onSave }) =
         fileContent = await readFileContent(fileName, filePath);
       } else {
         const path = filePath ? `${filePath}/${fileName}` : fileName;
-        fileContent = await readFileText(path);
+        fileContent = await readFileText(path, sandboxUrl);
       }
 
       setContent(fileContent || '');
@@ -121,7 +121,7 @@ const FileEditor = ({ show, onClose, fileName, filePath, fileSource, onSave }) =
         await saveFileContent(fileName, content, filePath);
       } else {
         const path = filePath ? `${filePath}/${fileName}` : fileName;
-        await writeFile(path, content);
+        await writeFile(path, content, sandboxUrl);
       }
 
       setOriginalContent(content);
@@ -144,7 +144,7 @@ const FileEditor = ({ show, onClose, fileName, filePath, fileSource, onSave }) =
     } finally {
       setSaving(false);
     }
-  }, [fileName, filePath, fileSource, content, onSave, t]);
+  }, [fileName, filePath, fileSource, sandboxUrl, content, onSave, t]);
 
   const handleContentChange = useCallback((newContent) => {
     setContent(newContent);
