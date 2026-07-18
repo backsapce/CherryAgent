@@ -928,6 +928,42 @@ registry.register({
 });
 
 registry.register({
+  name: 'schedule_wakeup',
+  category: 'automation',
+  schema: {
+    description:
+      'Schedule one future continuation of the current conversation. Use this instead of blocking or repeatedly polling during a long-running task. When the delay expires, the saved prompt is added to this conversation and the agent runs again. If the task is still pending after waking, schedule another wake-up. The browser page must be open to fire on time; an overdue wake-up fires once when the app is opened again.',
+    parameters: {
+      type: 'object',
+      properties: {
+        delay_seconds: {
+          type: 'integer',
+          minimum: 5,
+          maximum: 604800,
+          description: 'Seconds from now to wake the agent, from 5 seconds through 7 days.',
+        },
+        prompt: {
+          type: 'string',
+          description: 'A self-contained instruction describing what to inspect or continue when the agent wakes.',
+        },
+      },
+      required: ['delay_seconds', 'prompt'],
+      additionalProperties: false,
+    },
+  },
+  checkAvailable: (ctx) => typeof ctx?.scheduleWakeup === 'function',
+  async handler({ delay_seconds: delaySeconds, prompt }, ctx) {
+    const wakeup = await ctx.scheduleWakeup({ delaySeconds, prompt });
+    return JSON.stringify({
+      scheduled: true,
+      wakeup_id: wakeup.id,
+      run_at: new Date(wakeup.runAtMs).toISOString(),
+      prompt: wakeup.prompt,
+    });
+  },
+});
+
+registry.register({
   name: 'spawn_agent',
   category: 'agents',
   schema: {
