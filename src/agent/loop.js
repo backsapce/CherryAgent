@@ -50,6 +50,8 @@ const FINALIZE_PROMPT =
  * @param {Function} [opts.onPermissionRequest] Optional approval callback for
  * repeated identical tool calls. It receives a doom-loop request and must
  * resolve to `true` to allow the call; without it, repeated calls are blocked.
+ * @param {Function} [opts.scheduleWakeup] Persists a future continuation for
+ * the current conversation. When omitted, the scheduling tool is hidden.
  * @param {AbortSignal} [opts.signal]
  * @param {number} [opts.maxRounds]
  * @returns {Promise<{ content: string, thinking: string, toolCalls: Array, usage: Object|null }>}
@@ -80,6 +82,7 @@ export async function runAgentLoop(opts) {
     agentId,
     llmProfileId: opts.llmProfileId,
     subAgentDepth,
+    scheduleWakeup: opts.scheduleWakeup,
   });
   const toolContext = {
     agentUrl,
@@ -93,6 +96,7 @@ export async function runAgentLoop(opts) {
     subAgentDepth,
     signal,
     onPermissionRequest,
+    scheduleWakeup: opts.scheduleWakeup,
     toolLoopGuard: createToolLoopGuard(),
     dispatchTool: opts.dispatchTool || ((name, input, context) => registry.dispatch(name, input, context)),
   };

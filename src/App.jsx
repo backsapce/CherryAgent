@@ -31,6 +31,7 @@ import {
   sortSessions,
 } from './sessionRefresh';
 import { createSessionSaveCoordinator } from './sessionPersistence';
+import { buildWakeupMessage, createWakeup, findNextWakeup } from './agent/wakeup';
 import { WifiOff, ChevronRight } from './components/Icons/Icons';
 import './App.css';
 
@@ -96,9 +97,10 @@ Work rules:
 - Do not answer with a promise like "I will inspect/read/create/run". If the next step needs a tool, call the tool in the same response.
 - Be careful with destructive actions and ask before irreversible operations.
 - Use sub-agents only for bounded independent work.
+- For a long-running external task that is not ready yet, use schedule_wakeup to continue later instead of blocking or repeatedly polling in the same turn. Include a self-contained instruction for the future turn.
 - When tools fail, use the error output to choose the next useful step.`;
 
-const SANDBOX_AGENT_SYSTEM_PROMPT = `You are running fully inside the selected sandbox. Browser operations, browser OPFS, browser files, browser memory mutation, browser skill mutation, and sub-agent delegation are unavailable. A startup snapshot of the browser agent identity and enabled skills is available as AGENTS.md and skills/ when those paths did not already exist. Images attached to user messages are copied into the sandbox under attachments/; each image message includes its exact local path, which can be passed to curl and other command-line tools. Use only execute_command and sandbox file tools. To show an image, always call display_sandbox_image with its real sandbox path; never emit Markdown/HTML image tags for local paths and never put image bytes, binary data, base64, or data URLs in the conversation. The browser may disconnect without stopping this run.`;
+const SANDBOX_AGENT_SYSTEM_PROMPT = `You are running fully inside the selected sandbox. Browser operations, browser OPFS, browser files, browser memory mutation, browser skill mutation, and sub-agent delegation are unavailable. A startup snapshot of the browser agent identity and enabled skills is available as AGENTS.md and skills/ when those paths did not already exist. Images attached to user messages are copied into the sandbox under attachments/; each image message includes its exact local path, which can be passed to curl and other command-line tools. Use execute_command, sandbox file tools, and schedule_wakeup. For a long-running external task that is not ready, schedule a future continuation instead of blocking or repeatedly polling; the agent server keeps the run alive while the browser is disconnected. To show an image, always call display_sandbox_image with its real sandbox path; never emit Markdown/HTML image tags for local paths and never put image bytes, binary data, base64, or data URLs in the conversation. The browser may disconnect without stopping this run.`;
 
 const FILE_CONTEXT_MARKER = 'Selected file context:';
 const TOOL_HISTORY_MARKER = 'Tool calls performed during this assistant turn:';
@@ -219,11 +221,13 @@ function App() {
   const abortRef = useRef(null);
   const remoteRunRef = useRef(null);
   const resumedRemoteRunsRef = useRef(new Set());
+  const resumingWaitingRunsRef = useRef(new Set());
   const remoteDiscoveryRef = useRef(new Set());
   const streamCompletionRef = useRef(null);
   const factoryResetInProgressRef = useRef(false);
   const startupRecoveryBusyRef = useRef(false);
   const pendingStreamStartsRef = useRef(new Map());
+  const claimedWakeupIdsRef = useRef(new Set());
   const streamingContentRef = useRef('');  // accumulates chunks outside React state
   const streamingThinkingRef = useRef(''); // accumulates thinking/reasoning chunks
   const rafRef = useRef(null);            // requestAnimationFrame id for UI sync
@@ -849,7 +853,13 @@ function App() {
           for (const event of remoteRun.events || []) applyStreamEvent(event);
           setSessions((prev) => prev.map((session) => session.id === sessionId ? {
             ...session,
-            remoteRun: { id: remoteRun.id, url: sandboxUrl, replyId, status: remoteRun.status },
+            remoteRun: {
+              id: remoteRun.id,
+              url: sandboxUrl,
+              replyId,
+              status: remoteRun.status,
+              ...(remoteRun.wakeup ? { wakeup: remoteRun.wakeup } : {}),
+            },
           } : session));
           if (remoteRun.status === 'running') {
             await new Promise((resolve, reject) => {
@@ -861,7 +871,9 @@ function App() {
             });
           }
         }
-        if (remoteRun.status !== 'completed') throw new Error(remoteRun.error || `Sandbox run ${remoteRun.status}`);
+        if (!['completed', 'waiting'].includes(remoteRun.status)) {
+          throw new Error(remoteRun.error || `Sandbox run ${remoteRun.status}`);
+        }
         result = remoteRun.result;
       } else {
         result = await runAgentLoop({
@@ -874,6 +886,23 @@ function App() {
           model: activeConfig.model,
           contextWindow: activeConfig.contextWindow,
           llmProfileId,
+          scheduleWakeup: async ({ delaySeconds, prompt }) => {
+            const wakeup = createWakeup({
+              id: generateId(),
+              delaySeconds,
+              prompt,
+            });
+            setSessions((prev) => sortSessions(prev.map((session) => (
+              session.id === sessionId
+                ? {
+                    ...session,
+                    wakeups: [...(session.wakeups || []), wakeup],
+                    ...sessionTimeFields(),
+                  }
+                : session
+            ))));
+            return wakeup;
+          },
           onEvent: applyStreamEvent,
         });
       }
@@ -955,6 +984,38 @@ function App() {
     })().catch((error) => console.warn('Remote agent run resume failed:', error));
   }, [agentList, loaded, sessions, streamResponse]);
 
+  // A waiting sandbox run is owned by the agent server, so it does not keep
+  // the browser UI in streaming mode. Reattach around its scheduled time.
+  useEffect(() => {
+    if (!loaded || abortRef.current || pendingStreamStartsRef.current.size > 0) return undefined;
+    const session = sessions
+      .filter((item) => item.remoteRun?.status === 'waiting' && item.remoteRun?.wakeup?.runAtMs)
+      .sort((a, b) => a.remoteRun.wakeup.runAtMs - b.remoteRun.wakeup.runAtMs)[0];
+    if (!session || resumingWaitingRunsRef.current.has(session.remoteRun.id)) return undefined;
+
+    const delay = Math.max(0, session.remoteRun.wakeup.runAtMs - Date.now());
+    const timerId = setTimeout(() => {
+      if (abortRef.current || pendingStreamStartsRef.current.size > 0) return;
+      resumingWaitingRunsRef.current.add(session.remoteRun.id);
+      void (async () => {
+        try {
+          const messages = session.messages || await loadSessionMessages(session.id);
+          await streamResponse(session.id, messages, {
+            agentId: session.agentId,
+            llmProfileId: session.llmProfileId,
+            sandboxUrl: session.remoteRun.url,
+            resumeRunId: session.remoteRun.id,
+            replyId: session.remoteRun.replyId,
+          });
+        } finally {
+          resumingWaitingRunsRef.current.delete(session.remoteRun.id);
+        }
+      })().catch((error) => console.warn('Waiting sandbox run resume failed:', error));
+    }, Math.min(Math.max(delay, 250), 2_147_483_647));
+
+    return () => clearTimeout(timerId);
+  }, [loaded, sessions, streamResponse]);
+
   // A page can close in the narrow interval before the returned run id is
   // flushed to OPFS. Discover server-owned runs by session id as a fallback.
   useEffect(() => {
@@ -989,7 +1050,8 @@ function App() {
               replyId: latest.replyId,
               // Mark completed discoveries as pending once so streamResponse
               // fetches their event log and durable result.
-              status: 'running',
+              status: latest.status === 'waiting' ? 'waiting' : 'running',
+              ...(latest.wakeup ? { wakeup: latest.wakeup } : {}),
             },
           };
         }));
@@ -1019,6 +1081,14 @@ function App() {
   const sendMessageNow = useCallback(
     (text, images, contextFiles, targetSessionId = activeSessionId) => {
       if (factoryResetInProgressRef.current) return;
+
+      // A new user turn in the same conversation supersedes its sleeping
+      // continuation. This prevents the server from later resuming with a
+      // stale message snapshot while the new turn is already in progress.
+      const waitingRemote = sessionsRef.current.find((item) => item.id === targetSessionId)?.remoteRun;
+      if (waitingRemote?.status === 'waiting') {
+        void abortRemoteAgentRun(waitingRemote.url, waitingRemote.id).catch(() => {});
+      }
 
       if (!targetSessionId) {
         // Auto-create a session if none selected
@@ -1071,6 +1141,69 @@ function App() {
     },
     [activeSessionId, scheduleStreamResponse, lastAgentId, agentList, currentLlmProfileId, getAgentDefaultLlmId]
   );
+
+  // Wake-ups are persisted in session metadata. Only the next one needs an
+  // in-memory timer; overdue work is picked up once after the app is reopened.
+  useEffect(() => {
+    if (!loaded || factoryResetInProgressRef.current) return undefined;
+
+    const next = findNextWakeup(sessions, claimedWakeupIdsRef.current);
+    if (!next) return undefined;
+
+    const delay = Math.max(0, next.wakeup.runAtMs - Date.now());
+    const timerId = setTimeout(() => {
+      if (
+        streaming
+        || abortRef.current
+        || pendingStreamStartsRef.current.size > 0
+        || factoryResetInProgressRef.current
+      ) return;
+
+      const { session: scheduledSession, wakeup } = next;
+      claimedWakeupIdsRef.current.add(wakeup.id);
+
+      void (async () => {
+        try {
+          const currentSession = sessionsRef.current.find((item) => item.id === scheduledSession.id);
+          if (!currentSession) return;
+          const messages = currentSession.messages || await loadSessionMessages(currentSession.id);
+          // Loading a metadata-only session is asynchronous. Another turn may
+          // have started in that gap, so leave this wake-up pending for retry.
+          if (abortRef.current || pendingStreamStartsRef.current.size > 0) {
+            claimedWakeupIdsRef.current.delete(wakeup.id);
+            return;
+          }
+          const wakeMessage = {
+            id: generateId(),
+            role: 'user',
+            content: buildWakeupMessage(wakeup),
+          };
+          const nextMessages = [...messages, wakeMessage];
+
+          setSessions((prev) => sortSessions(prev.map((item) => {
+            if (item.id !== currentSession.id) return item;
+            return {
+              ...item,
+              messages: nextMessages,
+              wakeups: (item.wakeups || []).filter((candidate) => candidate.id !== wakeup.id),
+              lastMessage: wakeMessage.content.slice(0, 60),
+              ...sessionTimeFields(),
+            };
+          })));
+
+          scheduleStreamResponse(currentSession.id, nextMessages, {
+            agentId: currentSession.agentId,
+            llmProfileId: currentSession.llmProfileId,
+          });
+        } catch (error) {
+          claimedWakeupIdsRef.current.delete(wakeup.id);
+          console.warn('Scheduled wake-up failed:', error);
+        }
+      })();
+    }, Math.min(delay, 2_147_483_647));
+
+    return () => clearTimeout(timerId);
+  }, [loaded, scheduleStreamResponse, sessions, streaming]);
 
   const handleSendMessage = useCallback(
     (text, images, contextFiles) => {

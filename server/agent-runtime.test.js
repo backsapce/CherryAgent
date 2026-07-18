@@ -18,8 +18,33 @@ function createManager(runsDir) {
 test('sandbox runtime exposes no browser-owned tools', () => {
   assert.deepEqual(
     REMOTE_TOOL_SCHEMAS.map((tool) => tool.name),
-    ['execute_command', 'list_sandbox_files', 'read_sandbox_file', 'display_sandbox_image', 'write_sandbox_file']
+    ['execute_command', 'list_sandbox_files', 'read_sandbox_file', 'display_sandbox_image', 'write_sandbox_file', 'schedule_wakeup']
   );
+});
+
+test('sandbox wake-up dispatch delegates scheduling to the run manager', async () => {
+  const dispatch = createRuntimeToolDispatcher({
+    execCommand: async () => ({ stdout: '', stderr: '', code: 0 }),
+    listFiles: async () => [],
+    readFile: async () => '',
+    writeFile: async () => {},
+  });
+  const result = JSON.parse(await dispatch('schedule_wakeup', {
+    delay_seconds: 30,
+    prompt: 'check build',
+  }, {
+    scheduleWakeup: async ({ delaySeconds, prompt }) => ({
+      id: 'wake-one',
+      runAtMs: 31_000,
+      prompt: `${prompt}:${delaySeconds}`,
+    }),
+  }));
+  assert.deepEqual(result, {
+    scheduled: true,
+    wakeup_id: 'wake-one',
+    run_at: '1970-01-01T00:00:31.000Z',
+    prompt: 'check build:30',
+  });
 });
 
 test('sandbox image display returns a reference without image content', async () => {
@@ -175,7 +200,7 @@ test('persisted runs and event logs can be recovered after reconnect', () => {
   }
 });
 
-test('a server restart marks an in-flight run as interrupted', () => {
+test('a server restart marks an in-flight or waiting run as interrupted', () => {
   const runsDir = mkdtempSync(join(tmpdir(), 'vertex-runs-'));
   try {
     writeFileSync(join(runsDir, 'run-active.json'), JSON.stringify({
@@ -186,9 +211,20 @@ test('a server restart marks an in-flight run as interrupted', () => {
       updatedAt: '2026-01-01T00:00:00.000Z',
       sequence: 0,
     }));
-    const recovered = createManager(runsDir).get('run-active');
-    assert.equal(recovered.status, 'interrupted');
-    assert.match(recovered.error, /server restarted/i);
+    writeFileSync(join(runsDir, 'run-waiting.json'), JSON.stringify({
+      id: 'run-waiting',
+      sessionId: 'session-one',
+      status: 'waiting',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      sequence: 0,
+    }));
+    const manager = createManager(runsDir);
+    for (const id of ['run-active', 'run-waiting']) {
+      const recovered = manager.get(id);
+      assert.equal(recovered.status, 'interrupted');
+      assert.match(recovered.error, /server restarted/i);
+    }
   } finally {
     rmSync(runsDir, { recursive: true, force: true });
   }

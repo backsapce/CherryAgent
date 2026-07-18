@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createLanguageModel } from '../src/models/ai.js';
 import { runAgentLoop } from '../src/agent/loop.js';
+import { buildWakeupMessage, createWakeup } from '../src/agent/wakeup.js';
 
 const MAX_MESSAGES = 2_000;
 const MAX_EVENT_BYTES = 20 * 1024 * 1024;
@@ -66,6 +67,27 @@ const REMOTE_TOOL_SCHEMAS = [
       additionalProperties: false,
     },
   },
+  {
+    name: 'schedule_wakeup',
+    description: 'Schedule one future continuation of this sandbox agent run. Use this instead of blocking or repeatedly polling. The agent server waits without using LLM tokens, then continues with the saved prompt. If the task is still pending after waking, schedule another wake-up.',
+    parameters: {
+      type: 'object',
+      properties: {
+        delay_seconds: {
+          type: 'integer',
+          minimum: 5,
+          maximum: 604800,
+          description: 'Seconds from now to continue, from 5 seconds through 7 days.',
+        },
+        prompt: {
+          type: 'string',
+          description: 'A self-contained instruction describing what to inspect or continue after waking.',
+        },
+      },
+      required: ['delay_seconds', 'prompt'],
+      additionalProperties: false,
+    },
+  },
 ];
 
 export function createAgentRunManager({ runsDir, execCommand, listFiles, readFile, writeFile, fileExists }) {
@@ -120,25 +142,58 @@ export function createAgentRunManager({ runsDir, execCommand, listFiles, readFil
     Promise.resolve().then(async () => {
       try {
         await materializeRuntimeFiles(input.runtimeContext?.sandboxFiles, { fileExists, readFile, writeFile });
-        const runtimeMessages = await materializeMessageImages(input.messages, { fileExists, writeFile });
+        let runtimeMessages = await materializeMessageImages(input.messages, { fileExists, writeFile });
         const modelConfig = input.modelConfig;
-        const result = await runAgentLoop({
-          messages: runtimeMessages,
-          systemPrompt: input.systemPrompt || '',
-          agentId: input.agentId || null,
-          provider: modelConfig.provider,
-          model: modelConfig.model,
-          contextWindow: modelConfig.contextWindow || undefined,
-          maxRounds: input.maxRounds,
-          signal: run.controller.signal,
-          languageModel: createLanguageModel(modelConfig),
-          runtimeContext: normalizeRuntimeContext(input.runtimeContext),
-          toolSchemas: REMOTE_TOOL_SCHEMAS,
-          dispatchTool,
-          autoSummarize: false,
-          runtimeMode: 'sandbox',
-          onEvent: (event) => emit(run, event),
-        });
+        let result;
+        while (true) {
+          let scheduledWakeup = null;
+          result = await runAgentLoop({
+            messages: runtimeMessages,
+            systemPrompt: input.systemPrompt || '',
+            agentId: input.agentId || null,
+            provider: modelConfig.provider,
+            model: modelConfig.model,
+            contextWindow: modelConfig.contextWindow || undefined,
+            maxRounds: input.maxRounds,
+            signal: run.controller.signal,
+            languageModel: createLanguageModel(modelConfig),
+            runtimeContext: normalizeRuntimeContext(input.runtimeContext),
+            toolSchemas: REMOTE_TOOL_SCHEMAS,
+            dispatchTool,
+            scheduleWakeup: async ({ delaySeconds, prompt }) => {
+              if (scheduledWakeup) throw new Error('Only one wake-up can be scheduled per agent turn.');
+              scheduledWakeup = createWakeup({
+                id: `wake-${randomUUID()}`,
+                delaySeconds,
+                prompt,
+              });
+              return scheduledWakeup;
+            },
+            autoSummarize: false,
+            runtimeMode: 'sandbox',
+            onEvent: (event) => emit(run, event),
+          });
+
+          run.result = result;
+          if (!scheduledWakeup) break;
+
+          run.status = 'waiting';
+          run.wakeup = scheduledWakeup;
+          run.updatedAt = new Date().toISOString();
+          persist(run);
+          await waitForWakeup(scheduledWakeup.runAtMs, run.controller.signal);
+
+          run.status = 'running';
+          run.wakeup = null;
+          run.updatedAt = new Date().toISOString();
+          persist(run);
+          runtimeMessages = [
+            ...runtimeMessages,
+            { role: 'assistant', content: result.content || 'A future continuation was scheduled.' },
+            { role: 'user', content: buildWakeupMessage(scheduledWakeup) },
+          ];
+          if (runtimeMessages.length > MAX_MESSAGES) throw new Error('Scheduled run exceeded the message limit.');
+        }
         run.status = 'completed';
         run.result = result;
       } catch (error) {
@@ -186,6 +241,25 @@ function sandboxImageExtension(mimeType) {
     'image/svg+xml': 'svg',
   };
   return extensions[String(mimeType || '').toLowerCase()] || 'img';
+}
+
+function waitForWakeup(runAtMs, signal) {
+  return new Promise((resolve, reject) => {
+    let timer;
+    const abort = () => {
+      clearTimeout(timer);
+      reject(new DOMException('Scheduled wake-up aborted', 'AbortError'));
+    };
+    if (signal?.aborted) {
+      abort();
+      return;
+    }
+    signal?.addEventListener('abort', abort, { once: true });
+    timer = setTimeout(() => {
+      signal?.removeEventListener('abort', abort);
+      resolve();
+    }, Math.max(0, runAtMs - Date.now()));
+  });
 }
 
 function safeAttachmentSegment(value, fallback) {
@@ -285,6 +359,19 @@ export function createRuntimeToolDispatcher({ execCommand, listFiles, readFile, 
     if (name === 'write_sandbox_file') {
       await writeFile(input.path, input.content);
       return `Successfully wrote sandbox file ${input.path}`;
+    }
+    if (name === 'schedule_wakeup') {
+      const wakeup = await context?.scheduleWakeup?.({
+        delaySeconds: input.delay_seconds,
+        prompt: input.prompt,
+      });
+      if (!wakeup) throw new Error('Wake-up scheduling is unavailable.');
+      return JSON.stringify({
+        scheduled: true,
+        wakeup_id: wakeup.id,
+        run_at: new Date(wakeup.runAtMs).toISOString(),
+        prompt: wakeup.prompt,
+      });
     }
     throw new Error(`Tool is unavailable in sandbox runtime: ${name}`);
   };
@@ -393,6 +480,7 @@ function serializeRun(run) {
     sequence: run.sequence,
     result: run.result,
     error: run.error,
+    wakeup: run.wakeup || null,
   };
 }
 
@@ -407,8 +495,8 @@ function loadPersistedRuns(runsDir, runs) {
         : [];
       runs.set(saved.id, {
         ...saved,
-        status: saved.status === 'running' ? 'interrupted' : saved.status,
-        error: saved.status === 'running' ? 'Agent server restarted before the run completed.' : saved.error,
+        status: ['running', 'waiting'].includes(saved.status) ? 'interrupted' : saved.status,
+        error: ['running', 'waiting'].includes(saved.status) ? 'Agent server restarted before the run completed.' : saved.error,
         events,
         eventBytes: existsSync(eventsPath) ? readFileSync(eventsPath).byteLength : 0,
         controller: null,
