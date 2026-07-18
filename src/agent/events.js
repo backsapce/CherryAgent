@@ -1,3 +1,5 @@
+import { consumeTaggedReasoning, createTaggedReasoningParser } from './reasoningTags.js';
+
 /**
  * Versioned event contract for an agent run.
  *
@@ -47,6 +49,8 @@ export function createAgentEventState() {
     content: '',
     thinking: '',
     toolCalls: [],
+    transcript: [],
+    reasoningParsers: {},
     steps: [],
     currentStepId: null,
     permissions: [],
@@ -82,15 +86,9 @@ export function applyAgentEvent(state, event) {
     case 'step-finish':
       return finishStep(next, event);
     case 'text-delta':
-      return {
-        ...next,
-        content: appendSegment(next.content, event.text, event.newSegment),
-      };
+      return syncTranscriptText(appendTranscriptText(next, event, 'text'));
     case 'reasoning-delta':
-      return {
-        ...next,
-        thinking: appendSegment(next.thinking, event.text, event.newSegment),
-      };
+      return appendReasoningDelta(next, event);
     case 'tool-input-start':
       return startToolInput(next, event);
     case 'tool-input-delta':
@@ -156,12 +154,14 @@ export function applyAgentEvent(state, event) {
         finishedAt: event.at || next.finishedAt,
         finishReason: event.reason || 'aborted',
       };
-    // Boundary events deliberately do not alter the rendered transcript. They
-    // still flow to observers and make segment timing available to future UIs.
     case 'text-start':
+      return startTranscriptSegment(next, event, 'text');
     case 'text-end':
+      return finishTranscriptSegment(next, event, 'text');
     case 'reasoning-start':
+      return startReasoningStream(next, event);
     case 'reasoning-end':
+      return finishReasoningSegments(next, event);
     default:
       return next;
   }
@@ -274,7 +274,194 @@ function withTool(state, event, patch) {
   const toolCalls = [...state.toolCalls];
   if (existingIndex >= 0) toolCalls[existingIndex] = next;
   else toolCalls.push(next);
-  return { ...state, toolCalls };
+  return ensureToolTranscriptSegment({ ...state, toolCalls }, event, toolCallId);
+}
+
+function transcriptSegmentId(state, event, type) {
+  if (event.segmentId) return `${type}:${event.segmentId}`;
+  const stepPart = event.stepId ? `:${event.stepId}` : '';
+  return `${type}${stepPart}:${event.sequence || state.transcript.length + 1}`;
+}
+
+function startTranscriptSegment(state, event, type, forcedId) {
+  const id = forcedId || transcriptSegmentId(state, event, type);
+  if (state.transcript.some((segment) => segment.id === id)) return state;
+  const transcript = finishOpenTranscriptSegments(state.transcript, event.at);
+  return {
+    ...state,
+    transcript: [...transcript, {
+      id,
+      type,
+      sourceSegmentId: event.segmentId || null,
+      ...(event.reasoningSourceKey ? { reasoningSourceKey: event.reasoningSourceKey } : {}),
+      stepId: event.stepId || state.currentStepId || null,
+      content: '',
+      status: 'streaming',
+      startedAt: event.at || null,
+    }],
+  };
+}
+
+function appendTranscriptText(state, event, type) {
+  let transcript = state.transcript;
+  const explicitId = event.segmentId ? `${type}:${event.segmentId}` : null;
+  let index = explicitId
+    ? transcript.findLastIndex((segment) => segment.id === explicitId || segment.sourceSegmentId === event.segmentId)
+    : transcript.length - 1;
+  const existing = transcript[index];
+  const interrupted = explicitId && index >= 0 && index !== transcript.length - 1;
+  if ((event.newSegment && !explicitId) || index < 0 || existing?.type !== type || interrupted || existing?.status === 'finished') {
+    const continuationId = interrupted || (explicitId && existing?.status === 'finished')
+      ? `${explicitId}:${event.sequence || transcript.length + 1}`
+      : undefined;
+    const started = startTranscriptSegment(state, event, type, continuationId);
+    transcript = started.transcript;
+    index = transcript.length - 1;
+  }
+  const segments = [...transcript];
+  segments[index] = {
+    ...segments[index],
+    content: `${segments[index].content || ''}${event.text || ''}`,
+  };
+  return { ...state, transcript: segments };
+}
+
+function appendReasoningDelta(state, event) {
+  const sourceKey = reasoningSourceKey(state, event);
+  const currentParser = state.reasoningParsers[sourceKey] || createTaggedReasoningParser();
+  const { parser, emissions } = consumeTaggedReasoning(currentParser, event.text);
+  let next = {
+    ...state,
+    reasoningParsers: { ...state.reasoningParsers, [sourceKey]: parser },
+  };
+
+  for (const emission of emissions) {
+    // Whitespace between a closing and the next opening tag is structural,
+    // rather than user-facing answer text.
+    if (emission.type === 'text' && !emission.text.trim()) continue;
+    next = appendTranscriptText(next, {
+      ...event,
+      text: emission.text,
+      segmentId: reasoningEmissionSegmentId(sourceKey, emission),
+      reasoningSourceKey: sourceKey,
+      newSegment: false,
+    }, emission.type);
+  }
+
+  return syncTranscriptText(next);
+}
+
+function reasoningSourceKey(state, event) {
+  if (event.stepId) return `${event.stepId}:${event.segmentId || 'reasoning'}`;
+  if (event.segmentId) {
+    const suffix = `:${event.segmentId}`;
+    const existing = Object.keys(state.reasoningParsers).findLast((key) => key.endsWith(suffix));
+    return existing || `${state.currentStepId || 'unstepped'}:${event.segmentId}`;
+  }
+  if (event.newSegment) {
+    return `${state.currentStepId || 'unstepped'}:reasoning:${event.sequence || state.transcript.length + 1}`;
+  }
+  return `${state.currentStepId || 'unstepped'}:reasoning`;
+}
+
+function reasoningEmissionSegmentId(sourceKey, emission) {
+  return emission.type === 'reasoning'
+    ? `tagged-reasoning:${sourceKey}`
+    : `tagged-reasoning:${sourceKey}:text:${emission.part}`;
+}
+
+function startReasoningStream(state, event) {
+  const sourceKey = reasoningSourceKey(state, event);
+  const reasoningParsers = state.reasoningParsers[sourceKey]
+    ? state.reasoningParsers
+    : { ...state.reasoningParsers, [sourceKey]: createTaggedReasoningParser() };
+  return startTranscriptSegment({ ...state, reasoningParsers }, {
+    ...event,
+    segmentId: reasoningEmissionSegmentId(sourceKey, { type: 'reasoning', part: 0 }),
+    reasoningSourceKey: sourceKey,
+  }, 'reasoning');
+}
+
+function finishReasoningSegments(state, event) {
+  const sourceKey = reasoningSourceKey(state, event);
+  const currentParser = state.reasoningParsers[sourceKey];
+  let next = state;
+  if (currentParser?.pending) {
+    const { parser, emissions } = consumeTaggedReasoning(currentParser, '', { final: true });
+    next = {
+      ...next,
+      reasoningParsers: { ...next.reasoningParsers, [sourceKey]: parser },
+    };
+    for (const emission of emissions) {
+      if (emission.type === 'text' && !emission.text.trim()) continue;
+      next = appendTranscriptText(next, {
+        ...event,
+        text: emission.text,
+        segmentId: reasoningEmissionSegmentId(sourceKey, emission),
+        reasoningSourceKey: sourceKey,
+      }, emission.type);
+    }
+  }
+  const transcript = next.transcript.map((segment) => (
+    segment.reasoningSourceKey === sourceKey && segment.status === 'streaming'
+      ? { ...segment, status: 'finished', finishedAt: event.at || null }
+      : segment
+  ));
+  return syncTranscriptText({ ...next, transcript });
+}
+
+function finishTranscriptSegment(state, event, type) {
+  const explicitId = event.segmentId ? `${type}:${event.segmentId}` : null;
+  let index = explicitId
+    ? state.transcript.findLastIndex((segment) => (
+        segment.id === explicitId || segment.sourceSegmentId === event.segmentId
+      ) && segment.status !== 'finished')
+    : state.transcript.findLastIndex((segment) => segment.type === type && segment.status !== 'finished');
+  if (index < 0) return state;
+  const transcript = [...state.transcript];
+  transcript[index] = {
+    ...transcript[index],
+    status: 'finished',
+    finishedAt: event.at || null,
+  };
+  return { ...state, transcript };
+}
+
+function ensureToolTranscriptSegment(state, event, toolCallId) {
+  const id = `tool:${toolCallId}`;
+  if (state.transcript.some((segment) => segment.id === id)) return state;
+  const transcript = finishOpenTranscriptSegments(state.transcript, event.at);
+  return {
+    ...state,
+    transcript: [...transcript, {
+      id,
+      type: 'tool',
+      stepId: event.stepId || state.currentStepId || null,
+      toolCallId,
+      startedAt: event.at || null,
+    }],
+  };
+}
+
+function finishOpenTranscriptSegments(transcript, finishedAt) {
+  return transcript.map((segment) => segment.status === 'streaming'
+    ? { ...segment, status: 'finished', finishedAt: finishedAt || null }
+    : segment);
+}
+
+function syncTranscriptText(state) {
+  return {
+    ...state,
+    content: transcriptText(state.transcript, 'text'),
+    thinking: transcriptText(state.transcript, 'reasoning'),
+  };
+}
+
+function transcriptText(transcript, type) {
+  return transcript
+    .filter((segment) => segment.type === type && segment.content)
+    .map((segment) => segment.content)
+    .join('\n\n');
 }
 
 function upsertPermission(state, event, status) {
@@ -303,13 +490,6 @@ function compactEvent(event) {
     afterMessages: event.afterMessages ?? null,
     at: event.at || null,
   };
-}
-
-function appendSegment(existing, value, newSegment) {
-  const text = String(value || '');
-  if (!text) return existing;
-  if (!existing || !newSegment) return `${existing}${text}`;
-  return `${existing}${existing.endsWith('\n') || text.startsWith('\n') ? '' : '\n\n'}${text}`;
 }
 
 function serializeInput(input) {

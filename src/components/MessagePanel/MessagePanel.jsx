@@ -4,6 +4,7 @@ import { getAgentDir, normalizeWorkspaceRelativePath, readAgentFileBlob } from '
 import { downloadE2bFile, downloadRemoteFile, E2B_AGENT_ID, listFiles, readFileText } from '../../models/agent';
 import { getSyncStatus, subscribeSyncStatus } from '../../sync/syncManager';
 import { imageDownloadName } from './imageDownload';
+import { splitTaggedReasoningContent } from '../../agent/reasoningTags';
 import { ChevronRight, Settings as SettingsIcon, Folder, File, FileEdit, Copy, MessageSquare, Plus, X, Send, Stop, Plug, PieChart, Cloud, User, ImageGenerate, Refresh } from '../Icons/Icons';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -354,33 +355,33 @@ function formatDuration(seconds) {
   return s > 0 ? `${m}m ${s}s` : `${m}m`;
 }
 
-const ThinkingBlock = ({ thinking, isThinking }) => {
+const ThinkingBlock = ({ thinking, isThinking, startedAt, finishedAt, round }) => {
   const { t } = useI18n();
   const [expanded, setExpanded] = useState(false);
   const startTimeRef = useRef(null);
-  const [elapsed, setElapsed] = useState(0);
+  const [elapsed, setElapsed] = useState(() => elapsedBetween(startedAt, finishedAt));
 
   useEffect(() => {
     if (isThinking) {
-      if (!startTimeRef.current) startTimeRef.current = Date.now();
+      if (!startTimeRef.current) startTimeRef.current = timestampOf(startedAt) || Date.now();
       const timer = setInterval(() => {
         setElapsed(Math.floor((Date.now() - startTimeRef.current) / 1000));
       }, 200);
       return () => clearInterval(timer);
     } else {
-      if (startTimeRef.current && thinking) {
-        setElapsed(Math.floor((Date.now() - startTimeRef.current) / 1000));
-      }
       startTimeRef.current = null;
     }
-  }, [isThinking, thinking]);
+  }, [isThinking, thinking, startedAt, finishedAt]);
 
   if (!thinking && !isThinking) return null;
 
+  const shownElapsed = elapsedBetween(startedAt, finishedAt) || elapsed;
   const labelText = isThinking
-    ? t('message.thinking')
+    ? round ? t('message.thinkingRound', { round }) : t('message.thinking')
     : thinking
-      ? t('message.thoughtFor', { seconds: formatDuration(elapsed) })
+      ? round
+        ? t('message.thoughtRoundFor', { round, seconds: formatDuration(shownElapsed) })
+        : t('message.thoughtFor', { seconds: formatDuration(shownElapsed) })
       : null;
 
   return (
@@ -392,7 +393,7 @@ const ThinkingBlock = ({ thinking, isThinking }) => {
           {isThinking && (
             <>
               {' '}
-              <span className="thinking-elapsed">{formatDuration(elapsed)}</span>
+              <span className="thinking-elapsed">{formatDuration(shownElapsed)}</span>
               <span className="thinking-dots"><span>.</span><span>.</span><span>.</span></span>
             </>
           )}
@@ -404,6 +405,17 @@ const ThinkingBlock = ({ thinking, isThinking }) => {
     </div>
   );
 };
+
+function timestampOf(value) {
+  const timestamp = value ? Date.parse(value) : NaN;
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function elapsedBetween(startedAt, finishedAt) {
+  const start = timestampOf(startedAt);
+  const finish = timestampOf(finishedAt);
+  return start && finish ? Math.max(0, Math.floor((finish - start) / 1000)) : 0;
+}
 
 const normalizeTerminalOutput = (value) => String(value || '').replace(/\r?\n/g, '\r\n');
 
@@ -701,6 +713,82 @@ const ImageGenerationStatus = () => {
       </span>
       <span className="image-generation-label">{t('message.imageGeneration')}</span>
       <span className="image-generation-dots" aria-hidden="true"><span>.</span><span>.</span><span>.</span></span>
+    </div>
+  );
+};
+
+const AssistantTranscript = ({ transcript, toolCalls, streaming, onStopStreaming, agentId, sandboxUrl }) => {
+  return (
+    <div className="assistant-transcript">
+      {transcript.map((segment, segmentIndex) => {
+        if (segment.type === 'reasoning') {
+          const reasoningRound = transcript
+            .slice(0, segmentIndex + 1)
+            .filter((item) => item.type === 'reasoning')
+            .length;
+          const parsedReasoning = splitTaggedReasoningContent(segment.content);
+          return (
+            <div className="transcript-reasoning-segment" key={segment.id}>
+              <ThinkingBlock
+                thinking={parsedReasoning.thinking}
+                isThinking={streaming && segment.status !== 'finished' && !parsedReasoning.closed}
+                startedAt={segment.startedAt}
+                finishedAt={segment.finishedAt}
+                round={reasoningRound}
+              />
+              {parsedReasoning.text && (
+                <div className="message-text transcript-text">
+                  <ReactMarkdown
+                    remarkPlugins={MARKDOWN_REMARK_PLUGINS}
+                    rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
+                    components={MARKDOWN_COMPONENTS}
+                  >
+                    {parsedReasoning.text}
+                  </ReactMarkdown>
+                </div>
+              )}
+            </div>
+          );
+        }
+        if (segment.type === 'tool') {
+          const toolCall = toolCalls?.find((item) => item.id === segment.toolCallId);
+          return toolCall ? (
+            <div className="transcript-tool-segment" key={segment.id}>
+              <ToolBlock
+                toolCall={toolCall}
+                onStopStreaming={onStopStreaming}
+                agentId={agentId}
+                sandboxUrl={sandboxUrl}
+              />
+              {segment.content && (
+                <div className="message-text transcript-text">
+                  <ReactMarkdown
+                    remarkPlugins={MARKDOWN_REMARK_PLUGINS}
+                    rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
+                    components={MARKDOWN_COMPONENTS}
+                  >
+                    {segment.content}
+                  </ReactMarkdown>
+                </div>
+              )}
+            </div>
+          ) : null;
+        }
+        if (segment.type === 'text' && segment.content) {
+          return (
+            <div className="message-text transcript-text" key={segment.id}>
+              <ReactMarkdown
+                remarkPlugins={MARKDOWN_REMARK_PLUGINS}
+                rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
+                components={MARKDOWN_COMPONENTS}
+              >
+                {segment.content}
+              </ReactMarkdown>
+            </div>
+          );
+        }
+        return null;
+      })}
     </div>
   );
 };
@@ -1282,6 +1370,7 @@ const MessagePanel = forwardRef(({
                 msg.toolCalls?.some((tc) => isImageGenerationToolName(tc.name))
                 || isImageGenerationPrompt(previousMessage?.role === 'user' ? previousMessage.content : '')
               );
+            const hasTranscript = msg.role === 'assistant' && Array.isArray(msg.transcript) && msg.transcript.length > 0;
 
             return (
             <div key={msg.id} className={`message ${msg.role}`}>
@@ -1296,7 +1385,7 @@ const MessagePanel = forwardRef(({
                 <div className="message-role">
                   <span>{msg.role === 'user' ? userName : assistantName}</span>
                 </div>
-                {msg.role === 'assistant' && !showImageGenerationStatus && (msg.thinking || (streaming && msg.content === '')) && (
+                {msg.role === 'assistant' && !hasTranscript && !showImageGenerationStatus && (msg.thinking || (streaming && msg.content === '')) && (
                   <ThinkingBlock thinking={msg.thinking} isThinking={streaming && msg === messages[messages.length - 1]} />
                 )}
                 {showImageGenerationStatus && <ImageGenerationStatus />}
@@ -1307,7 +1396,17 @@ const MessagePanel = forwardRef(({
                     ))}
                   </div>
                 )}
-                {msg.role === 'assistant' && msg.toolCalls?.length > 0 && (
+                {hasTranscript && (
+                  <AssistantTranscript
+                    transcript={msg.transcript}
+                    toolCalls={msg.toolCalls}
+                    streaming={streaming && msg === messages[messages.length - 1]}
+                    onStopStreaming={onStopStreaming}
+                    agentId={agentId}
+                    sandboxUrl={selectedAgentUrl}
+                  />
+                )}
+                {msg.role === 'assistant' && !hasTranscript && msg.toolCalls?.length > 0 && (
                   msg.toolCalls.map((tc, i) => (
                     <ToolBlock
                       key={tc.id || i}
@@ -1344,7 +1443,7 @@ const MessagePanel = forwardRef(({
                       </div>
                     </div>
                   ) : (
-                    <>
+                    !hasTranscript && <>
                       <ReactMarkdown
                         remarkPlugins={MARKDOWN_REMARK_PLUGINS}
                         rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
