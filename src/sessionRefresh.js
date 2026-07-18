@@ -126,11 +126,18 @@ function mergeMessages(baselineMessages, localMessages, remoteMessages) {
 function mergeSessionThreeWay(baseline, local, remote) {
   const merged = mergeValueThreeWay(baseline, local, remote);
   if (!isRecord(merged)) return local;
-  merged.messages = mergeMessages(
-    baseline?.messages || [],
-    local?.messages || [],
-    remote?.messages || []
+  const hasMessages = [baseline, local, remote].some(
+    (session) => Object.prototype.hasOwnProperty.call(session || {}, 'messages')
   );
+  if (hasMessages) {
+    merged.messages = mergeMessages(
+      baseline?.messages || [],
+      local?.messages || [],
+      remote?.messages || []
+    );
+  } else {
+    delete merged.messages;
+  }
   return merged;
 }
 
