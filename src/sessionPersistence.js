@@ -35,6 +35,9 @@ export function createSessionSaveCoordinator({
     if (!latestSuccessful || latestSuccessful.generation <= committedGeneration) return;
     committedGeneration = latestSuccessful.generation;
     onCommitted(latestSuccessful.value, latestSuccessful.generation);
+    // The caller now owns any baseline it needs. Keeping the successful value
+    // here retained a full serialized snapshot of large conversations forever.
+    latestSuccessful = null;
   };
 
   const retainRetryCandidate = (candidate) => {
@@ -84,7 +87,6 @@ export function createSessionSaveCoordinator({
           // snapshotted. Do not expose this write as the latest baseline when
           // a newer in-memory source is already waiting behind it.
           if (revision === activityGeneration) commitLatestSuccessful();
-          return value;
         },
         (error) => {
           retainRetryCandidate({ kind: 'value', revision, value });

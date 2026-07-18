@@ -2,7 +2,8 @@ import { lazy, Suspense, useState, useCallback, useEffect, useLayoutEffect, useR
 import SessionList from './components/SessionList/SessionList';
 import MessagePanel from './components/MessagePanel/MessagePanel';
 import {
-  loadSessions,
+  loadSessionMetadata,
+  loadSessionMessages,
   saveSessions,
   clearAll,
   deleteSession as deleteSessionFile,
@@ -64,6 +65,16 @@ function sessionTimeFields(date = new Date()) {
     updatedAt: formatTime(date),
     updatedAtMs: date.getTime(),
   };
+}
+
+function sessionMetadataOnly(session) {
+  if (!Object.prototype.hasOwnProperty.call(session, 'messages')) return session;
+  const { messages: _messages, ...metadata } = session;
+  return metadata;
+}
+
+function metadataSnapshot(sessions) {
+  return snapshotSessions((sessions || []).map(sessionMetadataOnly));
 }
 
 const AGENT_SYSTEM_PROMPT = `You have access to commands, browser-workspace files, sandbox-runtime files, memory, skills, and focused sub-agent delegation.
@@ -221,6 +232,7 @@ function App() {
   const wasStreamingRef = useRef(false);
   const sessionsRef = useRef(sessions);
   const activeSessionIdRef = useRef(activeSessionId);
+  const sessionLoadRequestRef = useRef(0);
 
   if (!sessionSaveCoordinatorRef.current) {
     sessionSaveCoordinatorRef.current = createSessionSaveCoordinator({
@@ -232,7 +244,7 @@ function App() {
       }),
       clearCheckpoint: clearSessionRecoveryJournal,
       onCommitted: (snapshot) => {
-        persistedSessionsRef.current = snapshot;
+        persistedSessionsRef.current = metadataSnapshot(snapshot);
       },
       onError: (err) => console.warn('OPFS save failed:', err),
     });
@@ -273,7 +285,13 @@ function App() {
       setAvatar(config.get('general.avatar') || '');
 
       const persistedBeforeRefresh = persistedSessionsRef.current;
-      const savedSessions = sortSessions(await loadSessions());
+      const savedMetadata = await loadSessionMetadata();
+      const selectedId = activeSessionIdRef.current;
+      const savedSessions = sortSessions(await Promise.all(savedMetadata.map(async (session) => (
+        session.id === selectedId
+          ? { ...session, messages: await loadSessionMessages(session.id) }
+          : session
+      ))));
       // The outer storage barrier already flushed the pre-operation state.
       // Only after both storage reads succeed may we discard snapshots queued
       // while remote/imported files were changing. If either read fails, the
@@ -371,7 +389,7 @@ function App() {
         const savedAvatar = config.get('general.avatar');
         if (savedAvatar) setAvatar(savedAvatar);
         return Promise.all([
-          loadSessions()
+          loadSessionMetadata()
             .then(async (saved) => {
               const sortedSaved = sortSessions(saved);
               let recoveryJournal = null;
@@ -532,7 +550,7 @@ function App() {
   }, []);
 
   const activeSession = sessions.find((c) => c.id === activeSessionId);
-  const messages = activeSession ? activeSession.messages : [];
+  const messages = activeSession?.messages || [];
   const selectedAgentId = activeSession?.agentId || lastAgentId || null;
   const activeAgentConfig = selectedAgentId ? agentList.find((agent) => agent.id === selectedAgentId) : null;
   const firstLlmProfileId = llm.getProfiles()[0]?.id || null;
@@ -546,12 +564,12 @@ function App() {
     return agent?.llmProfileId || null;
   }, [agentList]);
 
-  const handleNewSession = useCallback(() => {
+  const handleNewSession = useCallback(async () => {
     messagePanelRef.current?.focusInput();
 
     // If the active session is still empty, just keep it — don't spawn another
     const current = sessions.find((c) => c.id === activeSessionId);
-    if (current && current.messages.length === 0) return;
+    if (current && (current.messages || []).length === 0) return;
 
     // Use last used agent, falling back to first available agent
     const agentId = lastAgentId ?? (agentList.length > 0 ? agentList[0].id : null);
@@ -567,7 +585,11 @@ function App() {
       ...(llmProfileId && { llmProfileId }),
       ...(agentId && { agentId }),
     };
-    setSessions((prev) => sortSessions([newSession, ...prev]));
+    if (!streaming) await flushPendingSessionSave();
+    setSessions((prev) => sortSessions([
+      newSession,
+      ...prev.map((session) => streaming ? session : sessionMetadataOnly(session)),
+    ]));
     setActiveSessionId(newSession.id);
 
     if (agentId) {
@@ -577,9 +599,10 @@ function App() {
       setSessionLlmProfiles((prev) => ({ ...prev, [newSession.id]: llmProfileId }));
       setCurrentLlmProfileId(llmProfileId);
     }
-  }, [sessions, activeSessionId, agentList, lastAgentId, currentLlmProfileId, getAgentDefaultLlmId]);
+  }, [sessions, activeSessionId, agentList, lastAgentId, currentLlmProfileId, getAgentDefaultLlmId, streaming, flushPendingSessionSave]);
 
-  const handleSelectSession = useCallback((sessionId) => {
+  const handleSelectSession = useCallback(async (sessionId) => {
+    const requestId = ++sessionLoadRequestRef.current;
     setActiveSessionId(sessionId);
     // Restore the agent for this session and update tracking
     const session = sessions.find((c) => c.id === sessionId);
@@ -589,7 +612,27 @@ function App() {
     }
     const llmProfileId = session?.llmProfileId || llm.getActiveProfileId();
     setCurrentLlmProfileId(llmProfileId || null);
-  }, [sessions]);
+    if (session?.messages) {
+      if (!streaming) {
+        setSessions((prev) => prev.map((item) => (
+          item.id === sessionId ? item : sessionMetadataOnly(item)
+        )));
+      }
+      return;
+    }
+
+    try {
+      if (!streaming) await flushPendingSessionSave();
+      const loadedMessages = await loadSessionMessages(sessionId);
+      if (requestId !== sessionLoadRequestRef.current) return;
+      setSessions((prev) => prev.map((item) => {
+        if (item.id === sessionId) return { ...item, messages: loadedMessages };
+        return streaming ? item : sessionMetadataOnly(item);
+      }));
+    } catch (error) {
+      console.error(`Failed to load session ${sessionId}:`, error);
+    }
+  }, [sessions, streaming, flushPendingSessionSave]);
 
   const handleDeleteSession = useCallback(async (sessionId) => {
     await flushPendingSessionSave();
@@ -622,7 +665,7 @@ function App() {
 
   const handleExportDebug = useCallback(() => {
     const session = sessions.find((c) => c.id === activeSessionId);
-    if (!session) return;
+    if (!session?.messages) return;
 
     const agentId = session.agentId || sessionAgents[session.id] || null;
     const agent = agentId ? agentList.find((item) => item.id === agentId) : null;
@@ -897,13 +940,19 @@ function App() {
     const agent = agentList.find((item) => item.id === session.agentId);
     if (!agent) return;
     resumedRemoteRunsRef.current.add(session.remoteRun.id);
-    void streamResponse(session.id, session.messages, {
-      agentId: session.agentId,
-      llmProfileId: session.llmProfileId,
-      sandboxUrl: session.remoteRun.url,
-      resumeRunId: session.remoteRun.id,
-      replyId: session.remoteRun.replyId,
-    });
+    void (async () => {
+      const runMessages = session.messages || await loadSessionMessages(session.id);
+      setSessions((prev) => prev.map((item) => (
+        item.id === session.id ? { ...item, messages: runMessages } : item
+      )));
+      await streamResponse(session.id, runMessages, {
+        agentId: session.agentId,
+        llmProfileId: session.llmProfileId,
+        sandboxUrl: session.remoteRun.url,
+        resumeRunId: session.remoteRun.id,
+        replyId: session.remoteRun.replyId,
+      });
+    })().catch((error) => console.warn('Remote agent run resume failed:', error));
   }, [agentList, loaded, sessions, streamResponse]);
 
   // A page can close in the narrow interval before the returned run id is
@@ -917,15 +966,17 @@ function App() {
       const discoveryKey = `${agent.sandboxUrl}:${session.id}`;
       if (remoteDiscoveryRef.current.has(discoveryKey)) continue;
       remoteDiscoveryRef.current.add(discoveryKey);
-      void listRemoteAgentRuns(agent.sandboxUrl, session.id).then(({ runs }) => {
+      void listRemoteAgentRuns(agent.sandboxUrl, session.id).then(async ({ runs }) => {
         const latest = runs?.[0];
         if (!latest || latest.status === 'aborted' || latest.status === 'error' || latest.status === 'interrupted') return;
+        const storedMessages = session.messages || await loadSessionMessages(session.id);
         setSessions((prev) => prev.map((item) => {
           if (item.id !== session.id || item.remoteRun) return item;
-          const hasReply = item.messages.some((message) => message.id === latest.replyId);
+          const currentMessages = item.messages || storedMessages;
+          const hasReply = currentMessages.some((message) => message.id === latest.replyId);
           return {
             ...item,
-            messages: hasReply ? item.messages : [...item.messages, {
+            messages: hasReply ? currentMessages : [...currentMessages, {
               id: latest.replyId || generateId(),
               role: 'assistant',
               content: '',
@@ -1279,7 +1330,7 @@ function App() {
         onNewSession={handleNewSession}
         onDeleteSession={handleDeleteSession}
         onExportDebug={handleExportDebug}
-        debugExportDisabled={!activeSessionId}
+        debugExportDisabled={!activeSessionId || !activeSession?.messages}
         collapsed={leftPanelCollapsed}
         onToggleCollapse={() => setLeftPanelCollapsed(prev => !prev)}
         sessionAgents={sessionAgents}

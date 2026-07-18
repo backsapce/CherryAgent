@@ -653,19 +653,74 @@ function validateRecoverySessions(sessions, label) {
     if (id == null) throw sessionRecoveryError(`${label} contains an unsafe session id`);
     if (ids.has(id)) throw sessionRecoveryError(`${label} contains a duplicate session id`);
     ids.add(id);
-    if (!Array.isArray(session.messages)) {
-      throw sessionRecoveryError(`${label} contains a session without a message array`);
+    // A missing messages property is a metadata-only session. Session bodies
+    // are loaded lazily, so checkpoints must preserve that distinction from
+    // an explicitly empty conversation.
+    if (session.messages !== undefined && !Array.isArray(session.messages)) {
+      throw sessionRecoveryError(`${label} contains an invalid message array`);
     }
-    if (session.messages.some((message) => !isPlainObject(message))) {
+    if (session.messages?.some((message) => !isPlainObject(message))) {
       throw sessionRecoveryError(`${label} contains a non-object message`);
     }
-    messageCount += session.messages.length;
+    messageCount += session.messages?.length || 0;
     if (messageCount > SESSION_RECOVERY_MAX_MESSAGES) {
       throw sessionRecoveryError(
         `${label} exceeds the ${SESSION_RECOVERY_MAX_MESSAGES}-message limit`
       );
     }
   }
+}
+
+async function loadSessionIndex(root) {
+  let sessions = await readSessionJSON(root, SESSION_FILE);
+  const loadedPrimaryIndex = sessions !== MISSING_SESSION_JSON;
+  if (sessions === MISSING_SESSION_JSON) {
+    for (const legacyFile of LEGACY_CONVERSATION_FILES) {
+      sessions = await readSessionJSON(root, legacyFile);
+      if (sessions !== MISSING_SESSION_JSON) break;
+    }
+  }
+  if (sessions === MISSING_SESSION_JSON) sessions = [];
+  if (!Array.isArray(sessions)) {
+    throw new Error(`${SESSION_FILE} must contain a JSON array`);
+  }
+  for (const session of sessions) {
+    if (session?.id == null) {
+      throw new Error(`${SESSION_FILE} contains a session without an id`);
+    }
+  }
+  return { sessions, loadedPrimaryIndex };
+}
+
+/** Load only list metadata. Message bodies remain in OPFS until selected. */
+export async function loadSessionMetadata() {
+  const root = await getRootDir();
+  await ensureSessionWriteCacheRoot(root);
+  const { sessions, loadedPrimaryIndex } = await loadSessionIndex(root);
+  sessionMetadataWriteSnapshot = loadedPrimaryIndex ? JSON.stringify(sessions) : null;
+  return sessions;
+}
+
+/** Load one session's message body on demand. */
+export async function loadSessionMessages(sessionId) {
+  const root = await getRootDir();
+  await ensureSessionWriteCacheRoot(root);
+  const id = String(sessionId);
+  const sessionDir = await getDirectory(SESSIONS_DIR);
+  let messages = await readSessionJSON(sessionDir, `${id}.json`);
+  const loadedPrimaryMessages = messages !== MISSING_SESSION_JSON;
+  if (messages === MISSING_SESSION_JSON) {
+    const legacyDir = await getDirectory(LEGACY_MESSAGES_DIR);
+    messages = await readSessionJSON(legacyDir, `${id}.json`);
+  }
+  if (messages === MISSING_SESSION_JSON) messages = [];
+  if (!Array.isArray(messages)) {
+    throw new Error(`Session messages for ${id} must contain a JSON array`);
+  }
+  if (loadedPrimaryMessages) {
+    sessionMessageWriteSnapshots.set(id, sessionMessageFingerprint(JSON.stringify(messages)));
+  }
+  return messages;
 }
 
 export function validateSessionRecoveryJournal(journal) {
@@ -730,18 +785,7 @@ export async function clearSessionRecoveryJournal() {
 export async function loadSessions() {
   const root = await getRootDir();
   await ensureSessionWriteCacheRoot(root);
-  let sessions = await readSessionJSON(root, SESSION_FILE);
-  const loadedPrimaryIndex = sessions !== MISSING_SESSION_JSON;
-  if (sessions === MISSING_SESSION_JSON) {
-    for (const legacyFile of LEGACY_CONVERSATION_FILES) {
-      sessions = await readSessionJSON(root, legacyFile);
-      if (sessions !== MISSING_SESSION_JSON) break;
-    }
-  }
-  if (sessions === MISSING_SESSION_JSON) sessions = [];
-  if (!Array.isArray(sessions)) {
-    throw new Error(`${SESSION_FILE} must contain a JSON array`);
-  }
+  const { sessions, loadedPrimaryIndex } = await loadSessionIndex(root);
   const sessionDir = await getDirectory(SESSIONS_DIR);
   let legacyDir = null;
 
@@ -759,9 +803,6 @@ export async function loadSessions() {
         nextSessionIndex += 1;
         const session = sessions[index];
         try {
-          if (session?.id == null) {
-            throw new Error(`${SESSION_FILE} contains a session without an id`);
-          }
           let messages = await readSessionJSON(sessionDir, `${session.id}.json`);
           const loadedPrimaryMessages = messages !== MISSING_SESSION_JSON;
           if (messages === MISSING_SESSION_JSON) {
@@ -814,7 +855,11 @@ export async function saveSessions(sessions) {
       const { messages: _messages, ...rest } = session;
       const id = String(session.id);
       nextSessionsById.set(id, rest);
-      nextMessagesById.set(id, session.messages || []);
+      // Missing means this body was never loaded. Do not confuse it with an
+      // explicitly empty conversation and overwrite the existing OPFS file.
+      if (Object.prototype.hasOwnProperty.call(session, 'messages')) {
+        nextMessagesById.set(id, session.messages || []);
+      }
     }
   }
 

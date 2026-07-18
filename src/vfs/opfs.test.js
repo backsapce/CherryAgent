@@ -13,6 +13,8 @@ import {
   deleteSession,
   exportToZip,
   importFromZip,
+  loadSessionMetadata,
+  loadSessionMessages,
   loadSessions,
   readSessionRecoveryJournal,
   readText,
@@ -267,6 +269,45 @@ test('unchanged session messages are not rewritten after save or reload', async 
   reloaded[0].messages.push({ role: 'assistant', content: 'changed' });
   await saveSessions(reloaded);
   assert.ok(bodyHandle.lastModified > firstModified);
+});
+
+test('session metadata loads without reading message bodies', async () => {
+  const origin = useMemoryOpfs();
+  const body = [{ role: 'assistant', content: 'large history body' }];
+  await saveSessions([{ id: 'lazy', title: 'Lazy', messages: body }]);
+
+  const appRoot = await origin.getDirectoryHandle('vertex-agent');
+  const sessionDir = await appRoot.getDirectoryHandle('sessions');
+  const bodyHandle = await sessionDir.getFileHandle('lazy.json');
+  const getFile = bodyHandle.getFile.bind(bodyHandle);
+  bodyHandle.getFile = async () => {
+    throw new Error('message body should not be read');
+  };
+
+  assert.deepEqual(await loadSessionMetadata(), [{ id: 'lazy', title: 'Lazy' }]);
+  bodyHandle.getFile = getFile;
+  assert.deepEqual(await loadSessionMessages('lazy'), body);
+});
+
+test('saving metadata-only sessions preserves their existing message bodies', async () => {
+  useMemoryOpfs();
+  const body = [{ role: 'user', content: 'must survive metadata save' }];
+  await saveSessions([{ id: 'sparse', title: 'Before', messages: body }]);
+
+  await saveSessions([{ id: 'sparse', title: 'After' }]);
+
+  assert.deepEqual(await loadSessionMetadata(), [{ id: 'sparse', title: 'After' }]);
+  assert.deepEqual(await loadSessionMessages('sparse'), body);
+});
+
+test('session recovery journals accept metadata-only session snapshots', async () => {
+  useMemoryOpfs();
+  const baseline = [{ id: 'one', title: 'Before' }];
+  const sessions = [{ id: 'one', title: 'After' }];
+
+  await writeSessionRecoveryJournal({ baseline, sessions });
+
+  assert.deepEqual((await readSessionRecoveryJournal()).sessions, sessions);
 });
 
 test('session recovery journal round-trips strictly and remains local to .sync', async () => {

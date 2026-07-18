@@ -3,6 +3,7 @@ import { useI18n } from '../../i18n/context';
 import { getAgentDir, normalizeWorkspaceRelativePath, readAgentFileBlob } from '../../vfs/opfs';
 import { downloadE2bFile, downloadRemoteFile, E2B_AGENT_ID, listFiles, readFileText } from '../../models/agent';
 import { getSyncStatus, subscribeSyncStatus } from '../../sync/syncManager';
+import { imageDownloadName } from './imageDownload';
 import { ChevronRight, Settings as SettingsIcon, Folder, File, FileEdit, Copy, MessageSquare, Plus, X, Send, Stop, Plug, PieChart, Cloud, User, ImageGenerate, Refresh } from '../Icons/Icons';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -541,12 +542,14 @@ function imageMimeFromPath(path) {
 
 const ToolImageReference = ({ reference, agentId, sandboxUrl }) => {
   const [imageUrl, setImageUrl] = useState('');
+  const [downloadName, setDownloadName] = useState('');
   const [error, setError] = useState('');
 
   useEffect(() => {
     let disposed = false;
     let objectUrl = '';
     setImageUrl('');
+    setDownloadName('');
     setError('');
 
     const load = async () => {
@@ -568,6 +571,11 @@ const ToolImageReference = ({ reference, agentId, sandboxUrl }) => {
         const mimeType = reference.mime_type || blob.type || imageMimeFromPath(reference.path);
         const displayBlob = blob.type || !mimeType ? blob : new Blob([blob], { type: mimeType });
         objectUrl = URL.createObjectURL(displayBlob);
+        setDownloadName(imageDownloadName({
+          name: reference.name,
+          path: reference.path,
+          mime_type: reference.mime_type,
+        }, mimeType));
         setImageUrl(objectUrl);
       } catch (loadError) {
         if (!disposed) setError(loadError?.message || String(loadError));
@@ -579,12 +587,12 @@ const ToolImageReference = ({ reference, agentId, sandboxUrl }) => {
       disposed = true;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [agentId, reference.mime_type, reference.path, reference.source, sandboxUrl]);
+  }, [agentId, reference.mime_type, reference.name, reference.path, reference.source, sandboxUrl]);
 
   if (error) return <div className="tool-image-error">{error}</div>;
   if (!imageUrl) return <div className="tool-image-loading">Loading image…</div>;
   return (
-    <a className="tool-image-link" href={imageUrl} target="_blank" rel="noreferrer">
+    <a className="tool-image-link" href={imageUrl} download={downloadName} title={downloadName}>
       <img className="tool-image" src={imageUrl} alt={reference.alt} />
     </a>
   );
