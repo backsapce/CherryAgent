@@ -9,6 +9,7 @@
 
 import llm from '../models/llm.js';
 import { buildMemorySection } from './memory.js';
+import { COMMAND_EXECUTION_GUIDANCE } from './commandGuidance.js';
 
 const CONTEXT_WINDOW_FALLBACK = 128_000;
 const PACKING_THRESHOLD_RATIO = 0.72;
@@ -28,7 +29,7 @@ Filesystem model:
 - Browser file tools can read/write only the active agent's own files area: workspace/<active-agent>/files/.
 - Browser file tools cannot access other agents, OPFS root files, AGENTS.md, memory files, or skill files by path.
 - Use the skill tool for the enabled skill catalog and skill reads. When explicitly creating or editing a skill, use skill file tools under workspace/<active-agent>/skills/.
-- The sandbox filesystem is a separate runtime workdir for execute_command. It is useful for running commands, builds, tests, and temporary generated files.
+- The sandbox filesystem is a separate runtime workdir for command tools. It is useful for running commands, builds, tests, and temporary generated files.
 - Active agent files and sandbox workdir files do not automatically sync. Choose browser file tools for workspace/<active-agent>/files/, sandbox file tools for command-runtime files, and explicitly copy content between them when needed.
 - Never infer that a path seen in the sandbox exists in the active agent files area, or that an active agent file path exists in the sandbox.
 - Display real images only by calling display_browser_image or display_sandbox_image with the file path. Never put image bytes, binary data, base64, data URLs, or Markdown/HTML image tags for local files in the conversation.
@@ -42,12 +43,14 @@ Operating rules:
 - Use skills as just-in-time procedures: list/search when needed, read the relevant skill before relying on it, and avoid loading unrelated references.
 - Treat tool output as authoritative over assumptions. If context is summarized, rely on the live tail for the latest state.`;
 
+const AGENT_RUNTIME_PROMPT_WITH_COMMANDS = `${AGENT_RUNTIME_PROMPT}\n\n${COMMAND_EXECUTION_GUIDANCE}`;
+
 const SANDBOX_RUNTIME_PROMPT = `You are VertexAgent running entirely inside a persistent sandbox runtime.
 
 Runtime isolation:
 - The agent loop, model calls, tool calls, and filesystem operations all run in this sandbox.
 - Browser state, browser OPFS, browser files, browser actions, and other browser-only tools are unavailable and invisible.
-- The only visible filesystem is the sandbox workspace. Use sandbox file tools and execute_command for all inspection and changes.
+- The only visible filesystem is the sandbox workspace. Use sandbox file tools and command tools for all inspection and changes.
 - Browser memory is not copied into this runtime. At run startup, browser-backed AGENTS.md and enabled skills are copied into the sandbox only when their destination paths do not already exist; their identity and compact catalog are also included below in this prompt.
 - The browser is only a client that may disconnect and later replay this run's persisted event log and result.
 - Display real images only with display_sandbox_image and their sandbox file path. Never put image bytes, binary data, base64, data URLs, or Markdown/HTML image tags for local files in the conversation.
@@ -55,7 +58,9 @@ Runtime isolation:
 Operating rules:
 - Work from evidence and continue until the request is handled or a real blocker requires user input.
 - Do not promise future tool work; call an available tool in the same response.
-- Prefer small, reversible edits, verify important changes, and report failures honestly.`;
+- Prefer small, reversible edits, verify important changes, and report failures honestly.
+
+${COMMAND_EXECUTION_GUIDANCE}`;
 
 /**
  * Backward-compatible helper. Returns packed messages and system prompt.
@@ -281,7 +286,7 @@ function buildSummaryMessage(summary) {
 function buildSystemPrompt({ systemPrompt, memorySnapshot, skillsList, agentIdentity, runtimeMode }) {
   const sections = [];
   if (systemPrompt?.trim()) sections.push(systemPrompt.trim());
-  sections.push(runtimeMode === 'sandbox' ? SANDBOX_RUNTIME_PROMPT : AGENT_RUNTIME_PROMPT);
+  sections.push(runtimeMode === 'sandbox' ? SANDBOX_RUNTIME_PROMPT : AGENT_RUNTIME_PROMPT_WITH_COMMANDS);
   if (agentIdentity) sections.push(buildAgentIdentitySection(agentIdentity));
   const memorySection = buildMemorySection(memorySnapshot);
   if (memorySection) sections.push(memorySection);

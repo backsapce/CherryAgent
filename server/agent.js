@@ -22,13 +22,14 @@
  */
 
 import { createServer } from 'node:http';
-import { exec, spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, mkdirSync, unlinkSync, rmSync, renameSync } from 'node:fs';
 import { isAbsolute, join, extname, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import process from 'node:process';
 import { createAgentRunManager } from './agent-runtime.js';
+import { createCommandExecutor } from './command-executor.js';
+import { createCommandJobManager } from './command-jobs.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const STATIC_DIR = join(__dirname, '..', 'dist');
@@ -48,6 +49,7 @@ const FILES_ROOT_DIR = resolve(process.env.AGENT_FILES_DIR || WORKSPACE_DIR);
 const PUBLIC_WORKSPACE_LABEL = 'workspace';
 const AUTH_DISABLED = /^(1|true|yes)$/i.test(process.env.AGENT_DISABLE_AUTH || '');
 const RUNS_DIR = resolve(process.env.AGENT_RUNS_DIR || join(WORKSPACE_DIR, '.vertex-runs'));
+const JOBS_DIR = resolve(process.env.AGENT_JOBS_DIR || join(WORKSPACE_DIR, '.vertex-jobs'));
 
 function printBootConfig() {
   const agentEnv = Object.fromEntries(
@@ -70,6 +72,7 @@ function printBootConfig() {
       filesRootDir: FILES_ROOT_DIR,
       publicWorkspaceLabel: PUBLIC_WORKSPACE_LABEL,
       authDisabled: AUTH_DISABLED,
+      jobsDir: JOBS_DIR,
       staticDir: STATIC_DIR,
     },
   }, null, 2));
@@ -225,133 +228,31 @@ function isSameOrChildResolvedPath(path, parentPath) {
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-function execCommand(cmd, { timeout = MAX_TIMEOUT, signal, onStdout, onStderr, onStart } = {}) {
-  if (onStdout || onStderr || onStart) {
-    return new Promise((resolve, reject) => {
-      let settled = false;
-      let child;
+const commandExecutor = createCommandExecutor({
+  cwd: WORKSPACE_DIR,
+  shell: COMMAND_SHELL,
+  publicCwd: PUBLIC_WORKSPACE_LABEL,
+  publicFilesRoot: PUBLIC_WORKSPACE_LABEL,
+  maxOutputBytes: MAX_OUTPUT_BYTES,
+});
 
-      const cleanup = () => signal?.removeEventListener('abort', abort);
-      const finish = (callback, value) => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        callback(value);
-      };
-      const abort = () => {
-        child?.kill('SIGTERM');
-        finish(reject, new DOMException('Command execution aborted', 'AbortError'));
-      };
-
-      if (signal?.aborted) {
-        abort();
-        return;
-      }
-      signal?.addEventListener('abort', abort, { once: true });
-      child = streamCommand(cmd, {
-        onStart,
-        onStdout,
-        onStderr,
-        onError: (error) => finish(reject, error),
-        onExit: (result) => finish(resolve, result),
-      }, timeout);
-    });
-  }
-
-  return new Promise((resolve) => {
-    exec(cmd, {
-      timeout,
-      signal,
-      maxBuffer: 10 * 1024 * 1024,
-      shell: COMMAND_SHELL,
-      cwd: WORKSPACE_DIR,
-    }, (error, stdout, stderr) => {
-      resolve({
-        stdout: stdout || '',
-        stderr: stderr || '',
-        code: error ? error.code ?? 1 : 0,
-        platform: process.platform,
-        shell: COMMAND_SHELL || 'default',
-        cwd: PUBLIC_WORKSPACE_LABEL,
-        filesRoot: PUBLIC_WORKSPACE_LABEL,
-      });
-    });
-  });
+function execCommand(cmd, { timeout = MAX_TIMEOUT, ...options } = {}) {
+  return commandExecutor.execute(cmd, { ...options, timeout });
 }
 
 function streamCommand(cmd, { onStart, onStdout, onStderr, onExit, onError }, timeout = MAX_TIMEOUT) {
-  let stdout = '';
-  let stderr = '';
-  let outputBytes = 0;
-  let timedOut = false;
-  let settled = false;
-
-  const child = spawn(cmd, {
-    cwd: WORKSPACE_DIR,
-    shell: COMMAND_SHELL || true,
-    windowsHide: true,
+  const handle = commandExecutor.start(cmd, { timeout, onStart, onStdout, onStderr });
+  handle.result.then((result) => {
+    if (result.status === 'spawn_error') onError?.(new Error(result.stderr || 'Command failed to start'));
+    else onExit?.(result);
   });
-
-  onStart?.({
-    platform: process.platform,
-    shell: COMMAND_SHELL || 'default',
-    cwd: PUBLIC_WORKSPACE_LABEL,
-    filesRoot: PUBLIC_WORKSPACE_LABEL,
-    pid: child.pid,
-  });
-
-  const killTimer = setTimeout(() => {
-    timedOut = true;
-    child.kill('SIGTERM');
-  }, timeout);
-
-  const handleChunk = (streamName, chunk) => {
-    const text = chunk.toString();
-    outputBytes += Buffer.byteLength(text);
-
-    if (streamName === 'stdout') {
-      stdout += text;
-      onStdout?.(text);
-    } else {
-      stderr += text;
-      onStderr?.(text);
-    }
-
-    if (outputBytes > MAX_OUTPUT_BYTES) {
-      stderr += `\n[agent] Output exceeded ${MAX_OUTPUT_BYTES} bytes; command terminated.\n`;
-      child.kill('SIGTERM');
-    }
-  };
-
-  child.stdout?.on('data', (chunk) => handleChunk('stdout', chunk));
-  child.stderr?.on('data', (chunk) => handleChunk('stderr', chunk));
-
-  child.on('error', (err) => {
-    if (settled) return;
-    settled = true;
-    clearTimeout(killTimer);
-    onError?.(err);
-  });
-
-  child.on('close', (code, signal) => {
-    if (settled) return;
-    settled = true;
-    clearTimeout(killTimer);
-    onExit?.({
-      stdout,
-      stderr,
-      code: timedOut ? 124 : (code ?? 1),
-      signal,
-      timedOut,
-      platform: process.platform,
-      shell: COMMAND_SHELL || 'default',
-      cwd: PUBLIC_WORKSPACE_LABEL,
-      filesRoot: PUBLIC_WORKSPACE_LABEL,
-    });
-  });
-
-  return child;
+  return handle;
 }
+
+const commandJobManager = createCommandJobManager({
+  jobsDir: JOBS_DIR,
+  executor: commandExecutor,
+});
 
 function truncateLog(value, max = 2000) {
   if (!value) return '';
@@ -366,6 +267,10 @@ function runtimePath(inputPath = '') {
 const agentRunManager = createAgentRunManager({
   runsDir: RUNS_DIR,
   execCommand,
+  startCommand: (command) => commandJobManager.start(command),
+  getCommand: (id, cursor) => commandJobManager.get(id, cursor),
+  waitCommand: (id, options) => commandJobManager.wait(id, options),
+  stopCommand: (id) => commandJobManager.stop(id),
   async listFiles(inputPath) {
     const resolvedPath = runtimePath(inputPath);
     if (!existsSync(resolvedPath) || !statSync(resolvedPath).isDirectory()) throw new Error('Directory not found');
@@ -520,7 +425,12 @@ const server = createServer(async (req, res) => {
       shell: COMMAND_SHELL || 'default',
       cwd: PUBLIC_WORKSPACE_LABEL,
       filesRoot: PUBLIC_WORKSPACE_LABEL,
-      capabilities: { backgroundAgentRuns: true, agentRunProtocol: 1 },
+      capabilities: {
+        backgroundAgentRuns: true,
+        agentRunProtocol: 1,
+        backgroundCommands: true,
+        backgroundCommandProtocol: 1,
+      },
     }, req);
   }
 
@@ -588,13 +498,90 @@ const server = createServer(async (req, res) => {
     }
 
     console.log(`[agent] exec: ${cmd}`);
-    const result = await execCommand(cmd);
+    const controller = new AbortController();
+    const abortDisconnectedCommand = () => {
+      if (!res.writableEnded) controller.abort();
+    };
+    res.once('close', abortDisconnectedCommand);
+    let result;
+    try {
+      result = await execCommand(cmd, { signal: controller.signal });
+    } catch (error) {
+      if (error?.name === 'AbortError' && !res.writableEnded) return;
+      throw error;
+    } finally {
+      res.removeListener('close', abortDisconnectedCommand);
+    }
     console.log(`[agent] exit code: ${result.code} (${result.platform}, ${result.shell}, cwd=${result.cwd})`);
     if (result.code !== 0) {
       if (result.stdout) console.log(`[agent] stdout:\n${truncateLog(result.stdout)}`);
       if (result.stderr) console.warn(`[agent] stderr:\n${truncateLog(result.stderr)}`);
     }
     return json(res, 200, result, req);
+  }
+
+  // ── Managed background commands (requires auth) ───────────────────────
+  if (url.pathname === '/agent/commands' && req.method === 'POST') {
+    if (!isAuthorized(req)) return json(res, 401, { error: 'Unauthorized.' }, req);
+    const clientIp = req.socket.remoteAddress;
+    if (isRateLimited(`cmd:${clientIp}`, 30, 60_000)) {
+      return json(res, 429, { error: 'Too many commands. Slow down.' }, req);
+    }
+    let parsed;
+    try { parsed = JSON.parse(await readBody(req)); } catch {
+      return json(res, 400, { error: 'Invalid JSON body' }, req);
+    }
+    const command = parsed?.command;
+    if (!command || typeof command !== 'string') {
+      return json(res, 400, { error: 'Missing or invalid "command" field' }, req);
+    }
+    const validation = validateCommand(command);
+    if (validation.blocked) {
+      return json(res, 403, { error: `Command blocked: ${validation.reason}` }, req);
+    }
+    try {
+      console.log(`[agent] background exec: ${command}`);
+      return json(res, 202, commandJobManager.start(command), req);
+    } catch (error) {
+      return json(res, 400, { error: error.message || 'Could not start background command' }, req);
+    }
+  }
+
+  const commandRoute = url.pathname.match(/^\/agent\/commands\/([^/]+)$/);
+  if (commandRoute && req.method === 'GET') {
+    if (!isAuthorized(req)) return json(res, 401, { error: 'Unauthorized.' }, req);
+    const id = decodeURIComponent(commandRoute[1]);
+    const cursor = Number(url.searchParams.get('cursor')) || 0;
+    const waitMs = Math.min(30_000, Math.max(0, Number(url.searchParams.get('wait_ms')) || 0));
+    let result;
+    if (waitMs > 0) {
+      const controller = new AbortController();
+      const abortWait = () => {
+        if (!res.writableEnded) controller.abort();
+      };
+      res.once('close', abortWait);
+      try {
+        result = await commandJobManager.wait(id, { cursor, waitMs, signal: controller.signal });
+      } catch (error) {
+        if (error?.name === 'AbortError' && !res.writableEnded) return;
+        throw error;
+      } finally {
+        res.removeListener('close', abortWait);
+      }
+    } else {
+      result = commandJobManager.get(id, cursor);
+    }
+    return result
+      ? json(res, 200, result, req)
+      : json(res, 404, { error: 'Background command not found' }, req);
+  }
+
+  if (commandRoute && req.method === 'DELETE') {
+    if (!isAuthorized(req)) return json(res, 401, { error: 'Unauthorized.' }, req);
+    const result = await commandJobManager.stop(decodeURIComponent(commandRoute[1]));
+    return result
+      ? json(res, 202, result, req)
+      : json(res, 404, { error: 'Background command not found' }, req);
   }
 
   // ── Durable sandbox agent runs (requires auth) ─────────────────────────
@@ -981,7 +968,7 @@ server.on('upgrade', (req, socket) => {
 
     for (const frame of parsed.frames) {
       if (frame.opcode === 0x8) {
-        child?.kill('SIGTERM');
+        child?.terminate('aborted');
         socket.end();
         return;
       }
@@ -1045,11 +1032,11 @@ server.on('upgrade', (req, socket) => {
   });
 
   socket.on('close', () => {
-    child?.kill('SIGTERM');
+    child?.terminate('aborted');
   });
 
   socket.on('error', () => {
-    child?.kill('SIGTERM');
+    child?.terminate('aborted');
   });
 });
 
