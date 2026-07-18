@@ -1109,6 +1109,21 @@
 }
 
 /* Thinking block */
+.assistant-transcript {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.assistant-transcript .transcript-text {
+  margin-bottom: 8px;
+}
+
+.transcript-tool-segment,
+.transcript-reasoning-segment {
+  display: contents;
+}
+
 .thinking-block {
   margin-bottom: 8px;
 }

@@ -36,6 +36,11 @@ test('agent events assemble text, reasoning, tool state, and usage', () => {
     result: 'src/App.jsx',
   }]);
   assert.deepEqual(state.usage, { total_tokens: 42 });
+  assert.deepEqual(state.transcript.map(({ type, content, toolCallId }) => ({ type, content, toolCallId })), [
+    { type: 'text', content: 'Inspecting files.', toolCallId: undefined },
+    { type: 'reasoning', content: 'Need the project layout.', toolCallId: undefined },
+    { type: 'tool', content: undefined, toolCallId: 'call-1' },
+  ]);
 });
 
 test('agent events preserve separate model-step segments', () => {
@@ -47,6 +52,108 @@ test('agent events preserve separate model-step segments', () => {
 
   assert.equal(state.content, 'First step.\n\nFinal step.');
   assert.equal(state.thinking, 'First reason.\n\nSecond reason.');
+  assert.deepEqual(state.transcript.map((segment) => [segment.type, segment.content]), [
+    ['text', 'First step.'],
+    ['text', 'Final step.'],
+    ['reasoning', 'First reason.'],
+    ['reasoning', 'Second reason.'],
+  ]);
+});
+
+test('agent transcript preserves reasoning, text, and tool order across steps', () => {
+  let state = createAgentEventState();
+  const apply = (event) => { state = applyAgentEvent(state, event); };
+
+  apply({ type: 'reasoning-start', segmentId: 'r1', stepId: 'step-1', at: '2026-01-01T00:00:00.000Z' });
+  apply({ type: 'reasoning-delta', segmentId: 'r1', text: 'Plan.' });
+  apply({ type: 'reasoning-end', segmentId: 'r1', at: '2026-01-01T00:00:01.000Z' });
+  apply({ type: 'text-delta', segmentId: 't1', text: 'I will inspect it.' });
+  apply({ type: 'tool-call', toolCallId: 'call-1', toolName: 'read_file', input: { path: 'a.js' } });
+  apply({ type: 'reasoning-delta', segmentId: 'r2', stepId: 'step-2', text: 'Now verify.', newSegment: true });
+  apply({ type: 'tool-call', toolCallId: 'call-2', toolName: 'execute_command', input: { command: 'npm test' } });
+  apply({ type: 'text-delta', segmentId: 't2', stepId: 'step-3', text: 'Done.', newSegment: true });
+
+  assert.deepEqual(state.transcript.map((segment) => segment.type === 'tool'
+    ? `tool:${segment.toolCallId}`
+    : `${segment.type}:${segment.content}`), [
+    'reasoning:Plan.',
+    'text:I will inspect it.',
+    'tool:call-1',
+    'reasoning:Now verify.',
+    'tool:call-2',
+    'text:Done.',
+  ]);
+  assert.equal(state.transcript[0].status, 'finished');
+});
+
+test('agent transcript does not lose text deltas interleaved with a tool call', () => {
+  let state = createAgentEventState();
+  const apply = (event) => { state = applyAgentEvent(state, event); };
+
+  apply({ type: 'text-start', segmentId: 't1', sequence: 1 });
+  apply({ type: 'text-delta', segmentId: 't1', text: 'Before tool.', sequence: 2 });
+  apply({ type: 'tool-input-start', toolCallId: 'call-1', toolName: 'read_file', sequence: 3 });
+  apply({ type: 'text-delta', segmentId: 't1', text: 'After tool.', sequence: 4 });
+  apply({ type: 'text-end', segmentId: 't1', sequence: 5 });
+
+  assert.deepEqual(state.transcript.map((segment) => segment.type === 'tool'
+    ? `tool:${segment.toolCallId}`
+    : `${segment.type}:${segment.content}`), [
+    'text:Before tool.',
+    'tool:call-1',
+    'text:After tool.',
+  ]);
+  assert.equal(state.transcript[2].status, 'finished');
+});
+
+test('tagged reasoning redirects text after the closing thinking tag', () => {
+  let state = createAgentEventState();
+  const apply = (event) => { state = applyAgentEvent(state, event); };
+
+  apply({ type: 'reasoning-start', segmentId: 'r1', sequence: 1 });
+  apply({ type: 'reasoning-delta', segmentId: 'r1', text: '<think', sequence: 2 });
+  apply({ type: 'reasoning-delta', segmentId: 'r1', text: 'ing>Inspect files.', sequence: 3 });
+  apply({ type: 'reasoning-delta', segmentId: 'r1', text: '</thinking>正常回答。', sequence: 4 });
+  apply({ type: 'reasoning-delta', segmentId: 'r1', text: '继续回答。', sequence: 5 });
+  apply({ type: 'reasoning-end', segmentId: 'r1', sequence: 6 });
+
+  assert.equal(state.thinking, 'Inspect files.');
+  assert.equal(state.content, '正常回答。继续回答。');
+  assert.deepEqual(state.transcript.map((segment) => [segment.type, segment.content]), [
+    ['reasoning', 'Inspect files.'],
+    ['text', '正常回答。继续回答。'],
+  ]);
+  assert.equal(state.transcript[1].status, 'finished');
+});
+
+test('repeated thinking tags keep the final answer out of the thinking block', () => {
+  let state = createAgentEventState();
+  const apply = (event) => { state = applyAgentEvent(state, event); };
+
+  apply({ type: 'reasoning-start', stepId: 'step-10', segmentId: 'r1', sequence: 1 });
+  apply({
+    type: 'reasoning-delta',
+    stepId: 'step-10',
+    segmentId: 'r1',
+    text: 'First kill the existing training process.\n</thinking>\n',
+    sequence: 2,
+  });
+  apply({
+    type: 'reasoning-delta',
+    stepId: 'step-10',
+    segmentId: 'r1',
+    text: '<thinking>\nThe instance is already running.\n</thinking>\n\n实例上已经有一个训练在运行中。',
+    sequence: 3,
+  });
+  apply({ type: 'reasoning-end', stepId: 'step-10', segmentId: 'r1', sequence: 4 });
+
+  assert.equal(state.thinking.includes('实例上已经'), false);
+  assert.equal(state.thinking.includes('<thinking>'), false);
+  assert.equal(state.content.trim(), '实例上已经有一个训练在运行中。');
+  assert.deepEqual(state.transcript.map((segment) => segment.type), [
+    'reasoning',
+    'text',
+  ]);
 });
 
 test('agent events retain streamed terminal output and exit metadata', () => {

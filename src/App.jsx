@@ -152,7 +152,7 @@ function formatToolCallsForLlm(toolCalls) {
 
 function expandMessagesForLlm(messages) {
   return messages.map((message) => {
-    const { contextFiles, toolCalls, usage: _usage, ...rest } = message;
+    const { contextFiles, toolCalls, transcript: _transcript, usage: _usage, ...rest } = message;
     let content = message.content || '';
 
     if (contextFiles?.length) {
@@ -175,7 +175,7 @@ function expandMessagesForLlm(messages) {
 }
 
 function expandMessagesForSandboxRuntime(messages) {
-  return messages.map(({ contextFiles: _contextFiles, toolCalls: _toolCalls, usage: _usage, ...message }) => message);
+  return messages.map(({ contextFiles: _contextFiles, toolCalls: _toolCalls, transcript: _transcript, usage: _usage, ...message }) => message);
 }
 
 function OfflineBanner() {
@@ -751,7 +751,7 @@ function App() {
           c.id === sessionId
             ? {
                 ...c,
-                messages: [...c.messages, { id: replyId, role: 'assistant', content: '', thinking: '', toolCalls: [] }],
+                messages: [...c.messages, { id: replyId, role: 'assistant', content: '', thinking: '', toolCalls: [], transcript: [] }],
               }
             : c
         )
@@ -806,6 +806,7 @@ function App() {
           content: streamingContentRef.current,
           thinking: streamingThinkingRef.current,
           toolCalls: [...toolCalls],
+          transcript: agentEventState.transcript,
         });
       });
     };
@@ -914,7 +915,7 @@ function App() {
 
       const finalContent = result.content || streamingContentRef.current;
       const finalThinking = result.thinking || streamingThinkingRef.current;
-      updateMessage({ content: finalContent, thinking: finalThinking, toolCalls: [...toolCalls], usage: result.usage });
+      updateMessage({ content: finalContent, thinking: finalThinking, toolCalls: [...toolCalls], transcript: agentEventState.transcript, usage: result.usage });
       if (result.toolCalls?.some((tc) => tc.name === 'spawn_agent')) {
         setAgentList(await listAgents());
       }
@@ -926,10 +927,10 @@ function App() {
             tc.result = tc.result || 'Aborted';
           }
         }
-        updateMessage({ content: streamingContentRef.current, thinking: streamingThinkingRef.current, toolCalls: [...toolCalls] });
+        updateMessage({ content: streamingContentRef.current, thinking: streamingThinkingRef.current, toolCalls: [...toolCalls], transcript: agentEventState.transcript });
       } else {
         const errorContent = streamingContentRef.current || `Error: ${err.message}`;
-        updateMessage({ content: errorContent, toolCalls: [...toolCalls] });
+        updateMessage({ content: errorContent, toolCalls: [...toolCalls], transcript: agentEventState.transcript });
       }
     } finally {
       if (rafRef.current) {
@@ -1043,6 +1044,7 @@ function App() {
               content: '',
               thinking: '',
               toolCalls: [],
+              transcript: [],
             }],
             remoteRun: {
               id: latest.id,
