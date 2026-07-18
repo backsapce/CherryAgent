@@ -20,7 +20,17 @@ import {
   getSkill,
   searchSkills,
 } from './skills.js';
-import { executeCommand, listFiles, readFileText, writeFile } from '../models/agent.js';
+import {
+  E2B_AGENT_ID,
+  executeCommand,
+  getCommand,
+  listFiles,
+  readFileText,
+  startCommand,
+  stopCommand,
+  waitCommand,
+  writeFile,
+} from '../models/agent.js';
 import {
   getAgentFileInfo,
   getAgentSkillFileInfo,
@@ -329,7 +339,7 @@ registry.register({
   category: 'shell',
   schema: {
     description:
-      'Execute a shell command in the selected sandbox runtime. Commands can only see the sandbox filesystem/workdir, not browser OPFS, the active agent files area, AGENTS.md, memory, or skills unless you explicitly copy content into the sandbox.',
+      'Run a SHORT foreground shell command that is expected to finish within 30 seconds. Use it for quick inspection and bounded operations such as pwd, ls, git status, or a small targeted test. NEVER use it for training, servers, watchers, long builds, downloads, migrations, or any command whose duration is unknown or may exceed 30 seconds; use start_command instead. Commands can only see the sandbox filesystem/workdir, not browser OPFS.',
     parameters: {
       type: 'object',
       properties: {
@@ -358,12 +368,113 @@ registry.register({
       filesRoot: result.filesRoot,
     });
     let out = `Exit code: ${result.code}`;
+    if (result.status) out += `\nStatus: ${result.status}${Number.isFinite(result.durationMs) ? ` (${result.durationMs} ms)` : ''}`;
     if (result.platform || result.shell || result.cwd || result.filesRoot) {
       out += `\nEnvironment: platform=${result.platform || 'unknown'}, shell=${result.shell || 'unknown'}, cwd=${result.cwd || 'unknown'}, filesRoot=${result.filesRoot || 'unknown'}`;
     }
     if (result.stdout) out += `\nStdout:\n${result.stdout}`;
     if (result.stderr) out += `\nStderr:\n${result.stderr}`;
     return out;
+  },
+});
+
+const managedCommandAvailable = (ctx) => !!ctx?.agentUrl && ctx.agentUrl !== E2B_AGENT_ID;
+
+registry.register({
+  name: 'start_command',
+  category: 'shell',
+  schema: {
+    description:
+      'Start a managed BACKGROUND shell command and return immediately with a job_id. Use this instead of execute_command for training, servers, watchers, lengthy builds/tests/downloads/migrations, commands with unknown duration, or anything expected to take 30 seconds or more. Do not add nohup, &, disown, screen, tmux, or shell timeout wrappers; the server owns the process, logs, and cancellation.',
+    parameters: {
+      type: 'object',
+      properties: {
+        command: {
+          type: 'string',
+          description: 'The complete foreground-form shell command. Do not append & or nohup.',
+        },
+      },
+      required: ['command'],
+      additionalProperties: false,
+    },
+  },
+  checkAvailable: managedCommandAvailable,
+  async handler({ command }, ctx) {
+    return JSON.stringify(await startCommand(command, ctx.agentUrl, ctx?.signal), null, 2);
+  },
+});
+
+registry.register({
+  name: 'get_command',
+  category: 'shell',
+  readOnly: true,
+  parallelSafe: true,
+  schema: {
+    description:
+      'Read the current status and one incremental log segment for a managed background command. Pass nextCursor from the previous result as cursor so logs are not repeated. This returns immediately.',
+    parameters: {
+      type: 'object',
+      properties: {
+        job_id: { type: 'string', description: 'The job_id returned by start_command.' },
+        cursor: { type: 'integer', minimum: 0, description: 'Log byte cursor; use nextCursor from the previous result. Defaults to 0.' },
+      },
+      required: ['job_id'],
+      additionalProperties: false,
+    },
+  },
+  checkAvailable: managedCommandAvailable,
+  async handler({ job_id: jobId, cursor = 0 }, ctx) {
+    return JSON.stringify(await getCommand(jobId, ctx.agentUrl, cursor, ctx?.signal), null, 2);
+  },
+});
+
+registry.register({
+  name: 'wait_command',
+  category: 'shell',
+  readOnly: true,
+  parallelSafe: true,
+  schema: {
+    description:
+      'Wait up to 30 seconds for new logs or completion of a managed background command. Use only when completion is likely within that brief wait. For training or other work expected to need minutes or hours, call schedule_wakeup instead of repeatedly calling wait_command.',
+    parameters: {
+      type: 'object',
+      properties: {
+        job_id: { type: 'string', description: 'The job_id returned by start_command.' },
+        cursor: { type: 'integer', minimum: 0, description: 'Use nextCursor from the previous result. Defaults to 0.' },
+        wait_seconds: { type: 'integer', minimum: 1, maximum: 30, description: 'Maximum wait, from 1 through 30 seconds. Defaults to 30.' },
+      },
+      required: ['job_id'],
+      additionalProperties: false,
+    },
+  },
+  checkAvailable: managedCommandAvailable,
+  async handler({ job_id: jobId, cursor = 0, wait_seconds: waitSeconds = 30 }, ctx) {
+    return JSON.stringify(await waitCommand(jobId, ctx.agentUrl, {
+      cursor,
+      waitMs: waitSeconds * 1000,
+      signal: ctx?.signal,
+    }), null, 2);
+  },
+});
+
+registry.register({
+  name: 'stop_command',
+  category: 'shell',
+  schema: {
+    description:
+      'Stop a managed background command by job_id. This terminates the entire process tree, first gracefully and then forcibly if needed. Use only when the user requested cancellation or continuing the job is no longer useful.',
+    parameters: {
+      type: 'object',
+      properties: {
+        job_id: { type: 'string', description: 'The job_id returned by start_command.' },
+      },
+      required: ['job_id'],
+      additionalProperties: false,
+    },
+  },
+  checkAvailable: managedCommandAvailable,
+  async handler({ job_id: jobId }, ctx) {
+    return JSON.stringify(await stopCommand(jobId, ctx.agentUrl, ctx?.signal), null, 2);
   },
 });
 
@@ -618,7 +729,7 @@ registry.register({
   parallelSafe: true,
   schema: {
     description:
-      'List files in the sandbox runtime workdir used by execute_command. This is NOT browser OPFS, NOT workspace/<active-agent>/files/, and does not contain AGENTS.md, memory, skills, or UI-selected browser files unless you explicitly copy them there.',
+      'List files in the sandbox runtime workdir used by command tools. This is NOT browser OPFS, NOT workspace/<active-agent>/files/, and does not contain AGENTS.md, memory, skills, or UI-selected browser files unless you explicitly copy them there.',
     parameters: {
       type: 'object',
       properties: {
@@ -649,7 +760,7 @@ registry.register({
   parallelSafe: true,
   schema: {
     description:
-      'Read a text file from the sandbox runtime workdir used by execute_command. Use read_browser_file for files under workspace/<active-agent>/files/.',
+      'Read a text file from the sandbox runtime workdir used by command tools. Use read_browser_file for files under workspace/<active-agent>/files/.',
     parameters: {
       type: 'object',
       properties: {
@@ -730,7 +841,7 @@ registry.register({
   category: 'sandbox-files',
   schema: {
     description:
-      'Write a text file to the sandbox runtime workdir used by execute_command. This does not update browser OPFS or workspace/<active-agent>/files/.',
+      'Write a text file to the sandbox runtime workdir used by command tools. This does not update browser OPFS or workspace/<active-agent>/files/.',
     parameters: {
       type: 'object',
       properties: {
@@ -1097,12 +1208,12 @@ Filesystem model:
 - Browser OPFS is the durable agent storage backend, but browser file tools can only access workspace/<active-agent>/files/.
 - Browser file tools cannot access OPFS root, other agents, AGENTS.md, memory, or skills by path.
 - Use the skill tool for catalog/read operations, and skill file tools for explicit edits under workspace/<active-agent>/skills/.
-- The sandbox filesystem is only the runtime workdir for execute_command.
+- The sandbox filesystem is only the runtime workdir for command tools.
 - Use browser file tools for persistent files under workspace/<active-agent>/files/ and sandbox file tools for command-runtime files.
 
 Do not answer with a promise like "I will inspect/read/create/run". If the next step needs a tool, call the tool in the same response.
 
-Use the selected workspace and memory. Use tools when they materially help. Do not ask the user questions; if something is ambiguous, make a conservative assumption and state it.`;
+Use the selected workspace and memory. Use tools when they materially help. For CLI work, follow the command selection rules in the base runtime prompt, including start_command for long or uncertain work. Do not ask the user questions; if something is ambiguous, make a conservative assumption and state it.`;
 
 function normalizeSpawnTasks({ task, tasks, agentId, agentName }) {
   if (Array.isArray(tasks) && tasks.length > 0) {

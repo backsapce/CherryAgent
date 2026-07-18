@@ -9,6 +9,10 @@ function createManager(runsDir) {
   return createAgentRunManager({
     runsDir,
     execCommand: async () => ({ stdout: '', stderr: '', code: 0 }),
+    startCommand: async () => ({ job_id: 'job-one', status: 'running' }),
+    getCommand: async () => ({ job_id: 'job-one', status: 'running' }),
+    waitCommand: async () => ({ job_id: 'job-one', status: 'running' }),
+    stopCommand: async () => ({ job_id: 'job-one', status: 'stopped' }),
     listFiles: async () => [],
     readFile: async () => '',
     writeFile: async () => {},
@@ -18,8 +22,68 @@ function createManager(runsDir) {
 test('sandbox runtime exposes no browser-owned tools', () => {
   assert.deepEqual(
     REMOTE_TOOL_SCHEMAS.map((tool) => tool.name),
-    ['execute_command', 'list_sandbox_files', 'read_sandbox_file', 'display_sandbox_image', 'write_sandbox_file', 'schedule_wakeup']
+    [
+      'execute_command',
+      'start_command',
+      'get_command',
+      'wait_command',
+      'stop_command',
+      'list_sandbox_files',
+      'read_sandbox_file',
+      'display_sandbox_image',
+      'write_sandbox_file',
+      'schedule_wakeup',
+    ]
   );
+  assert.match(
+    REMOTE_TOOL_SCHEMAS.find((tool) => tool.name === 'execute_command').description,
+    /NEVER use for training/
+  );
+  assert.match(
+    REMOTE_TOOL_SCHEMAS.find((tool) => tool.name === 'start_command').description,
+    /unknown duration/
+  );
+});
+
+test('sandbox background command dispatch preserves job ids, cursors, waits, and stops', async () => {
+  const calls = [];
+  const dispatch = createRuntimeToolDispatcher({
+    execCommand: async () => ({ stdout: '', stderr: '', code: 0 }),
+    startCommand: async (command) => {
+      calls.push(['start', command]);
+      return { job_id: 'job-one', status: 'running', nextCursor: 0 };
+    },
+    getCommand: async (id, cursor) => {
+      calls.push(['get', id, cursor]);
+      return { job_id: id, status: 'running', nextCursor: cursor + 5 };
+    },
+    waitCommand: async (id, options) => {
+      calls.push(['wait', id, options.cursor, options.waitMs, options.signal]);
+      return { job_id: id, status: 'completed', nextCursor: options.cursor };
+    },
+    stopCommand: async (id) => {
+      calls.push(['stop', id]);
+      return { job_id: id, status: 'stopped' };
+    },
+    listFiles: async () => [],
+    readFile: async () => '',
+    writeFile: async () => {},
+  });
+  const controller = new AbortController();
+
+  assert.equal(JSON.parse(await dispatch('start_command', { command: 'python train.py' })).job_id, 'job-one');
+  assert.equal(JSON.parse(await dispatch('get_command', { job_id: 'job-one', cursor: 10 })).nextCursor, 15);
+  assert.equal(JSON.parse(await dispatch('wait_command', {
+    job_id: 'job-one', cursor: 15, wait_seconds: 12,
+  }, { signal: controller.signal })).status, 'completed');
+  assert.equal(JSON.parse(await dispatch('stop_command', { job_id: 'job-one' })).status, 'stopped');
+  assert.deepEqual(calls.slice(0, 2), [
+    ['start', 'python train.py'],
+    ['get', 'job-one', 10],
+  ]);
+  assert.deepEqual(calls[2].slice(0, 4), ['wait', 'job-one', 15, 12_000]);
+  assert.strictEqual(calls[2][4], controller.signal);
+  assert.deepEqual(calls[3], ['stop', 'job-one']);
 });
 
 test('sandbox wake-up dispatch delegates scheduling to the run manager', async () => {

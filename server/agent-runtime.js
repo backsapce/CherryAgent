@@ -17,11 +17,58 @@ const SANDBOX_ATTACHMENTS_MARKER = 'Sandbox attachment files (available to shell
 const REMOTE_TOOL_SCHEMAS = [
   {
     name: 'execute_command',
-    description: 'Execute a shell command inside the sandbox runtime. The browser, browser OPFS, and browser files are not available.',
+    description: 'Run a SHORT foreground shell command expected to finish within 30 seconds. Use only for quick inspection or bounded operations. NEVER use for training, servers, watchers, long builds, downloads, migrations, or commands with unknown duration; use start_command instead. The browser, browser OPFS, and browser files are unavailable.',
     parameters: {
       type: 'object',
       properties: { command: { type: 'string', description: 'Shell command to execute.' } },
       required: ['command'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'start_command',
+    description: 'Start a managed BACKGROUND shell command and return immediately with a job_id. Use for training, servers, watchers, lengthy builds/tests/downloads/migrations, commands of unknown duration, or anything expected to take 30 seconds or more. Do not add nohup, &, disown, screen, tmux, or timeout wrappers.',
+    parameters: {
+      type: 'object',
+      properties: { command: { type: 'string', description: 'Complete foreground-form command without & or nohup.' } },
+      required: ['command'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'get_command',
+    description: 'Return immediately with status and one incremental log segment for a background job. Pass nextCursor from the previous result as cursor.',
+    parameters: {
+      type: 'object',
+      properties: {
+        job_id: { type: 'string' },
+        cursor: { type: 'integer', minimum: 0 },
+      },
+      required: ['job_id'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'wait_command',
+    description: 'Wait at most 30 seconds for new logs or completion of a background job. Use only when completion is likely soon. For minutes or hours, use schedule_wakeup instead of repeated waits.',
+    parameters: {
+      type: 'object',
+      properties: {
+        job_id: { type: 'string' },
+        cursor: { type: 'integer', minimum: 0 },
+        wait_seconds: { type: 'integer', minimum: 1, maximum: 30 },
+      },
+      required: ['job_id'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'stop_command',
+    description: 'Stop a managed background job and its entire process tree. Use only when cancellation was requested or the job is no longer useful.',
+    parameters: {
+      type: 'object',
+      properties: { job_id: { type: 'string' } },
+      required: ['job_id'],
       additionalProperties: false,
     },
   },
@@ -90,7 +137,18 @@ const REMOTE_TOOL_SCHEMAS = [
   },
 ];
 
-export function createAgentRunManager({ runsDir, execCommand, listFiles, readFile, writeFile, fileExists }) {
+export function createAgentRunManager({
+  runsDir,
+  execCommand,
+  startCommand,
+  getCommand,
+  waitCommand,
+  stopCommand,
+  listFiles,
+  readFile,
+  writeFile,
+  fileExists,
+}) {
   mkdirSync(runsDir, { recursive: true });
   const runs = new Map();
   loadPersistedRuns(runsDir, runs);
@@ -117,7 +175,16 @@ export function createAgentRunManager({ runsDir, execCommand, listFiles, readFil
     }
   };
 
-  const dispatchTool = createRuntimeToolDispatcher({ execCommand, listFiles, readFile, writeFile });
+  const dispatchTool = createRuntimeToolDispatcher({
+    execCommand,
+    startCommand,
+    getCommand,
+    waitCommand,
+    stopCommand,
+    listFiles,
+    readFile,
+    writeFile,
+  });
 
   const start = (input) => {
     validateRunInput(input);
@@ -320,7 +387,16 @@ export async function materializeMessageImages(messages = [], { fileExists, writ
   return output;
 }
 
-export function createRuntimeToolDispatcher({ execCommand, listFiles, readFile, writeFile }) {
+export function createRuntimeToolDispatcher({
+  execCommand,
+  startCommand,
+  getCommand,
+  waitCommand,
+  stopCommand,
+  listFiles,
+  readFile,
+  writeFile,
+}) {
   return async (name, input, context) => {
     if (name === 'execute_command') {
       const result = await execCommand(input.command, {
@@ -336,6 +412,29 @@ export function createRuntimeToolDispatcher({ execCommand, listFiles, readFile, 
         filesRoot: result.filesRoot,
       });
       return formatCommandResult(result);
+    }
+    if (name === 'start_command') {
+      if (!startCommand) throw new Error('Managed background commands are unavailable.');
+      return JSON.stringify(await startCommand(input.command), null, 2);
+    }
+    if (name === 'get_command') {
+      if (!getCommand) throw new Error('Managed background commands are unavailable.');
+      const result = await getCommand(input.job_id, input.cursor || 0);
+      return result ? JSON.stringify(result, null, 2) : `Background command not found: ${input.job_id}`;
+    }
+    if (name === 'wait_command') {
+      if (!waitCommand) throw new Error('Managed background commands are unavailable.');
+      const result = await waitCommand(input.job_id, {
+        cursor: input.cursor || 0,
+        waitMs: (input.wait_seconds || 30) * 1000,
+        signal: context?.signal,
+      });
+      return result ? JSON.stringify(result, null, 2) : `Background command not found: ${input.job_id}`;
+    }
+    if (name === 'stop_command') {
+      if (!stopCommand) throw new Error('Managed background commands are unavailable.');
+      const result = await stopCommand(input.job_id);
+      return result ? JSON.stringify(result, null, 2) : `Background command not found: ${input.job_id}`;
     }
     if (name === 'list_sandbox_files') return JSON.stringify(await listFiles(input.path || ''), null, 2);
     if (name === 'read_sandbox_file') return readFile(input.path);
@@ -396,6 +495,7 @@ function inferImageMime(path) {
 
 function formatCommandResult(result) {
   let output = `Exit code: ${result.code}`;
+  if (result.status) output += `\nStatus: ${result.status}${Number.isFinite(result.durationMs) ? ` (${result.durationMs} ms)` : ''}`;
   if (result.platform || result.shell || result.cwd || result.filesRoot) {
     output += `\nEnvironment: platform=${result.platform || 'unknown'}, shell=${result.shell || 'unknown'}, cwd=${result.cwd || 'unknown'}, filesRoot=${result.filesRoot || 'unknown'}`;
   }

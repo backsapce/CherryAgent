@@ -1,6 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { executeCommand, listFiles, listRemoteFiles } from './agent.js';
+import {
+  executeCommand,
+  getCommand,
+  listFiles,
+  listRemoteFiles,
+  startCommand,
+  stopCommand,
+  waitCommand,
+} from './agent.js';
 
 function installBrowserMocks(WebSocketMock, fetchMock) {
   const previous = {
@@ -71,6 +79,31 @@ test('executeCommand does not retry after submitting a command over WebSocket', 
       /Agent WebSocket connection failed/
     );
     assert.equal(fetchCalls, 0);
+  } finally {
+    restore();
+  }
+});
+
+test('managed command clients use job endpoints and preserve log cursors', async () => {
+  const requests = [];
+  const restore = installBrowserMocks(undefined, async (url, options) => {
+    requests.push({ url, options });
+    return { ok: true, json: async () => ({ job_id: 'job-one', status: 'running' }) };
+  });
+
+  try {
+    await startCommand('python train.py', 'https://sandbox.example');
+    await getCommand('job-one', 'https://sandbox.example', 17);
+    await waitCommand('job-one', 'https://sandbox.example', { cursor: 23, waitMs: 12_000 });
+    await stopCommand('job-one', 'https://sandbox.example');
+
+    assert.deepEqual(requests.map((request) => [request.options.method, request.url]), [
+      ['POST', 'https://sandbox.example/agent/commands'],
+      ['GET', 'https://sandbox.example/agent/commands/job-one?cursor=17'],
+      ['GET', 'https://sandbox.example/agent/commands/job-one?cursor=23&wait_ms=12000'],
+      ['DELETE', 'https://sandbox.example/agent/commands/job-one'],
+    ]);
+    assert.deepEqual(JSON.parse(requests[0].options.body), { command: 'python train.py' });
   } finally {
     restore();
   }

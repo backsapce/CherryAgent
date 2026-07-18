@@ -214,6 +214,59 @@ export function abortRemoteAgentRun(url, runId) {
   return requestAgentRun(url, `/${encodeURIComponent(runId)}`, { method: 'DELETE' });
 }
 
+function assertManagedCommandRuntime(url) {
+  if (!url || url === E2B_AGENT_ID) {
+    throw new Error('Managed background commands require a connected VertexAgent agent server.');
+  }
+}
+
+async function requestManagedCommand(url, path = '', options = {}) {
+  assertManagedCommandRuntime(url);
+  const endpoint = `${resolveAgentUrl(url)}/commands${path}`;
+  const headers = { ...(options.body ? { 'Content-Type': 'application/json' } : {}) };
+  const token = getAgentToken(url);
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const res = await fetch(endpoint, { ...options, headers: { ...headers, ...options.headers } });
+  const data = await res.json().catch(() => ({ error: 'Invalid background command response' }));
+  if (!res.ok) throw new Error(data.error || `Background command returned ${res.status}`);
+  return data;
+}
+
+/** Start a managed command that continues independently of the browser request. */
+export function startCommand(command, url, signal) {
+  return requestManagedCommand(url, '', {
+    method: 'POST',
+    body: JSON.stringify({ command }),
+    ...(signal ? { signal } : {}),
+  });
+}
+
+/** Read a background command and the next bounded log segment. */
+export function getCommand(jobId, url, cursor = 0, signal) {
+  const query = `?cursor=${Math.max(0, Number(cursor) || 0)}`;
+  return requestManagedCommand(url, `/${encodeURIComponent(jobId)}${query}`, {
+    method: 'GET',
+    ...(signal ? { signal } : {}),
+  });
+}
+
+/** Long-poll briefly for command output or a terminal state. */
+export function waitCommand(jobId, url, { cursor = 0, waitMs = 30_000, signal } = {}) {
+  const query = `?cursor=${Math.max(0, Number(cursor) || 0)}&wait_ms=${Math.min(30_000, Math.max(0, Number(waitMs) || 0))}`;
+  return requestManagedCommand(url, `/${encodeURIComponent(jobId)}${query}`, {
+    method: 'GET',
+    ...(signal ? { signal } : {}),
+  });
+}
+
+/** Stop a managed command and its entire process tree. */
+export function stopCommand(jobId, url, signal) {
+  return requestManagedCommand(url, `/${encodeURIComponent(jobId)}`, {
+    method: 'DELETE',
+    ...(signal ? { signal } : {}),
+  });
+}
+
 function executeCommandStreaming(cmd, url, opts = {}) {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(resolveAgentWsUrl(url));

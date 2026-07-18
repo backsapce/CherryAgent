@@ -55,6 +55,7 @@ npm run dev:agent    # Agent Node only
 npm run build        # Production build
 npm run build:pages  # GitHub Pages build with /VertexAgent/ base path
 npm run lint         # ESLint
+npm run test:runtime # Agent runtime and managed command tests
 npm run preview      # Preview dist/ on port 5173
 ```
 
@@ -84,7 +85,7 @@ Sandbox support is optional. VertexAgent works as a private browser session app 
 VertexAgent keeps a sandbox ID in `localStorage` so it can reconnect after page reloads.
 
 E2B Cloud currently provides command/file execution to the browser runtime. It
-does not expose the VertexAgent background-run protocol.
+does not expose the VertexAgent background-run or managed-background-command protocols.
 
 ### Self-Hosted Agent Node
 
@@ -149,6 +150,16 @@ replays its events/result. Keep the Agent Node process alive for the run to
 continue. Because the selected LLM profile is sent to the runtime for model
 calls, use an authenticated HTTPS connection for remote Agent Nodes.
 
+Shell work has two execution paths. `execute_command` is a foreground tool with
+a 30-second deadline for quick, bounded work. Training, servers, watchers, long
+builds, downloads, and commands with uncertain duration use managed background
+jobs through `start_command`, `get_command`, `wait_command`, and `stop_command`.
+Background jobs continue when the browser disconnects, keep bounded incremental
+logs under `AGENT_JOBS_DIR`, and are stopped as a complete process tree when
+requested. Keep the Agent Node running while a job is active; after an Agent
+Node restart, jobs whose completion was not observed are reported as
+`interrupted`.
+
 ## Self-Hosted Front
 
 ```bash
@@ -175,6 +186,7 @@ Agent Node environment variables:
 | `AGENT_WORKING_DIR` | Server process cwd | Agent workspace root. Commands run here, and file APIs use this same directory by default. |
 | `AGENT_FILES_DIR` | `AGENT_WORKING_DIR` | Optional separate root for file APIs. Set this only when you intentionally want managed files isolated from the command cwd. |
 | `AGENT_RUNS_DIR` | `<workspace>/.vertex-runs` | Persistent metadata, event logs, and results for background sandbox Agent runs. |
+| `AGENT_JOBS_DIR` | `<workspace>/.vertex-jobs` | Persistent metadata and bounded logs for managed background commands. |
 | `AGENT_TOKEN_FILE` | `.vertex-token` | File used to persist long-lived auth tokens; the sandbox Docker image sets this to `/home/vertex/.vertex-token`. |
 | `AGENT_DISABLE_AUTH` | unset | Set to `true` only when the sandbox is already protected by another trusted boundary. When enabled, `/agent` returns `needsAuth: false` and command/file APIs do not require a token. |
 | `AGENT_ALLOWED_ORIGINS` | `http://localhost:5173` | Comma-separated CORS allowlist |
