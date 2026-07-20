@@ -44,6 +44,23 @@ const FILES = {
   },
 };
 
+// Memory mutations are read-modify-write operations. Multiple session loops
+// may target the same agent at once, so serialize each logical memory file to
+// prevent one turn from overwriting records written by another turn.
+const memoryMutationQueues = new Map();
+
+function withMemoryMutation(type, agentId, operation) {
+  const key = JSON.stringify([agentId || null, type]);
+  const previous = memoryMutationQueues.get(key) || Promise.resolve();
+  const task = previous.then(operation);
+  const settled = task.catch(() => {});
+  memoryMutationQueues.set(key, settled);
+  settled.finally(() => {
+    if (memoryMutationQueues.get(key) === settled) memoryMutationQueues.delete(key);
+  });
+  return task;
+}
+
 /**
  * Load both memory files. Returns compact prompt strings plus parsed records.
  * @param {string} [agentId]
@@ -100,39 +117,41 @@ export async function upsertMemoryEntry(entry, agentId) {
   const content = cleanContent(entry.content, spec.entryMax);
   if (!content) throw new Error('Memory content is required.');
 
-  const existing = parseMemoryDocument(await readMemoryDocument(type, agentId), type);
-  const now = new Date().toISOString();
-  const tags = normalizeTags(entry.tags);
-  const importance = normalizeImportance(entry.importance);
-  const requestedId = normalizeId(entry.id);
-  const index = requestedId ? existing.findIndex((record) => record.id === requestedId) : -1;
+  return withMemoryMutation(type, agentId, async () => {
+    const existing = parseMemoryDocument(await readMemoryDocument(type, agentId), type);
+    const now = new Date().toISOString();
+    const tags = normalizeTags(entry.tags);
+    const importance = normalizeImportance(entry.importance);
+    const requestedId = normalizeId(entry.id);
+    const index = requestedId ? existing.findIndex((record) => record.id === requestedId) : -1;
 
-  let record;
-  if (index >= 0) {
-    record = {
-      ...existing[index],
-      content,
-      tags,
-      importance,
-      updatedAt: now,
-    };
-    existing[index] = record;
-  } else {
-    record = {
-      id: requestedId || createMemoryId(type),
-      type,
-      content,
-      tags,
-      importance,
-      createdAt: now,
-      updatedAt: now,
-    };
-    existing.push(record);
-  }
+    let record;
+    if (index >= 0) {
+      record = {
+        ...existing[index],
+        content,
+        tags,
+        importance,
+        updatedAt: now,
+      };
+      existing[index] = record;
+    } else {
+      record = {
+        id: requestedId || createMemoryId(type),
+        type,
+        content,
+        tags,
+        importance,
+        createdAt: now,
+        updatedAt: now,
+      };
+      existing.push(record);
+    }
 
-  const compacted = compactRecords(existing, spec.maxChars, type);
-  await writeMemoryDocument(type, formatMemoryDocument(compacted, spec.title), agentId);
-  return record;
+    const compacted = compactRecords(existing, spec.maxChars, type);
+    await writeMemoryDocument(type, formatMemoryDocument(compacted, spec.title), agentId);
+    return record;
+  });
 }
 
 /**
@@ -173,11 +192,13 @@ export async function deleteMemoryEntry(type, id, agentId) {
   const normalizedId = normalizeId(id);
   if (!normalizedId) throw new Error('Memory id is required.');
   const spec = FILES[normalizedType];
-  const existing = parseMemoryDocument(await readMemoryDocument(normalizedType, agentId), normalizedType);
-  const next = existing.filter((record) => record.id !== normalizedId);
-  if (next.length === existing.length) return false;
-  await writeMemoryDocument(normalizedType, formatMemoryDocument(next, spec.title), agentId);
-  return true;
+  return withMemoryMutation(normalizedType, agentId, async () => {
+    const existing = parseMemoryDocument(await readMemoryDocument(normalizedType, agentId), normalizedType);
+    const next = existing.filter((record) => record.id !== normalizedId);
+    if (next.length === existing.length) return false;
+    await writeMemoryDocument(normalizedType, formatMemoryDocument(next, spec.title), agentId);
+    return true;
+  });
 }
 
 /**
@@ -187,14 +208,20 @@ export async function deleteMemoryEntry(type, id, agentId) {
  */
 export async function clearMemory(type = 'both', agentId) {
   const normalized = type === 'both' ? 'both' : normalizeMemoryType(type);
+  const mutations = [];
   if (normalized === 'memory' || normalized === 'both') {
-    if (agentId) await deleteAgentMemoryFile(agentId, MEMORY_FILE);
-    else await deleteMemoryFile(MEMORY_FILE);
+    mutations.push(withMemoryMutation('memory', agentId, async () => {
+      if (agentId) await deleteAgentMemoryFile(agentId, MEMORY_FILE);
+      else await deleteMemoryFile(MEMORY_FILE);
+    }));
   }
   if (normalized === 'user' || normalized === 'both') {
-    if (agentId) await deleteAgentMemoryFile(agentId, USER_FILE);
-    else await deleteMemoryFile(USER_FILE);
+    mutations.push(withMemoryMutation('user', agentId, async () => {
+      if (agentId) await deleteAgentMemoryFile(agentId, USER_FILE);
+      else await deleteMemoryFile(USER_FILE);
+    }));
   }
+  await Promise.all(mutations);
 }
 
 /**

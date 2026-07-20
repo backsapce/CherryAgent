@@ -317,6 +317,31 @@
   gap: 6px;
 }
 
+.session-running-indicator {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--color-accent-strong);
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-accent-strong) 45%, transparent);
+  animation: session-running-pulse 1.6s ease-out infinite;
+}
+
+@keyframes session-running-pulse {
+  70% {
+    box-shadow: 0 0 0 5px transparent;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .session-running-indicator {
+    animation: none;
+  }
+}
+
 .session-agent-badge {
   font-size: 10px;
   font-weight: 600;

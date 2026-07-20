@@ -1,11 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createAgentRunManager, createRuntimeToolDispatcher, materializeMessageImages, materializeRuntimeFiles, REMOTE_TOOL_SCHEMAS } from './agent-runtime.js';
 
-function createManager(runsDir) {
+function createManager(runsDir, overrides = {}) {
   return createAgentRunManager({
     runsDir,
     execCommand: async () => ({ stdout: '', stderr: '', code: 0 }),
@@ -16,7 +16,17 @@ function createManager(runsDir) {
     listFiles: async () => [],
     readFile: async () => '',
     writeFile: async () => {},
+    ...overrides,
   });
+}
+
+async function waitForRunStatus(manager, id, expected) {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const run = manager.get(id);
+    if (run?.status === expected) return run;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.fail(`Run ${id} did not reach ${expected}; current status is ${manager.get(id)?.status}`);
 }
 
 test('sandbox runtime exposes no browser-owned tools', () => {
@@ -214,9 +224,10 @@ test('message images are materialized as binary sandbox attachments with model-v
   const result = await materializeMessageImages(messages, {
     fileExists: async (path) => stored.has(path),
     writeFile: async (path, content) => stored.set(path, content),
+    attachmentScope: 'run-test-scope',
   });
 
-  const path = 'attachments/user-message-1/1-source-photo.png';
+  const path = 'attachments/run-test-scope/user-message-1/1-source-photo.png';
   assert.equal(stored.get(path).toString('utf8'), 'hello');
   assert.match(result[0].content, /Sandbox attachment files/);
   assert.match(result[0].content, new RegExp(path));
@@ -264,6 +275,245 @@ test('persisted runs and event logs can be recovered after reconnect', () => {
   }
 });
 
+test('sandbox runs execute concurrently with isolated events, cancellation, and completion', async () => {
+  const runsDir = mkdtempSync(join(tmpdir(), 'vertex-runs-'));
+  const active = new Map();
+  let releaseBothStarted;
+  const bothStarted = new Promise((resolve) => { releaseBothStarted = resolve; });
+  const createdModels = [];
+
+  try {
+    const manager = createManager(runsDir, {
+      createModel(modelConfig) {
+        const model = { owner: modelConfig.model };
+        createdModels.push(model.owner);
+        return model;
+      },
+      runAgent({ agentId, languageModel, signal, onEvent }) {
+        return new Promise((resolve, reject) => {
+          const abort = () => {
+            const error = new Error(`aborted ${agentId}`);
+            error.name = 'AbortError';
+            reject(error);
+          };
+          signal.addEventListener('abort', abort, { once: true });
+          active.set(agentId, {
+            languageModel,
+            signal,
+            emit: onEvent,
+            complete(result) {
+              signal.removeEventListener('abort', abort);
+              resolve(result);
+            },
+          });
+          if (active.size === 2) releaseBothStarted();
+        });
+      },
+    });
+    const input = (sessionId) => ({
+      runId: `run-client-${sessionId}`,
+      sessionId,
+      replyId: `reply-${sessionId}`,
+      agentId: sessionId,
+      messages: [{ role: 'user', content: `start ${sessionId}` }],
+      modelConfig: {
+        provider: 'openai',
+        model: `model-${sessionId}`,
+        apiKey: `key-${sessionId}`,
+      },
+    });
+
+    const first = manager.start(input('session-one'));
+    const second = manager.start(input('session-two'));
+    await bothStarted;
+
+    assert.equal(first.id, 'run-client-session-one');
+    assert.equal(second.id, 'run-client-session-two');
+    assert.equal(manager.start(input('session-one')).id, first.id);
+    assert.throws(
+      () => manager.start({ ...input('session-one'), runId: 'run-client-session-one-duplicate' }),
+      /already has an active agent run/
+    );
+    await manager.abort('run-client-cancelled-before-start');
+    assert.throws(
+      () => manager.start({ ...input('session-three'), runId: 'run-client-cancelled-before-start' }),
+      /cancelled before it started/
+    );
+    assert.equal(manager.get(first.id).status, 'running');
+    assert.equal(manager.get(second.id).status, 'running');
+    assert.deepEqual(createdModels.sort(), ['model-session-one', 'model-session-two']);
+    assert.equal(active.get('session-one').languageModel.owner, 'model-session-one');
+    assert.equal(active.get('session-two').languageModel.owner, 'model-session-two');
+    assert.notStrictEqual(active.get('session-one').signal, active.get('session-two').signal);
+
+    active.get('session-one').emit({ type: 'text-delta', text: 'one-only' });
+    active.get('session-two').emit({ type: 'text-delta', text: 'two-first' });
+    assert.deepEqual(manager.get(first.id).events.map((event) => event.text), ['one-only']);
+    assert.deepEqual(manager.get(second.id).events.map((event) => event.text), ['two-first']);
+
+    const abortingFirst = manager.abort(first.id);
+    assert.throws(
+      () => manager.start({ ...input('session-one'), runId: 'run-client-session-one-while-aborting' }),
+      /already has an active agent run/
+    );
+    await abortingFirst;
+    const aborted = await waitForRunStatus(manager, first.id, 'aborted');
+    assert.equal(active.get('session-one').signal.aborted, true);
+    assert.equal(active.get('session-two').signal.aborted, false);
+    assert.match(aborted.error, /aborted session-one/);
+    assert.equal(manager.get(second.id).status, 'running');
+
+    active.get('session-two').emit({ type: 'text-delta', text: 'two-after-abort' });
+    active.get('session-two').complete({ content: 'session two completed' });
+    const completed = await waitForRunStatus(manager, second.id, 'completed');
+
+    assert.deepEqual(completed.result, { content: 'session two completed' });
+    assert.deepEqual(manager.get(second.id).events.map((event) => event.text), [
+      'two-first',
+      'two-after-abort',
+    ]);
+    assert.deepEqual(manager.get(second.id).events.map((event) => event.remoteSequence), [1, 2]);
+    assert.deepEqual(manager.get(first.id).events.map((event) => event.remoteSequence), [1]);
+  } finally {
+    rmSync(runsDir, { recursive: true, force: true });
+  }
+});
+
+test('sandbox abort returns within a bound when a provider ignores cancellation', async () => {
+  const runsDir = mkdtempSync(join(tmpdir(), 'vertex-runs-'));
+  try {
+    let receivedSignal;
+    const manager = createManager(runsDir, {
+      abortWaitMs: 10,
+      runAgent({ signal }) {
+        receivedSignal = signal;
+        return new Promise(() => {});
+      },
+      createModel: () => ({}),
+    });
+    const started = manager.start({
+      runId: 'run-unresponsive-provider',
+      sessionId: 'session-unresponsive',
+      replyId: 'reply-unresponsive',
+      messages: [{ role: 'user', content: 'start' }],
+      modelConfig: { provider: 'openai', model: 'test', apiKey: 'test' },
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const aborted = await manager.abort(started.id);
+
+    assert.equal(receivedSignal.aborted, true);
+    assert.equal(aborted.status, 'running');
+    assert.throws(
+      () => manager.start({
+        runId: 'run-unresponsive-replacement',
+        sessionId: 'session-unresponsive',
+        replyId: 'reply-replacement',
+        messages: [{ role: 'user', content: 'replace' }],
+        modelConfig: { provider: 'openai', model: 'test', apiKey: 'test' },
+      }),
+      /already has an active agent run/
+    );
+  } finally {
+    rmSync(runsDir, { recursive: true, force: true });
+  }
+});
+
+test('a cancelled sandbox run rejects late events and cannot become completed', async () => {
+  const runsDir = mkdtempSync(join(tmpdir(), 'vertex-runs-'));
+  try {
+    let activeRun;
+    const manager = createManager(runsDir, {
+      abortWaitMs: 10,
+      runAgent(options) {
+        return new Promise((resolve) => {
+          activeRun = { ...options, resolve };
+        });
+      },
+      createModel: () => ({}),
+    });
+    const started = manager.start({
+      runId: 'run-late-cancel-events',
+      sessionId: 'session-late-cancel-events',
+      replyId: 'reply-late-cancel-events',
+      messages: [{ role: 'user', content: 'start' }],
+      modelConfig: { provider: 'openai', model: 'test', apiKey: 'test' },
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    await manager.abort(started.id);
+
+    assert.throws(
+      () => activeRun.onEvent({ type: 'text-delta', text: 'too late' }),
+      (error) => error?.name === 'AbortError'
+    );
+    activeRun.resolve({ content: 'must not complete' });
+    const aborted = await waitForRunStatus(manager, started.id, 'aborted');
+
+    assert.match(aborted.error, /aborted/i);
+    assert.equal(aborted.result, null);
+    assert.deepEqual(manager.get(started.id).events, []);
+  } finally {
+    rmSync(runsDir, { recursive: true, force: true });
+  }
+});
+
+test('sandbox event logs fail the owning run before consuming unbounded memory', async () => {
+  const runsDir = mkdtempSync(join(tmpdir(), 'vertex-runs-'));
+  try {
+    const manager = createManager(runsDir, {
+      maxEventBytes: 100,
+      runAgent({ onEvent }) {
+        onEvent({ type: 'text-delta', text: 'x'.repeat(200) });
+        return Promise.resolve({ content: 'unreachable' });
+      },
+      createModel: () => ({}),
+    });
+    const started = manager.start({
+      runId: 'run-event-limit',
+      sessionId: 'session-event-limit',
+      replyId: 'reply-event-limit',
+      messages: [{ role: 'user', content: 'start' }],
+      modelConfig: { provider: 'openai', model: 'test', apiKey: 'test' },
+    });
+
+    const failed = await waitForRunStatus(manager, started.id, 'error');
+
+    assert.match(failed.error, /event log exceeded 100 bytes/);
+    assert.deepEqual(manager.get(started.id).events, []);
+  } finally {
+    rmSync(runsDir, { recursive: true, force: true });
+  }
+});
+
+test('a failed initial persist does not leave a ghost active session run', async () => {
+  const runsDir = mkdtempSync(join(tmpdir(), 'vertex-runs-'));
+  try {
+    const manager = createManager(runsDir, {
+      runAgent: async () => ({ content: 'done' }),
+      createModel: () => ({}),
+    });
+    const input = {
+      sessionId: 'session-persist-retry',
+      replyId: 'reply-persist-retry',
+      messages: [{ role: 'user', content: 'start' }],
+      modelConfig: { provider: 'openai', model: 'test', apiKey: 'test' },
+    };
+    rmSync(runsDir, { recursive: true, force: true });
+
+    assert.throws(
+      () => manager.start({ ...input, runId: 'run-persist-failure' }),
+      /ENOENT/
+    );
+
+    mkdirSync(runsDir, { recursive: true });
+    const retry = manager.start({ ...input, runId: 'run-persist-retry' });
+    const completed = await waitForRunStatus(manager, retry.id, 'completed');
+    assert.equal(completed.result.content, 'done');
+  } finally {
+    rmSync(runsDir, { recursive: true, force: true });
+  }
+});
+
 test('a server restart marks an in-flight or waiting run as interrupted', () => {
   const runsDir = mkdtempSync(join(tmpdir(), 'vertex-runs-'));
   try {
@@ -289,6 +539,10 @@ test('a server restart marks an in-flight or waiting run as interrupted', () => 
       assert.equal(recovered.status, 'interrupted');
       assert.match(recovered.error, /server restarted/i);
     }
+    return Promise.all(['run-active', 'run-waiting'].map(async (id) => {
+      const aborted = await manager.abort(id);
+      assert.equal(aborted.status, 'interrupted');
+    }));
   } finally {
     rmSync(runsDir, { recursive: true, force: true });
   }

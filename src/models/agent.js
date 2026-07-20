@@ -184,7 +184,11 @@ async function requestAgentRun(url, path = '', options = {}) {
   if (token) headers.Authorization = `Bearer ${token}`;
   const res = await fetch(endpoint, { ...options, headers: { ...headers, ...options.headers } });
   const data = await res.json().catch(() => ({ error: 'Invalid agent runtime response' }));
-  if (!res.ok) throw new Error(data.error || `Agent runtime returned ${res.status}`);
+  if (!res.ok) {
+    const error = new Error(data.error || `Agent runtime returned ${res.status}`);
+    error.status = res.status;
+    throw error;
+  }
   return data;
 }
 
@@ -210,8 +214,11 @@ export function listRemoteAgentRuns(url, sessionId, signal) {
   return requestAgentRun(url, query, { method: 'GET', ...(signal ? { signal } : {}) });
 }
 
-export function abortRemoteAgentRun(url, runId) {
-  return requestAgentRun(url, `/${encodeURIComponent(runId)}`, { method: 'DELETE' });
+export function abortRemoteAgentRun(url, runId, signal) {
+  return requestAgentRun(url, `/${encodeURIComponent(runId)}`, {
+    method: 'DELETE',
+    ...(signal ? { signal } : {}),
+  });
 }
 
 function assertManagedCommandRuntime(url) {
