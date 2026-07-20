@@ -23,6 +23,13 @@ import { ensureDefaultAgent, listAgents, updateAgentConfig } from './agents/agen
 import { configureAutoSync, suspendAutoSync, waitForSyncIdle } from './sync/syncManager';
 import { I18nProvider } from './i18n/index';
 import { useI18n } from './i18n/context';
+import { resolveLocale } from './i18n/locales';
+import {
+  buildSessionTitleRequest,
+  cleanGeneratedSessionTitle,
+  normalizeAutoTitleConfig,
+  selectAutoTitleProfileId,
+} from './models/sessionTitle';
 import { editUserMessageAndDiscardFollowing } from './messageHistory';
 import {
   reconcileSessionRecoveryJournal,
@@ -224,6 +231,7 @@ function App() {
   const resumingWaitingRunsRef = useRef(new Set());
   const remoteDiscoveryRef = useRef(new Set());
   const streamCompletionRef = useRef(null);
+  const titleGenerationControllersRef = useRef(new Map());
   const factoryResetInProgressRef = useRef(false);
   const startupRecoveryBusyRef = useRef(false);
   const pendingStreamStartsRef = useRef(new Map());
@@ -236,6 +244,7 @@ function App() {
   const wasStreamingRef = useRef(false);
   const sessionsRef = useRef(sessions);
   const activeSessionIdRef = useRef(activeSessionId);
+  const localePrefRef = useRef(localePref);
   const sessionLoadRequestRef = useRef(0);
 
   if (!sessionSaveCoordinatorRef.current) {
@@ -270,6 +279,10 @@ function App() {
   useLayoutEffect(() => {
     activeSessionIdRef.current = activeSessionId;
   }, [activeSessionId]);
+
+  useLayoutEffect(() => {
+    localePrefRef.current = localePref;
+  }, [localePref]);
 
   const refreshFromStorage = useCallback(async () => {
     const saveCoordinator = sessionSaveCoordinatorRef.current;
@@ -549,6 +562,7 @@ function App() {
   }, []);
 
   const handleLocaleChange = useCallback(async (pref) => {
+    localePrefRef.current = pref;
     setLocalePref(pref);
     await config.set('locale', pref);
   }, []);
@@ -639,6 +653,7 @@ function App() {
   }, [sessions, streaming, flushPendingSessionSave]);
 
   const handleDeleteSession = useCallback(async (sessionId) => {
+    titleGenerationControllersRef.current.get(sessionId)?.abort();
     await flushPendingSessionSave();
 
     // First, delete the session file from OPFS
@@ -710,6 +725,79 @@ function App() {
     streaming,
   ]);
 
+  const generateAutomaticSessionTitle = useCallback(async ({
+    sessionId,
+    sessionMessages,
+    replyId,
+    finalContent,
+  }) => {
+    if (factoryResetInProgressRef.current || !String(finalContent || '').trim()) return;
+
+    const settings = normalizeAutoTitleConfig(config.get('general.autoTitle'));
+    const currentSession = sessionsRef.current.find((session) => session.id === sessionId);
+    if (!settings.enabled || !currentSession || currentSession.autoTitleGeneratedAtMs) return;
+    if (titleGenerationControllersRef.current.has(sessionId)) return;
+
+    const profileId = selectAutoTitleProfileId(llm.getProfiles(), settings.llmProfileId);
+    if (!profileId) return;
+
+    let replacedReply = false;
+    const completedMessages = (sessionMessages || []).map((message) => {
+      if (message.id !== replyId) return message;
+      replacedReply = true;
+      return { ...message, role: 'assistant', content: finalContent };
+    });
+    if (!replacedReply) {
+      completedMessages.push({ id: replyId, role: 'assistant', content: finalContent });
+    }
+
+    const sourceFirstUser = completedMessages.find((message) => message.role === 'user');
+    const sourceFirstUserKey = sourceFirstUser
+      ? `${sourceFirstUser.id || ''}\n${String(sourceFirstUser.content || '')}`
+      : null;
+    const locale = resolveLocale(localePrefRef.current);
+    const request = buildSessionTitleRequest(completedMessages, locale);
+    const controller = new AbortController();
+    titleGenerationControllersRef.current.set(sessionId, controller);
+
+    try {
+      const generated = await llm.completeSession(request.messages, {
+        llmProfileId: profileId,
+        systemPrompt: request.systemPrompt,
+        signal: controller.signal,
+        maxTokens: 160,
+      });
+      if (controller.signal.aborted || factoryResetInProgressRef.current) return;
+      if (!normalizeAutoTitleConfig(config.get('general.autoTitle')).enabled) return;
+      const title = cleanGeneratedSessionTitle(generated);
+      if (!title) return;
+
+      setSessions((prev) => prev.map((session) => {
+        if (session.id !== sessionId || session.autoTitleGeneratedAtMs) return session;
+        const currentFirstUser = session.messages?.find((message) => message.role === 'user');
+        const currentFirstUserKey = currentFirstUser
+          ? `${currentFirstUser.id || ''}\n${String(currentFirstUser.content || '')}`
+          : null;
+        if (currentFirstUserKey !== sourceFirstUserKey) return session;
+        return {
+          ...session,
+          title,
+          autoTitleGeneratedAtMs: Date.now(),
+          autoTitleLocale: locale,
+          autoTitleLlmProfileId: profileId,
+        };
+      }));
+    } catch (error) {
+      if (!controller.signal.aborted && error?.name !== 'AbortError') {
+        console.warn('Automatic session title generation failed:', error);
+      }
+    } finally {
+      if (titleGenerationControllersRef.current.get(sessionId) === controller) {
+        titleGenerationControllersRef.current.delete(sessionId);
+      }
+    }
+  }, []);
+
   // Stream LLM response for a given session using the agent loop
   const streamResponse = useCallback(async (sessionId, sessionMessages, opts = {}) => {
     // A reset invalidates every in-memory session/message reference. Keep this
@@ -761,6 +849,7 @@ function App() {
     const controller = new AbortController();
     abortRef.current = controller;
     let finishStream;
+    let automaticTitleInput = null;
     const streamCompletion = new Promise((resolve) => { finishStream = resolve; });
     streamCompletionRef.current = streamCompletion;
     streamingContentRef.current = '';
@@ -819,6 +908,7 @@ function App() {
       const hasToolContext = sandboxUrl || sessionAgentId;
 
       let result;
+      let responseCompleted = false;
       if (opts.resumeRunId || agentConfig?.runtimeMode === 'sandbox') {
         if (!sandboxUrl || sandboxUrl === E2B_AGENT_ID) {
           throw new Error('Sandbox runtime requires a connected VertexAgent agent server; direct E2B sandboxes currently provide command execution only.');
@@ -877,6 +967,7 @@ function App() {
           throw new Error(remoteRun.error || `Sandbox run ${remoteRun.status}`);
         }
         result = remoteRun.result;
+        responseCompleted = remoteRun.status === 'completed';
       } else {
         result = await runAgentLoop({
           messages: expandMessagesForLlm(sessionMessages),
@@ -907,6 +998,7 @@ function App() {
           },
           onEvent: applyStreamEvent,
         });
+        responseCompleted = true;
       }
 
       // Mark unfinished tool calls as completed.
@@ -917,6 +1009,9 @@ function App() {
       const finalContent = result.content || streamingContentRef.current;
       const finalThinking = result.thinking || streamingThinkingRef.current;
       updateMessage({ content: finalContent, thinking: finalThinking, toolCalls: [...toolCalls], transcript: agentEventState.transcript, usage: result.usage });
+      if (responseCompleted) {
+        automaticTitleInput = { sessionId, sessionMessages, replyId, finalContent };
+      }
       if (result.toolCalls?.some((tc) => tc.name === 'spawn_agent')) {
         setAgentList(await listAgents());
       }
@@ -947,8 +1042,11 @@ function App() {
         streamCompletionRef.current = null;
       }
       finishStream();
+      if (automaticTitleInput) {
+        void generateAutomaticSessionTitle(automaticTitleInput);
+      }
     }
-  }, [agentList, sessionAgents, sessionLlmProfiles, currentLlmProfileId, getFirstLlmProfileId]);
+  }, [agentList, sessionAgents, sessionLlmProfiles, currentLlmProfileId, generateAutomaticSessionTitle, getFirstLlmProfileId]);
 
   const scheduleStreamResponse = useCallback((sessionId, sessionMessages, opts = {}) => {
     if (factoryResetInProgressRef.current) return;
@@ -1257,20 +1355,28 @@ function App() {
     if (!editResult) return;
 
     const { messageIndex, messages: trimmedMessages } = editResult;
+    if (messageIndex === 0) {
+      titleGenerationControllersRef.current.get(sessionId)?.abort();
+    }
     setMessageQueue((prev) => prev.filter((item) => item.sessionId !== sessionId));
 
     setSessions((prev) =>
-      sortSessions(prev.map((c) =>
-        c.id === sessionId
-          ? {
-              ...c,
-              title: messageIndex === 0 ? text.slice(0, 30) + (text.length > 30 ? '...' : '') : c.title,
-              lastMessage: text,
-              ...sessionTimeFields(),
-              messages: trimmedMessages,
-            }
-          : c
-      ))
+      sortSessions(prev.map((c) => {
+        if (c.id !== sessionId) return c;
+        const next = {
+          ...c,
+          title: messageIndex === 0 ? text.slice(0, 30) + (text.length > 30 ? '...' : '') : c.title,
+          lastMessage: text,
+          ...sessionTimeFields(),
+          messages: trimmedMessages,
+        };
+        if (messageIndex === 0) {
+          delete next.autoTitleGeneratedAtMs;
+          delete next.autoTitleLocale;
+          delete next.autoTitleLlmProfileId;
+        }
+        return next;
+      }))
     );
 
     scheduleStreamResponse(sessionId, trimmedMessages);
@@ -1312,6 +1418,7 @@ function App() {
     try {
       resumeAutoSync = suspendAutoSync();
       abortRef.current?.abort();
+      for (const controller of titleGenerationControllersRef.current.values()) controller.abort();
       if (streamCompletion) await streamCompletion;
       await waitForSyncIdle();
       releaseSessionBarrier = await coordinator.beginBarrier();

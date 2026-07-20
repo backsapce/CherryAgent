@@ -74,7 +74,13 @@
         "avatarRemove": "Remove",
         "avatarHint": "Upload an image to use as the assistant avatar in conversations.",
         "avatarLoadFailed": "Avatar image failed to load.",
-        "avatarUploadFailed": "Could not use that image."
+        "avatarUploadFailed": "Could not use that image.",
+        "autoTitle": "Automatically title new conversations",
+        "autoTitleHint": "After the first completed reply, AI summarizes the conversation into a title using the current interface language and may add one relevant emoji. Existing titles are not changed when the language changes.",
+        "autoTitleModel": "Title Generation Model",
+        "autoTitleFirstModel": "First configured LLM (currently {model})",
+        "autoTitleNoModel": "No configured LLM available",
+        "autoTitleModelHint": "Keep the default to follow the first configured LLM, or choose a faster, lower-cost profile."
     },
     "llmSettings": {
         "title": "LLM Configuration",
