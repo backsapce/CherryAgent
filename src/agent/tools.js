@@ -20,6 +20,7 @@ import {
   getSkill,
   searchSkills,
 } from './skills.js';
+import { wakeupDelayToSeconds } from './wakeup.js';
 import {
   E2B_AGENT_ID,
   executeCommand,
@@ -1043,31 +1044,39 @@ registry.register({
   category: 'automation',
   schema: {
     description:
-      'Schedule one future continuation of the current conversation. Use this instead of blocking or repeatedly polling during a long-running task. When the delay expires, the saved prompt is added to this conversation and the agent runs again. If the task is still pending after waking, schedule another wake-up. The browser page must be open to fire on time; an overdue wake-up fires once when the app is opened again.',
+      'Schedule one future continuation of the current conversation. Express the delay in its natural unit; do not convert minutes or hours to seconds (for example, 10 minutes is delay=10 and unit="minutes"). Use this instead of blocking or repeatedly polling during a long-running task. When the delay expires, the saved prompt is added to this conversation and the agent runs again. If the task is still pending after waking, schedule another wake-up. The browser page must be open to fire on time; an overdue wake-up fires once when the app is opened again.',
     parameters: {
       type: 'object',
       properties: {
-        delay_seconds: {
+        delay: {
           type: 'integer',
-          minimum: 5,
+          minimum: 1,
           maximum: 604800,
-          description: 'Seconds from now to wake the agent, from 5 seconds through 7 days.',
+          description: 'How many of the selected units to wait. The resulting delay must be from 5 seconds through 7 days.',
+        },
+        unit: {
+          type: 'string',
+          enum: ['seconds', 'minutes', 'hours', 'days'],
+          description: 'Unit for delay. Use the unit stated by the user instead of converting it yourself.',
         },
         prompt: {
           type: 'string',
           description: 'A self-contained instruction describing what to inspect or continue when the agent wakes.',
         },
       },
-      required: ['delay_seconds', 'prompt'],
+      required: ['delay', 'unit', 'prompt'],
       additionalProperties: false,
     },
   },
   checkAvailable: (ctx) => typeof ctx?.scheduleWakeup === 'function',
-  async handler({ delay_seconds: delaySeconds, prompt }, ctx) {
+  async handler({ delay, unit, prompt }, ctx) {
+    const delaySeconds = wakeupDelayToSeconds(delay, unit);
     const wakeup = await ctx.scheduleWakeup({ delaySeconds, prompt });
     return JSON.stringify({
       scheduled: true,
       wakeup_id: wakeup.id,
+      delay: { value: delay, unit },
+      delay_seconds: delaySeconds,
       run_at: new Date(wakeup.runAtMs).toISOString(),
       prompt: wakeup.prompt,
     });

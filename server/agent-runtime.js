@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createLanguageModel } from '../src/models/ai.js';
 import { runAgentLoop } from '../src/agent/loop.js';
-import { buildWakeupMessage, createWakeup } from '../src/agent/wakeup.js';
+import { buildWakeupMessage, createOrReplaceTurnWakeup, wakeupDelayToSeconds } from '../src/agent/wakeup.js';
 
 const MAX_MESSAGES = 2_000;
 const MAX_EVENT_BYTES = 20 * 1024 * 1024;
@@ -118,22 +118,27 @@ const REMOTE_TOOL_SCHEMAS = [
   },
   {
     name: 'schedule_wakeup',
-    description: 'Schedule one future continuation of this sandbox agent run. Use this instead of blocking or repeatedly polling. The agent server waits without using LLM tokens, then continues with the saved prompt. If the task is still pending after waking, schedule another wake-up.',
+    description: 'Schedule one future continuation of this sandbox agent run. Express the delay in its natural unit; do not convert minutes or hours to seconds (for example, 10 minutes is delay=10 and unit="minutes"). Use this instead of blocking or repeatedly polling. The agent server waits without using LLM tokens, then continues with the saved prompt. If the task is still pending after waking, schedule another wake-up.',
     parameters: {
       type: 'object',
       properties: {
-        delay_seconds: {
+        delay: {
           type: 'integer',
-          minimum: 5,
+          minimum: 1,
           maximum: 604800,
-          description: 'Seconds from now to continue, from 5 seconds through 7 days.',
+          description: 'How many of the selected units to wait. The resulting delay must be from 5 seconds through 7 days.',
+        },
+        unit: {
+          type: 'string',
+          enum: ['seconds', 'minutes', 'hours', 'days'],
+          description: 'Unit for delay. Use the unit stated by the user instead of converting it yourself.',
         },
         prompt: {
           type: 'string',
           description: 'A self-contained instruction describing what to inspect or continue after waking.',
         },
       },
-      required: ['delay_seconds', 'prompt'],
+      required: ['delay', 'unit', 'prompt'],
       additionalProperties: false,
     },
   },
@@ -295,9 +300,9 @@ export function createAgentRunManager({
             dispatchTool,
             scheduleWakeup: async ({ delaySeconds, prompt }) => {
               throwIfRunCancelled(run);
-              if (scheduledWakeup) throw new Error('Only one wake-up can be scheduled per agent turn.');
-              scheduledWakeup = createWakeup({
-                id: `wake-${randomUUID()}`,
+              scheduledWakeup = createOrReplaceTurnWakeup({
+                currentWakeup: scheduledWakeup,
+                id: scheduledWakeup?.id || `wake-${randomUUID()}`,
                 delaySeconds,
                 prompt,
               });
@@ -586,14 +591,17 @@ export function createRuntimeToolDispatcher({
       return `Successfully wrote sandbox file ${input.path}`;
     }
     if (name === 'schedule_wakeup') {
+      const delaySeconds = wakeupDelayToSeconds(input.delay, input.unit);
       const wakeup = await context?.scheduleWakeup?.({
-        delaySeconds: input.delay_seconds,
+        delaySeconds,
         prompt: input.prompt,
       });
       if (!wakeup) throw new Error('Wake-up scheduling is unavailable.');
       return JSON.stringify({
         scheduled: true,
         wakeup_id: wakeup.id,
+        delay: { value: input.delay, unit: input.unit },
+        delay_seconds: delaySeconds,
         run_at: new Date(wakeup.runAtMs).toISOString(),
         prompt: wakeup.prompt,
       });

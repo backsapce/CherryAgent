@@ -39,7 +39,7 @@ import {
 } from './sessionRefresh';
 import { createSessionSaveCoordinator } from './sessionPersistence';
 import { createSessionRunRegistry } from './sessionRuns';
-import { buildWakeupMessage, createWakeup, findNextWakeup } from './agent/wakeup';
+import { buildWakeupMessage, createOrReplaceTurnWakeup, findNextWakeup } from './agent/wakeup';
 import { WifiOff, ChevronRight } from './components/Icons/Icons';
 import './App.css';
 
@@ -1403,6 +1403,7 @@ function App() {
         responseCompleted = remoteRun.status === 'completed';
         runOutcome = { status: remoteRun.status };
       } else {
+        let scheduledWakeup = null;
         result = await runAgentLoop({
           messages: expandMessagesForLlm(sessionMessages),
           systemPrompt: hasToolContext ? AGENT_SYSTEM_PROMPT : '',
@@ -1416,16 +1417,22 @@ function App() {
           languageModel,
           scheduleWakeup: async ({ delaySeconds, prompt }) => {
             assertRunActive();
-            const wakeup = createWakeup({
-              id: generateId(),
+            const wakeup = createOrReplaceTurnWakeup({
+              currentWakeup: scheduledWakeup,
+              id: scheduledWakeup?.id || generateId(),
               delaySeconds,
               prompt,
             });
+            if (wakeup === scheduledWakeup) return wakeup;
+            scheduledWakeup = wakeup;
             updateSessionsForRun((prev) => sortSessions(prev.map((session) => (
               session.id === sessionId
                 ? {
                     ...session,
-                    wakeups: [...(session.wakeups || []), wakeup],
+                    wakeups: [
+                      ...(session.wakeups || []).filter((candidate) => candidate.id !== wakeup.id),
+                      wakeup,
+                    ],
                     ...sessionTimeFields(),
                   }
                 : session
