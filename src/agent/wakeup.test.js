@@ -3,8 +3,17 @@ import test from 'node:test';
 import {
   buildWakeupMessage,
   createWakeup,
+  createOrReplaceTurnWakeup,
   findNextWakeup,
+  wakeupDelayToSeconds,
 } from './wakeup.js';
+
+test('wakeupDelayToSeconds converts an explicit unit without model-side arithmetic', () => {
+  assert.equal(wakeupDelayToSeconds(10, 'minutes'), 600);
+  assert.equal(wakeupDelayToSeconds(2, 'hours'), 7_200);
+  assert.throws(() => wakeupDelayToSeconds(0, 'minutes'), /positive integer/);
+  assert.throws(() => wakeupDelayToSeconds(10, 'minute'), /unit must be/);
+});
 
 test('createWakeup validates and resolves a relative delay', () => {
   assert.deepEqual(createWakeup({ id: 'wake-1', delaySeconds: 30, prompt: ' check build ', now: 1_000 }), {
@@ -15,6 +24,34 @@ test('createWakeup validates and resolves a relative delay', () => {
   });
   assert.throws(() => createWakeup({ id: 'bad', delaySeconds: 1, prompt: 'soon' }), /between 5 and/);
   assert.throws(() => createWakeup({ id: 'bad', delaySeconds: 5, prompt: ' ' }), /prompt is required/);
+});
+
+test('createOrReplaceTurnWakeup reuses duplicates and replaces changed requests', () => {
+  const first = createOrReplaceTurnWakeup({
+    id: 'wake-1',
+    delaySeconds: 600,
+    prompt: 'check build',
+    now: 1_000,
+  });
+  const duplicate = createOrReplaceTurnWakeup({
+    currentWakeup: first,
+    id: 'ignored',
+    delaySeconds: 600,
+    prompt: ' check build ',
+    now: 5_000,
+  });
+  const replacement = createOrReplaceTurnWakeup({
+    currentWakeup: first,
+    id: 'ignored',
+    delaySeconds: 900,
+    prompt: 'check later',
+    now: 5_000,
+  });
+
+  assert.strictEqual(duplicate, first);
+  assert.equal(replacement.id, first.id);
+  assert.equal(replacement.prompt, 'check later');
+  assert.equal(replacement.runAtMs, 905_000);
 });
 
 test('findNextWakeup skips claimed and malformed records', () => {

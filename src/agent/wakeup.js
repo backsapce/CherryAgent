@@ -1,6 +1,27 @@
 export const MIN_WAKEUP_DELAY_SECONDS = 5;
 export const MAX_WAKEUP_DELAY_SECONDS = 7 * 24 * 60 * 60;
 
+const WAKEUP_DELAY_UNIT_SECONDS = Object.freeze({
+  seconds: 1,
+  minutes: 60,
+  hours: 60 * 60,
+  days: 24 * 60 * 60,
+});
+
+export function wakeupDelayToSeconds(delay, unit) {
+  const value = Number(delay);
+  const multiplier = WAKEUP_DELAY_UNIT_SECONDS[unit];
+
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error('delay must be a positive integer.');
+  }
+  if (!multiplier) {
+    throw new Error('unit must be one of seconds, minutes, hours, or days.');
+  }
+
+  return value * multiplier;
+}
+
 export function createWakeup({ id, delaySeconds, prompt, now = Date.now() }) {
   const delay = Number(delaySeconds);
   const instruction = String(prompt || '').trim();
@@ -17,6 +38,22 @@ export function createWakeup({ id, delaySeconds, prompt, now = Date.now() }) {
     createdAtMs: now,
     runAtMs: now + delay * 1000,
   };
+}
+
+export function createOrReplaceTurnWakeup({ currentWakeup, id, delaySeconds, prompt, now = Date.now() }) {
+  const next = createWakeup({
+    id: currentWakeup?.id || id,
+    delaySeconds,
+    prompt,
+    now,
+  });
+  const requestedDelayMs = next.runAtMs - next.createdAtMs;
+  const currentDelayMs = currentWakeup?.runAtMs - currentWakeup?.createdAtMs;
+
+  if (currentWakeup?.prompt === next.prompt && currentDelayMs === requestedDelayMs) {
+    return currentWakeup;
+  }
+  return next;
 }
 
 export function findNextWakeup(sessions, claimedIds = new Set()) {

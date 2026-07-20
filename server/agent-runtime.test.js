@@ -104,21 +104,58 @@ test('sandbox wake-up dispatch delegates scheduling to the run manager', async (
     writeFile: async () => {},
   });
   const result = JSON.parse(await dispatch('schedule_wakeup', {
-    delay_seconds: 30,
+    delay: 10,
+    unit: 'minutes',
     prompt: 'check build',
   }, {
     scheduleWakeup: async ({ delaySeconds, prompt }) => ({
       id: 'wake-one',
-      runAtMs: 31_000,
+      runAtMs: 1_000 + delaySeconds * 1_000,
       prompt: `${prompt}:${delaySeconds}`,
     }),
   }));
   assert.deepEqual(result, {
     scheduled: true,
     wakeup_id: 'wake-one',
-    run_at: '1970-01-01T00:00:31.000Z',
-    prompt: 'check build:30',
+    delay: { value: 10, unit: 'minutes' },
+    delay_seconds: 600,
+    run_at: '1970-01-01T00:10:01.000Z',
+    prompt: 'check build:600',
   });
+});
+
+test('sandbox run reuses duplicate wake-ups and replaces a changed request in one turn', async () => {
+  const runsDir = mkdtempSync(join(tmpdir(), 'vertex-runs-'));
+  try {
+    const manager = createManager(runsDir, {
+      createModel: () => ({}),
+      async runAgent({ scheduleWakeup }) {
+        const first = await scheduleWakeup({ delaySeconds: 600, prompt: 'check build' });
+        const duplicate = await scheduleWakeup({ delaySeconds: 600, prompt: ' check build ' });
+        const replacement = await scheduleWakeup({ delaySeconds: 900, prompt: 'check later' });
+
+        assert.strictEqual(duplicate, first);
+        assert.equal(replacement.id, first.id);
+        return { content: 'scheduled' };
+      },
+    });
+    const started = manager.start({
+      runId: 'run-repeated-wakeup',
+      sessionId: 'session-repeated-wakeup',
+      replyId: 'reply-repeated-wakeup',
+      messages: [{ role: 'user', content: 'monitor the build' }],
+      modelConfig: { provider: 'openai', model: 'test', apiKey: 'test' },
+    });
+
+    const waiting = await waitForRunStatus(manager, started.id, 'waiting');
+    assert.equal(waiting.wakeup.prompt, 'check later');
+    assert.equal(waiting.wakeup.runAtMs - waiting.wakeup.createdAtMs, 900_000);
+    assert.equal(waiting.error, null);
+    await manager.abort(started.id);
+    await waitForRunStatus(manager, started.id, 'aborted');
+  } finally {
+    rmSync(runsDir, { recursive: true, force: true });
+  }
 });
 
 test('sandbox image display returns a reference without image content', async () => {
