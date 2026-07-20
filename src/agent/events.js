@@ -211,6 +211,7 @@ function finishStep(state, event) {
     ...state,
     steps,
     currentStepId: state.currentStepId === id ? null : state.currentStepId,
+    ...(event.usage ? { usage: event.usage } : {}),
   };
 }
 
