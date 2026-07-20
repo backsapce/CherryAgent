@@ -218,6 +218,7 @@ test('agent events record a replayable run lifecycle and streamed tool input', (
   apply({ type: 'permission-resolved', requestId: 'call-1', toolCallId: 'call-1', kind: 'doom-loop', approved: false, sequence: 11 });
   apply({ type: 'context-compact', beforeTokens: 4000, afterTokens: 1800, beforeMessages: 24, afterMessages: 12, sequence: 12 });
   apply({ type: 'step-finish', stepId: 'step-1', finishReason: 'tool-calls', usage: { total_tokens: 44 }, sequence: 13, at: '2026-01-01T00:00:02.000Z' });
+  assert.deepEqual(state.usage, { total_tokens: 44 });
   apply({ type: 'run-finish', finishReason: 'stop', usage: { total_tokens: 53 }, sequence: 14, at: '2026-01-01T00:00:03.000Z' });
 
   assert.equal(state.version, AGENT_EVENT_VERSION);

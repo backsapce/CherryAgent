@@ -807,6 +807,7 @@ function App() {
           thinking: streamingThinkingRef.current,
           toolCalls: [...toolCalls],
           transcript: agentEventState.transcript,
+          ...(agentEventState.usage ? { usage: agentEventState.usage } : {}),
         });
       });
     };
