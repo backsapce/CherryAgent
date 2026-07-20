@@ -74,7 +74,13 @@
         "avatarRemove": "削除",
         "avatarHint": "会話で使うアシスタントのアバター画像をアップロードします。",
         "avatarLoadFailed": "アバター画像を読み込めませんでした。",
-        "avatarUploadFailed": "この画像を使用できません。"
+        "avatarUploadFailed": "この画像を使用できません。",
+        "autoTitle": "新しい会話のタイトルを自動生成",
+        "autoTitleHint": "最初の返信が完了すると、AI が現在の表示言語で会話を要約し、必要に応じて関連する絵文字を1つ添えてタイトルを作成します。後で言語を変更しても既存のタイトルは変わりません。",
+        "autoTitleModel": "タイトル生成モデル",
+        "autoTitleFirstModel": "最初に設定された LLM（現在：{model}）",
+        "autoTitleNoModel": "利用可能な LLM 設定がありません",
+        "autoTitleModelHint": "デフォルトでは最初に設定された LLM を使用します。より高速で低コストなプロファイルも選択できます。"
     },
     "llmSettings": {
         "title": "LLM 設定",

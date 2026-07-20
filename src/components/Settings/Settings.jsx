@@ -24,6 +24,7 @@ import { X, Lock, Plug, Sun, Moon, Monitor, UploadCloud, DownloadCloud, AlertTri
 import { listAllSkills, setSkillEnabled } from '../../agent/skills';
 import { listAllTools, setToolEnabled } from '../../agent/tools';
 import { createAgent, deleteAgent, updateAgentName, updateAgentConfig, listAgents } from '../../agents/agents';
+import { normalizeAutoTitleConfig } from '../../models/sessionTitle';
 import { enqueueStorageOperation } from './storageOperationQueue';
 import { manifestModeChangeLocked } from './syncDestination';
 import './Settings.css';
@@ -165,6 +166,7 @@ const Settings = ({
   const [localNickname, setLocalNickname] = useState(userNickname || '');
   const [localAvatar, setLocalAvatar] = useState(avatar || '');
   const [avatarError, setAvatarError] = useState(null);
+  const [autoTitleForm, setAutoTitleForm] = useState({ enabled: true, llmProfileId: null });
   const avatarInputRef = useRef(null);
   const [agentAddMode, setAgentAddMode] = useState('server'); // 'server' | 'e2b'
   const [e2bApiKeyInput, setE2bApiKeyInput] = useState('');
@@ -328,6 +330,7 @@ const Settings = ({
     setLocalNickname(userNickname || '');
     setLocalAvatar(avatar || '');
     setAvatarError(null);
+    setAutoTitleForm(normalizeAutoTitleConfig(config.get('general.autoTitle')));
     const savedSync = config.get('sync') || {};
     const providerPreset = providerPresetOrDefault(savedSync.providerPreset);
     setSyncForm({
@@ -443,6 +446,20 @@ const Settings = ({
 
   const selectedProvider = providers?.find((p) => p.id === settingsForm.provider);
   const selectedLlmProfile = llmProfiles.find((p) => p.id === editingLlmId) || null;
+  const autoTitleProfiles = llmProfiles.filter((profile) => profile.configured);
+  const effectiveAutoTitleProfileId = autoTitleProfiles.some((profile) => profile.id === autoTitleForm.llmProfileId)
+    ? autoTitleForm.llmProfileId
+    : null;
+
+  const handleSaveGeneral = async () => {
+    await config.set('general.autoTitle', {
+      enabled: autoTitleForm.enabled,
+      llmProfileId: effectiveAutoTitleProfileId,
+    });
+    await onUserNicknameChange?.(localNickname);
+    await onAvatarChange?.(localAvatar);
+    onClose();
+  };
 
   const handleAddAgent = async () => {
     const url = newAgentUrl.trim().replace(/\/+$/, '');
@@ -1058,15 +1075,41 @@ const Settings = ({
               <p className="settings-hint">{t('generalSettings.avatarHint')}</p>
               {avatarError && <p className="settings-error">{avatarError}</p>}
 
+              <label className="settings-checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={autoTitleForm.enabled}
+                  onChange={(e) => setAutoTitleForm((form) => ({ ...form, enabled: e.target.checked }))}
+                />
+                <span>{t('generalSettings.autoTitle')}</span>
+              </label>
+              <p className="settings-hint">{t('generalSettings.autoTitleHint')}</p>
+
+              <label>{t('generalSettings.autoTitleModel')}</label>
+              <select
+                value={effectiveAutoTitleProfileId || ''}
+                disabled={!autoTitleForm.enabled || autoTitleProfiles.length === 0}
+                onChange={(e) => setAutoTitleForm((form) => ({
+                  ...form,
+                  llmProfileId: e.target.value || null,
+                }))}
+              >
+                <option value="">
+                  {autoTitleProfiles.length > 0
+                    ? t('generalSettings.autoTitleFirstModel', { model: autoTitleProfiles[0].name })
+                    : t('generalSettings.autoTitleNoModel')}
+                </option>
+                {autoTitleProfiles.map((profile) => (
+                  <option key={profile.id} value={profile.id}>{profile.name}</option>
+                ))}
+              </select>
+              <p className="settings-hint">{t('generalSettings.autoTitleModelHint')}</p>
+
               <div className="settings-actions">
                 <button className="settings-cancel" onClick={onClose}>{t('settings.cancel')}</button>
                 <button
                   className="settings-save"
-                  onClick={() => {
-                    onUserNicknameChange?.(localNickname);
-                    onAvatarChange?.(localAvatar);
-                    onClose();
-                  }}
+                  onClick={handleSaveGeneral}
                 >
                   {t('settings.save')}
                 </button>
