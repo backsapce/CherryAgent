@@ -26,6 +26,20 @@ const LOAD_HISTORY_TOP_THRESHOLD = 24;
 const SCROLL_DIRECTION_EPSILON = 2;
 const CONTEXT_SOURCE_BROWSER = 'browser';
 const CONTEXT_SOURCE_SANDBOX = 'sandbox';
+const EMPTY_COMPOSER_DRAFT = Object.freeze({
+  input: '',
+  pendingImages: Object.freeze([]),
+  pendingContextFiles: Object.freeze([]),
+  editingMessageId: null,
+  editingText: '',
+  mentionOpen: false,
+  mentionQuery: '',
+  mentionRange: null,
+  mentionActiveIndex: 0,
+  mentionFiles: Object.freeze([]),
+  mentionLoading: false,
+  mentionError: '',
+});
 const MARKDOWN_REMARK_PLUGINS = [remarkGfm];
 const MARKDOWN_REHYPE_PLUGINS = [
   rehypeSanitize,
@@ -801,6 +815,7 @@ const MessagePanel = forwardRef(({
   onEditMessage,
   onRetry,
   streaming,
+  inputDisabled = false,
   onStopStreaming,
   llmConfig,
   llmProfiles,
@@ -834,19 +849,8 @@ const MessagePanel = forwardRef(({
   storageVersion,
 }, ref) => {
   const { t } = useI18n();
-  const [input, setInput] = useState('');
-  const [editingMessageId, setEditingMessageId] = useState(null);
-  const [editingText, setEditingText] = useState('');
+  const [composerDrafts, setComposerDrafts] = useState({});
   const [copiedMessageId, setCopiedMessageId] = useState(null);
-  const [pendingImages, setPendingImages] = useState([]); // [{dataUrl, name}]
-  const [pendingContextFiles, setPendingContextFiles] = useState([]);
-  const [mentionOpen, setMentionOpen] = useState(false);
-  const [mentionQuery, setMentionQuery] = useState('');
-  const [mentionRange, setMentionRange] = useState(null);
-  const [mentionFiles, setMentionFiles] = useState([]);
-  const [mentionLoading, setMentionLoading] = useState(false);
-  const [mentionError, setMentionError] = useState('');
-  const [mentionActiveIndex, setMentionActiveIndex] = useState(0);
   const [showSettings, setShowSettings] = useState(false);
   const [syncStatus, setSyncStatus] = useState(() => getSyncStatus());
   const [visibleMessageCount, setVisibleMessageCount] = useState(messageHistoryPageSize);
@@ -858,6 +862,44 @@ const MessagePanel = forwardRef(({
   const copiedTimerRef = useRef(null);
   const textareaRef = useRef(null);
   const fileInputRef = useRef(null);
+  const draftKey = activeSessionId || '__new_session__';
+  const activeDraftKeyRef = useRef(draftKey);
+  const composerDraft = composerDrafts[draftKey] || EMPTY_COMPOSER_DRAFT;
+  const {
+    input,
+    pendingImages,
+    pendingContextFiles,
+    editingMessageId,
+    editingText,
+    mentionOpen,
+    mentionQuery,
+    mentionRange,
+    mentionActiveIndex,
+    mentionFiles,
+    mentionLoading,
+    mentionError,
+  } = composerDraft;
+  const setDraftField = (field, value) => {
+    setComposerDrafts((prev) => {
+      const current = prev[draftKey] || EMPTY_COMPOSER_DRAFT;
+      const nextValue = typeof value === 'function' ? value(current[field]) : value;
+      if (Object.is(nextValue, current[field])) return prev;
+      return {
+        ...prev,
+        [draftKey]: { ...current, [field]: nextValue },
+      };
+    });
+  };
+  const setInput = (value) => setDraftField('input', value);
+  const setPendingImages = (value) => setDraftField('pendingImages', value);
+  const setPendingContextFiles = (value) => setDraftField('pendingContextFiles', value);
+  const setEditingMessageId = (value) => setDraftField('editingMessageId', value);
+  const setEditingText = (value) => setDraftField('editingText', value);
+  const setMentionOpen = (value) => setDraftField('mentionOpen', value);
+  const setMentionQuery = (value) => setDraftField('mentionQuery', value);
+  const setMentionRange = (value) => setDraftField('mentionRange', value);
+  const setMentionActiveIndex = (value) => setDraftField('mentionActiveIndex', value);
+  const setMentionError = (value) => setDraftField('mentionError', value);
   const selectedAgent = agentList.find((agent) => agent.id === agentId) || agentList[0];
   const userName = userNickname?.trim() || t('message.you');
   const userInitial = Array.from(userName)[0]?.toUpperCase() || 'U';
@@ -886,7 +928,36 @@ const MessagePanel = forwardRef(({
       textareaRef.current?.focus({ preventScroll: true });
       resetEmptyTextareaCaret(textareaRef.current);
     },
+    adoptNewSessionDraft(sessionId) {
+      if (!sessionId) return;
+      setComposerDrafts((prev) => {
+        const source = prev.__new_session__;
+        if (!source) return prev;
+        const next = { ...prev };
+        if (!next[sessionId]) next[sessionId] = source;
+        delete next.__new_session__;
+        return next;
+      });
+    },
+    discardSessionDraft(sessionId) {
+      if (!sessionId) return;
+      setComposerDrafts((prev) => {
+        if (!Object.prototype.hasOwnProperty.call(prev, sessionId)) return prev;
+        const next = { ...prev };
+        delete next[sessionId];
+        return next;
+      });
+    },
   }), []);
+
+  useLayoutEffect(() => {
+    activeDraftKeyRef.current = draftKey;
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    textarea.style.height = 'auto';
+    textarea.style.height = Math.min(textarea.scrollHeight, 160) + 'px';
+    resetEmptyTextareaCaret(textarea);
+  }, [draftKey, input]);
 
   useEffect(() => subscribeSyncStatus(setSyncStatus), []);
 
@@ -958,19 +1029,30 @@ const MessagePanel = forwardRef(({
 
   useEffect(() => {
     let cancelled = false;
+    const effectDraftKey = draftKey;
+    const updateMention = (field, value) => {
+      setComposerDrafts((prev) => {
+        const current = prev[effectDraftKey] || EMPTY_COMPOSER_DRAFT;
+        if (Object.is(current[field], value)) return prev;
+        return {
+          ...prev,
+          [effectDraftKey]: { ...current, [field]: value },
+        };
+      });
+    };
 
     async function loadMentionFiles() {
       if (!mentionOpen) {
         if (!cancelled) {
-          setMentionFiles([]);
-          setMentionLoading(false);
-          setMentionError('');
+          updateMention('mentionFiles', []);
+          updateMention('mentionLoading', false);
+          updateMention('mentionError', '');
         }
         return;
       }
 
-      setMentionLoading(true);
-      setMentionError('');
+      updateMention('mentionLoading', true);
+      updateMention('mentionError', '');
       try {
         const sources = [];
         if (agentId) sources.push(collectAgentWorkspaceFiles(agentId));
@@ -978,8 +1060,8 @@ const MessagePanel = forwardRef(({
 
         if (sources.length === 0) {
           if (!cancelled) {
-            setMentionFiles([]);
-            setMentionError('');
+            updateMention('mentionFiles', []);
+            updateMention('mentionError', '');
           }
           return;
         }
@@ -993,19 +1075,19 @@ const MessagePanel = forwardRef(({
           .map((result) => result.reason?.message || 'Unable to search files');
 
         if (!cancelled) {
-          setMentionFiles(files.sort((a, b) => {
+          updateMention('mentionFiles', files.sort((a, b) => {
             if ((a.source || '') !== (b.source || '')) return (a.source || '').localeCompare(b.source || '');
             return a.relativePath.localeCompare(b.relativePath);
           }));
-          setMentionError(errors.join(' · '));
+          updateMention('mentionError', errors.join(' · '));
         }
       } catch (err) {
         if (!cancelled) {
-          setMentionFiles([]);
-          setMentionError(err.message || 'Unable to search files');
+          updateMention('mentionFiles', []);
+          updateMention('mentionError', err.message || 'Unable to search files');
         }
       } finally {
-        if (!cancelled) setMentionLoading(false);
+        if (!cancelled) updateMention('mentionLoading', false);
       }
     }
 
@@ -1014,7 +1096,7 @@ const MessagePanel = forwardRef(({
     return () => {
       cancelled = true;
     };
-  }, [mentionOpen, agentId, activeSandboxUrl]);
+  }, [mentionOpen, agentId, activeSandboxUrl, draftKey]);
 
   const filteredMentionFiles = useMemo(() => {
     const query = mentionQuery.trim().toLowerCase();
@@ -1027,13 +1109,15 @@ const MessagePanel = forwardRef(({
   const safeMentionActiveIndex = Math.min(mentionActiveIndex, Math.max(filteredMentionFiles.length - 1, 0));
 
   const handleSend = () => {
+    if (inputDisabled) return;
     const text = input.trim();
     if (!text && pendingImages.length === 0 && pendingContextFiles.length === 0) return;
-    onSendMessage(
+    const accepted = onSendMessage(
       buildDisplayMessageWithFileRefs(text, pendingContextFiles),
       pendingImages.length > 0 ? pendingImages : undefined,
       pendingContextFiles.length > 0 ? pendingContextFiles : undefined
     );
+    if (accepted === false) return;
     setInput('');
     setPendingImages([]);
     setPendingContextFiles([]);
@@ -1143,6 +1227,7 @@ const MessagePanel = forwardRef(({
 
   const selectMentionFile = async (file) => {
     if (!file) return;
+    const selectionDraftKey = draftKey;
     try {
       const source = file.source || CONTEXT_SOURCE_BROWSER;
       if (source === CONTEXT_SOURCE_BROWSER && !agentId) throw new Error('Select an agent first');
@@ -1159,6 +1244,7 @@ const MessagePanel = forwardRef(({
         const nextInput = input.slice(0, mentionRange.start) + input.slice(mentionRange.end);
         setInput(nextInput);
         requestAnimationFrame(() => {
+          if (activeDraftKeyRef.current !== selectionDraftKey) return;
           if (!textareaRef.current) return;
           textareaRef.current.focus({ preventScroll: true });
           textareaRef.current.selectionStart = textareaRef.current.selectionEnd = mentionRange.start;
@@ -1592,7 +1678,7 @@ const MessagePanel = forwardRef(({
             className="attach-btn"
             onClick={() => fileInputRef.current?.click()}
             title={t('message.uploadImage')}
-            disabled={streaming}
+            disabled={streaming || inputDisabled}
           >
             <Plus width={20} height={20} />
           </button>
@@ -1605,12 +1691,13 @@ const MessagePanel = forwardRef(({
             onFocus={handleInputFocus}
             onPointerUp={handleInputPointerUp}
             onKeyDown={handleKeyDown}
+            disabled={inputDisabled}
             rows={1}
           />
           <button
             className="send-btn"
             onClick={streaming ? onStopStreaming : handleSend}
-            disabled={!streaming && !input.trim() && pendingImages.length === 0 && pendingContextFiles.length === 0}
+            disabled={!streaming && (inputDisabled || (!input.trim() && pendingImages.length === 0 && pendingContextFiles.length === 0))}
             title={streaming ? t('message.stop') : t('message.send')}
           >
             {streaming ? (

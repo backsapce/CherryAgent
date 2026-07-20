@@ -35,6 +35,21 @@ const syncHooks = new Set();
 let sessionMetadataWriteSnapshot = null;
 const sessionMessageWriteSnapshots = new Map();
 let sessionWriteCacheRoot = null;
+const agentWorkspaceMutationQueues = new Map();
+
+function withAgentWorkspaceMutation(agentId, scope, operation) {
+  const key = JSON.stringify([agentId || null, scope]);
+  const previous = agentWorkspaceMutationQueues.get(key) || Promise.resolve();
+  const task = previous.then(operation);
+  const settled = task.catch(() => {});
+  agentWorkspaceMutationQueues.set(key, settled);
+  settled.finally(() => {
+    if (agentWorkspaceMutationQueues.get(key) === settled) {
+      agentWorkspaceMutationQueues.delete(key);
+    }
+  });
+  return task;
+}
 
 // Keep only a compact change fingerprint here. Retaining the full serialized
 // message body duplicated every conversation (including image data URLs) for
@@ -2227,21 +2242,25 @@ export async function readAgentSkillFile(agentId, skillName, filename) {
 }
 
 export async function writeAgentSkillFile(agentId, skillName, filename, content) {
-  const dir = await getAgentSkillsDir(agentId);
-  const skillDir = await dir.getDirectoryHandle(skillName, { create: true });
-  const name = await resolveWorkspaceName(agentId);
-  await writeText(skillDir, filename, content, { localPath: `${WORKSPACE_DIR}/${name}/skills/${skillName}/${filename}` });
+  return withAgentWorkspaceMutation(agentId, 'skills', async () => {
+    const dir = await getAgentSkillsDir(agentId);
+    const skillDir = await dir.getDirectoryHandle(skillName, { create: true });
+    const name = await resolveWorkspaceName(agentId);
+    await writeText(skillDir, filename, content, { localPath: `${WORKSPACE_DIR}/${name}/skills/${skillName}/${filename}` });
+  });
 }
 
 export async function deleteAgentSkillDir(agentId, skillName) {
-  try {
-    const dir = await getAgentSkillsDir(agentId);
-    await dir.removeEntry(skillName, { recursive: true });
-    const name = await resolveWorkspaceName(agentId);
-    notifyOpfsMutation(`${WORKSPACE_DIR}/${name}/skills/${skillName}`, 'delete');
-  } catch (error) {
-    if (!isMissingFileSystemEntry(error)) throw error;
-  }
+  return withAgentWorkspaceMutation(agentId, 'skills', async () => {
+    try {
+      const dir = await getAgentSkillsDir(agentId);
+      await dir.removeEntry(skillName, { recursive: true });
+      const name = await resolveWorkspaceName(agentId);
+      notifyOpfsMutation(`${WORKSPACE_DIR}/${name}/skills/${skillName}`, 'delete');
+    } catch (error) {
+      if (!isMissingFileSystemEntry(error)) throw error;
+    }
+  });
 }
 
 export async function listAgentSkillRefs(agentId, skillName) {
@@ -2271,11 +2290,13 @@ export async function readAgentSkillRef(agentId, skillName, filename) {
 }
 
 export async function writeAgentSkillRef(agentId, skillName, filename, content) {
-  const dir = await getAgentSkillsDir(agentId);
-  const skillDir = await dir.getDirectoryHandle(skillName, { create: true });
-  const refsDir = await skillDir.getDirectoryHandle('references', { create: true });
-  const name = await resolveWorkspaceName(agentId);
-  await writeText(refsDir, filename, content, { localPath: `${WORKSPACE_DIR}/${name}/skills/${skillName}/references/${filename}` });
+  return withAgentWorkspaceMutation(agentId, 'skills', async () => {
+    const dir = await getAgentSkillsDir(agentId);
+    const skillDir = await dir.getDirectoryHandle(skillName, { create: true });
+    const refsDir = await skillDir.getDirectoryHandle('references', { create: true });
+    const name = await resolveWorkspaceName(agentId);
+    await writeText(refsDir, filename, content, { localPath: `${WORKSPACE_DIR}/${name}/skills/${skillName}/references/${filename}` });
+  });
 }
 
 export async function listAgentSkillFiles(agentId, path = '') {
@@ -2334,13 +2355,15 @@ export async function getAgentSkillFileInfo(agentId, path) {
 
 export async function writeAgentSkillPath(agentId, path, content) {
   const safePath = normalizeWorkspaceRelativePath(path);
-  const parts = pathParts(safePath);
-  const fileName = parts.pop();
-  const dir = parts.length > 0
-    ? await getAgentDir(agentId, 'skills', ...parts)
-    : await getAgentSkillsDir(agentId);
-  const name = await resolveWorkspaceName(agentId);
-  await writeText(dir, fileName, content, { localPath: `${WORKSPACE_DIR}/${name}/skills/${safePath}` });
+  return withAgentWorkspaceMutation(agentId, 'skills', async () => {
+    const parts = pathParts(safePath);
+    const fileName = parts.pop();
+    const dir = parts.length > 0
+      ? await getAgentDir(agentId, 'skills', ...parts)
+      : await getAgentSkillsDir(agentId);
+    const name = await resolveWorkspaceName(agentId);
+    await writeText(dir, fileName, content, { localPath: `${WORKSPACE_DIR}/${name}/skills/${safePath}` });
+  });
 }
 
 // Agent-scoped file operations
@@ -2413,44 +2436,50 @@ export async function getAgentFileInfo(agentId, path) {
 
 export async function writeAgentFile(agentId, path, content) {
   const safePath = normalizeWorkspaceRelativePath(path);
-  const parts = pathParts(safePath);
-  const fileName = parts.pop();
-  const dir = parts.length > 0
-    ? await getAgentDir(agentId, 'files', ...parts)
-    : await getAgentFilesDir(agentId);
-  const name = await resolveWorkspaceName(agentId);
-  await writeText(dir, fileName, content, { localPath: `${WORKSPACE_DIR}/${name}/files/${safePath}` });
+  return withAgentWorkspaceMutation(agentId, 'files', async () => {
+    const parts = pathParts(safePath);
+    const fileName = parts.pop();
+    const dir = parts.length > 0
+      ? await getAgentDir(agentId, 'files', ...parts)
+      : await getAgentFilesDir(agentId);
+    const name = await resolveWorkspaceName(agentId);
+    await writeText(dir, fileName, content, { localPath: `${WORKSPACE_DIR}/${name}/files/${safePath}` });
+  });
 }
 
 export async function createAgentFile(agentId, path, isDirectory = false) {
   const safePath = normalizeWorkspaceRelativePath(path);
-  const parts = pathParts(safePath);
-  const name = parts.pop();
-  const dir = parts.length > 0
-    ? await getAgentDir(agentId, 'files', ...parts)
-    : await getAgentFilesDir(agentId);
-  if (isDirectory) {
-    await dir.getDirectoryHandle(name, { create: true });
-    const workspaceName = await resolveWorkspaceName(agentId);
-    notifyOpfsMutation(`${WORKSPACE_DIR}/${workspaceName}/files/${safePath}`, 'mkdir');
-  } else {
-    const workspaceName = await resolveWorkspaceName(agentId);
-    await writeText(dir, name, '', { localPath: `${WORKSPACE_DIR}/${workspaceName}/files/${safePath}` });
-  }
+  return withAgentWorkspaceMutation(agentId, 'files', async () => {
+    const parts = pathParts(safePath);
+    const name = parts.pop();
+    const dir = parts.length > 0
+      ? await getAgentDir(agentId, 'files', ...parts)
+      : await getAgentFilesDir(agentId);
+    if (isDirectory) {
+      await dir.getDirectoryHandle(name, { create: true });
+      const workspaceName = await resolveWorkspaceName(agentId);
+      notifyOpfsMutation(`${WORKSPACE_DIR}/${workspaceName}/files/${safePath}`, 'mkdir');
+    } else {
+      const workspaceName = await resolveWorkspaceName(agentId);
+      await writeText(dir, name, '', { localPath: `${WORKSPACE_DIR}/${workspaceName}/files/${safePath}` });
+    }
+  });
 }
 
 export async function deleteAgentFile(agentId, path) {
   const safePath = normalizeWorkspaceRelativePath(path);
-  const parts = pathParts(safePath);
-  const name = parts.pop();
-  const dir = parts.length > 0
-    ? await getAgentDir(agentId, 'files', ...parts)
-    : await getAgentFilesDir(agentId);
-  try {
-    await dir.removeEntry(name, { recursive: true });
-    const workspaceName = await resolveWorkspaceName(agentId);
-    notifyOpfsMutation(`${WORKSPACE_DIR}/${workspaceName}/files/${safePath}`, 'delete');
-  } catch (error) {
-    if (!isMissingFileSystemEntry(error)) throw error;
-  }
+  return withAgentWorkspaceMutation(agentId, 'files', async () => {
+    const parts = pathParts(safePath);
+    const name = parts.pop();
+    const dir = parts.length > 0
+      ? await getAgentDir(agentId, 'files', ...parts)
+      : await getAgentFilesDir(agentId);
+    try {
+      await dir.removeEntry(name, { recursive: true });
+      const workspaceName = await resolveWorkspaceName(agentId);
+      notifyOpfsMutation(`${WORKSPACE_DIR}/${workspaceName}/files/${safePath}`, 'delete');
+    } catch (error) {
+      if (!isMissingFileSystemEntry(error)) throw error;
+    }
+  });
 }

@@ -60,6 +60,20 @@ test('structured memory records round-trip through the memory API', async () => 
   assert.deepEqual(await listMemoryEntries({ type: 'both' }), []);
 });
 
+test('concurrent session writes preserve every memory record', async () => {
+  await Promise.all(Array.from({ length: 8 }, (_, index) => upsertMemoryEntry({
+    type: 'memory',
+    id: `parallel-${index}`,
+    content: `Concurrent note ${index}`,
+  }, 'shared-agent')));
+
+  const entries = await listMemoryEntries({ type: 'memory', maxEntries: 20 }, 'shared-agent');
+  assert.deepEqual(
+    entries.map((entry) => entry.id).sort(),
+    Array.from({ length: 8 }, (_, index) => `parallel-${index}`)
+  );
+});
+
 test('memory registry tool can write, search, and delete records', async () => {
   const writeResult = await registry.dispatch('memory', {
     action: 'write',

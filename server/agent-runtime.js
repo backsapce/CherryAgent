@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createLanguageModel } from '../src/models/ai.js';
@@ -12,6 +12,8 @@ const MAX_RUNTIME_FILE_BYTES = 256 * 1024;
 const MAX_RUNTIME_FILES_BYTES = 10 * 1024 * 1024;
 const MAX_SANDBOX_IMAGE_BYTES = 6 * 1024 * 1024;
 const MAX_SANDBOX_IMAGES_BYTES = 64 * 1024 * 1024;
+const CANCELLED_RUN_ID_TTL_MS = 10 * 60_000;
+const RUN_ABORT_WAIT_MS = 5_000;
 const SANDBOX_ATTACHMENTS_MARKER = 'Sandbox attachment files (available to shell commands and sandbox file tools):';
 
 const REMOTE_TOOL_SCHEMAS = [
@@ -148,31 +150,53 @@ export function createAgentRunManager({
   readFile,
   writeFile,
   fileExists,
+  runAgent = runAgentLoop,
+  createModel = createLanguageModel,
+  abortWaitMs = RUN_ABORT_WAIT_MS,
+  maxEventBytes = MAX_EVENT_BYTES,
 }) {
   mkdirSync(runsDir, { recursive: true });
   const runs = new Map();
+  const cancelledRunIds = new Map();
   loadPersistedRuns(runsDir, runs);
+
+  const pruneCancelledRunIds = () => {
+    const now = Date.now();
+    for (const [id, expiresAt] of cancelledRunIds) {
+      if (expiresAt <= now) cancelledRunIds.delete(id);
+    }
+  };
 
   const persist = (run) => {
     const publicRun = serializeRun(run);
     const target = join(runsDir, `${run.id}.json`);
     const temporary = `${target}.tmp`;
-    writeFileSync(temporary, JSON.stringify(publicRun, null, 2), 'utf8');
-    renameSync(temporary, target);
+    try {
+      writeFileSync(temporary, JSON.stringify(publicRun, null, 2), 'utf8');
+      renameSync(temporary, target);
+    } catch (error) {
+      try {
+        rmSync(temporary, { force: true });
+      } catch {
+        // Preserve the original persistence error.
+      }
+      throw error;
+    }
   };
 
   const emit = (run, event) => {
-    run.sequence += 1;
-    const stored = { ...event, remoteSequence: run.sequence };
-    run.events.push(stored);
-    run.updatedAt = new Date().toISOString();
+    const stored = { ...event, remoteSequence: run.sequence + 1 };
     const eventPath = join(runsDir, `${run.id}.events.ndjson`);
     const line = `${JSON.stringify(stored)}\n`;
     const lineBytes = Buffer.byteLength(line);
-    if (run.eventBytes + lineBytes <= MAX_EVENT_BYTES) {
-      appendFileSync(eventPath, line, 'utf8');
-      run.eventBytes += lineBytes;
+    if (run.eventBytes + lineBytes > maxEventBytes) {
+      throw new Error(`Agent run event log exceeded ${maxEventBytes} bytes.`);
     }
+    run.sequence += 1;
+    run.events.push(stored);
+    run.updatedAt = new Date().toISOString();
+    appendFileSync(eventPath, line, 'utf8');
+    run.eventBytes += lineBytes;
   };
 
   const dispatchTool = createRuntimeToolDispatcher({
@@ -188,10 +212,38 @@ export function createAgentRunManager({
 
   const start = (input) => {
     validateRunInput(input);
-    const id = `run-${randomUUID()}`;
+    const sessionId = String(input.sessionId);
+    const id = input.runId ? String(input.runId) : `run-${randomUUID()}`;
+    pruneCancelledRunIds();
+    if (cancelledRunIds.has(id)) {
+      const error = new Error(`Agent run was cancelled before it started: ${id}`);
+      error.statusCode = 409;
+      throw error;
+    }
+    const existingById = runs.get(id);
+    if (existingById) {
+      if (
+        existingById.sessionId === sessionId
+        && existingById.replyId === (input.replyId ? String(input.replyId) : null)
+      ) return serializeRun(existingById);
+      const error = new Error(`Agent run id already exists: ${id}`);
+      error.statusCode = 409;
+      throw error;
+    }
+    const activeRun = [...runs.values()].find((candidate) => (
+      candidate.sessionId === sessionId
+      && ['running', 'waiting'].includes(candidate.status)
+    ));
+    if (activeRun) {
+      const error = new Error(`Session ${sessionId} already has an active agent run (${activeRun.id}).`);
+      error.statusCode = 409;
+      throw error;
+    }
+    let resolveCompletion;
+    const completion = new Promise((resolve) => { resolveCompletion = resolve; });
     const run = {
       id,
-      sessionId: String(input.sessionId),
+      sessionId,
       replyId: input.replyId ? String(input.replyId) : null,
       status: 'running',
       createdAt: new Date().toISOString(),
@@ -201,20 +253,34 @@ export function createAgentRunManager({
       result: null,
       error: null,
       controller: new AbortController(),
+      cancelRequested: false,
+      completion,
       eventBytes: 0,
     };
     runs.set(id, run);
-    persist(run);
+    try {
+      persist(run);
+    } catch (error) {
+      runs.delete(id);
+      throw error;
+    }
 
     Promise.resolve().then(async () => {
       try {
+        throwIfRunCancelled(run);
         await materializeRuntimeFiles(input.runtimeContext?.sandboxFiles, { fileExists, readFile, writeFile });
-        let runtimeMessages = await materializeMessageImages(input.messages, { fileExists, writeFile });
+        throwIfRunCancelled(run);
+        let runtimeMessages = await materializeMessageImages(input.messages, {
+          fileExists,
+          writeFile,
+          attachmentScope: run.id,
+        });
+        throwIfRunCancelled(run);
         const modelConfig = input.modelConfig;
         let result;
         while (true) {
           let scheduledWakeup = null;
-          result = await runAgentLoop({
+          result = await runAgent({
             messages: runtimeMessages,
             systemPrompt: input.systemPrompt || '',
             agentId: input.agentId || null,
@@ -223,11 +289,12 @@ export function createAgentRunManager({
             contextWindow: modelConfig.contextWindow || undefined,
             maxRounds: input.maxRounds,
             signal: run.controller.signal,
-            languageModel: createLanguageModel(modelConfig),
+            languageModel: createModel(modelConfig),
             runtimeContext: normalizeRuntimeContext(input.runtimeContext),
             toolSchemas: REMOTE_TOOL_SCHEMAS,
             dispatchTool,
             scheduleWakeup: async ({ delaySeconds, prompt }) => {
+              throwIfRunCancelled(run);
               if (scheduledWakeup) throw new Error('Only one wake-up can be scheduled per agent turn.');
               scheduledWakeup = createWakeup({
                 id: `wake-${randomUUID()}`,
@@ -238,9 +305,14 @@ export function createAgentRunManager({
             },
             autoSummarize: false,
             runtimeMode: 'sandbox',
-            onEvent: (event) => emit(run, event),
+            onEvent: (event) => {
+              if (run.status !== 'running') throw createRunAbortError();
+              throwIfRunCancelled(run);
+              emit(run, event);
+            },
           });
 
+          throwIfRunCancelled(run);
           run.result = result;
           if (!scheduledWakeup) break;
 
@@ -249,6 +321,7 @@ export function createAgentRunManager({
           run.updatedAt = new Date().toISOString();
           persist(run);
           await waitForWakeup(scheduledWakeup.runAtMs, run.controller.signal);
+          throwIfRunCancelled(run);
 
           run.status = 'running';
           run.wakeup = null;
@@ -264,12 +337,18 @@ export function createAgentRunManager({
         run.status = 'completed';
         run.result = result;
       } catch (error) {
-        run.status = error?.name === 'AbortError' ? 'aborted' : 'error';
+        run.status = run.cancelRequested || error?.name === 'AbortError' ? 'aborted' : 'error';
         run.error = error?.message || String(error);
       } finally {
         run.updatedAt = new Date().toISOString();
         run.controller = null;
-        persist(run);
+        try {
+          persist(run);
+        } catch (error) {
+          console.error(`Failed to persist terminal agent run ${run.id}:`, error);
+        } finally {
+          resolveCompletion();
+        }
       }
     });
 
@@ -291,11 +370,55 @@ export function createAgentRunManager({
     },
     abort(id) {
       const run = runs.get(id);
-      if (!run) return null;
+      if (!run) {
+        if (!/^run-[A-Za-z0-9-]{6,128}$/.test(String(id))) return null;
+        pruneCancelledRunIds();
+        cancelledRunIds.set(String(id), Date.now() + CANCELLED_RUN_ID_TTL_MS);
+        const now = new Date().toISOString();
+        return Promise.resolve({
+          id: String(id),
+          sessionId: null,
+          replyId: null,
+          status: 'aborted',
+          createdAt: now,
+          updatedAt: now,
+          sequence: 0,
+          result: null,
+          error: 'Cancelled before start.',
+          wakeup: null,
+        });
+      }
+      run.cancelRequested = true;
       run.controller?.abort();
-      return serializeRun(run);
+      // Providers and external tools are expected to honor AbortSignal, but an
+      // unhealthy implementation must not hold the HTTP DELETE open forever.
+      // The run remains active (and continues blocking another run for this
+      // same session) until its task actually settles, preserving isolation.
+      return waitForSettlement(run.completion, abortWaitMs).then(() => serializeRun(run));
     },
   };
+}
+
+async function waitForSettlement(promise, timeoutMs) {
+  let timerId;
+  await Promise.race([
+    Promise.resolve(promise).catch(() => {}),
+    new Promise((resolve) => {
+      timerId = setTimeout(resolve, Math.max(0, Number(timeoutMs) || 0));
+    }),
+  ]);
+  clearTimeout(timerId);
+}
+
+function throwIfRunCancelled(run) {
+  if (!run.cancelRequested && run.controller && !run.controller.signal.aborted) return;
+  throw createRunAbortError();
+}
+
+function createRunAbortError() {
+  const error = new Error('Agent run aborted');
+  error.name = 'AbortError';
+  return error;
 }
 
 function sandboxImageExtension(mimeType) {
@@ -350,9 +473,12 @@ function decodeImageDataUrl(dataUrl) {
  * where they are. The original image parts remain in the message, so the model
  * can both see the image and pass its local path to command-line tools.
  */
-export async function materializeMessageImages(messages = [], { fileExists, writeFile }) {
+export async function materializeMessageImages(messages = [], { fileExists, writeFile, attachmentScope }) {
   let totalBytes = 0;
   const output = [];
+  const scopedPrefix = attachmentScope
+    ? `${safeAttachmentSegment(attachmentScope, 'run')}/`
+    : '';
 
   for (let messageIndex = 0; messageIndex < messages.length; messageIndex += 1) {
     const message = messages[messageIndex];
@@ -367,7 +493,7 @@ export async function materializeMessageImages(messages = [], { fileExists, writ
       const messageId = safeAttachmentSegment(message?.id, `message-${messageIndex + 1}`);
       const originalStem = String(images[imageIndex]?.name || `image-${imageIndex + 1}`).replace(/\.[^.]*$/, '');
       const fileStem = safeAttachmentSegment(originalStem, `image-${imageIndex + 1}`);
-      const path = `attachments/${messageId}/${imageIndex + 1}-${fileStem}.${sandboxImageExtension(decoded.mimeType)}`;
+      const path = `attachments/${scopedPrefix}${messageId}/${imageIndex + 1}-${fileStem}.${sandboxImageExtension(decoded.mimeType)}`;
       const exists = fileExists ? await fileExists(path) : false;
       if (!exists) await writeFile(path, decoded.content);
       attachmentLines.push(`- Image ${imageIndex + 1}: ${path}`);
@@ -507,6 +633,9 @@ function formatCommandResult(result) {
 function validateRunInput(input) {
   if (!input || typeof input !== 'object') throw new Error('Run body must be an object.');
   if (!input.sessionId) throw new Error('sessionId is required.');
+  if (input.runId !== undefined && !/^run-[A-Za-z0-9-]{6,128}$/.test(String(input.runId))) {
+    throw new Error('runId must be a valid client-generated run id.');
+  }
   if (!Array.isArray(input.messages) || input.messages.length > MAX_MESSAGES) throw new Error('messages must be a bounded array.');
   const model = input.modelConfig;
   if (!model?.provider || !model?.model || !model?.apiKey) throw new Error('A complete modelConfig is required.');
@@ -600,6 +729,7 @@ function loadPersistedRuns(runsDir, runs) {
         events,
         eventBytes: existsSync(eventsPath) ? readFileSync(eventsPath).byteLength : 0,
         controller: null,
+        completion: Promise.resolve(),
       });
     } catch {
       // Ignore a damaged individual run record; other runs remain recoverable.

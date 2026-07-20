@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  abortRemoteAgentRun,
   executeCommand,
   getCommand,
   listFiles,
@@ -104,6 +105,24 @@ test('managed command clients use job endpoints and preserve log cursors', async
       ['DELETE', 'https://sandbox.example/agent/commands/job-one'],
     ]);
     assert.deepEqual(JSON.parse(requests[0].options.body), { command: 'python train.py' });
+  } finally {
+    restore();
+  }
+});
+
+test('remote run abort forwards its cancellation signal', async () => {
+  let request = null;
+  const restore = installBrowserMocks(undefined, async (url, options) => {
+    request = { url, options };
+    return { ok: true, json: async () => ({ status: 'aborted' }) };
+  });
+  const controller = new AbortController();
+
+  try {
+    await abortRemoteAgentRun('https://sandbox.example', 'run one', controller.signal);
+    assert.equal(request.url, 'https://sandbox.example/agent/runs/run%20one');
+    assert.equal(request.options.method, 'DELETE');
+    assert.equal(request.options.signal, controller.signal);
   } finally {
     restore();
   }

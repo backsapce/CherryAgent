@@ -18,6 +18,7 @@ const SessionList = ({
   onToggleCollapse,
   sessionAgents = {},
   agentList = [],
+  runningSessionIds = new Set(),
 }) => {
   const { t } = useI18n();
   const [width, setWidth] = useState(280);
@@ -146,6 +147,13 @@ const SessionList = ({
               >
                 <div className="session-item-row">
                   <div className="session-item-title">
+                    {runningSessionIds.has(session.id) && (
+                      <span
+                        className="session-running-indicator"
+                        title={t('message.running')}
+                        aria-label={t('message.running')}
+                      />
+                    )}
                     {session.title}
                     {sessionAgents[session.id] && (
                       <span className="session-agent-badge">

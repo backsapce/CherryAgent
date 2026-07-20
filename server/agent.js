@@ -592,7 +592,7 @@ const server = createServer(async (req, res) => {
       const run = agentRunManager.start(input);
       return json(res, 202, run, req);
     } catch (error) {
-      return json(res, 400, { error: error.message || 'Invalid agent run request' }, req);
+      return json(res, error.statusCode || 400, { error: error.message || 'Invalid agent run request' }, req);
     }
   }
 
@@ -610,7 +610,7 @@ const server = createServer(async (req, res) => {
 
   if (runRoute && req.method === 'DELETE') {
     if (!isAuthorized(req)) return json(res, 401, { error: 'Unauthorized.' }, req);
-    const run = agentRunManager.abort(decodeURIComponent(runRoute[1]));
+    const run = await agentRunManager.abort(decodeURIComponent(runRoute[1]));
     return run ? json(res, 202, run, req) : json(res, 404, { error: 'Agent run not found' }, req);
   }
 

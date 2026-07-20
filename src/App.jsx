@@ -38,6 +38,7 @@ import {
   sortSessions,
 } from './sessionRefresh';
 import { createSessionSaveCoordinator } from './sessionPersistence';
+import { createSessionRunRegistry } from './sessionRuns';
 import { buildWakeupMessage, createWakeup, findNextWakeup } from './agent/wakeup';
 import { WifiOff, ChevronRight } from './components/Icons/Icons';
 import './App.css';
@@ -85,6 +86,10 @@ function metadataSnapshot(sessions) {
   return snapshotSessions((sessions || []).map(sessionMetadataOnly));
 }
 
+function sessionHasRunningRemote(sessions, sessionId) {
+  return sessions.find((session) => session.id === sessionId)?.remoteRun?.status === 'running';
+}
+
 const AGENT_SYSTEM_PROMPT = `You have access to commands, browser-workspace files, sandbox-runtime files, memory, skills, and focused sub-agent delegation.
 
 Filesystem model:
@@ -112,6 +117,40 @@ const SANDBOX_AGENT_SYSTEM_PROMPT = `You are running fully inside the selected s
 const FILE_CONTEXT_MARKER = 'Selected file context:';
 const TOOL_HISTORY_MARKER = 'Tool calls performed during this assistant turn:';
 const TOOL_HISTORY_RESULT_MAX_CHARS = 4000;
+const REMOTE_ABORT_TIMEOUT_MS = 5000;
+const REMOTE_ABORT_RETRY_MS = 1500;
+const LOCAL_RUN_STOP_TIMEOUT_MS = 5000;
+
+async function waitForSettlement(promise, timeoutMs) {
+  let timerId;
+  const settled = await Promise.race([
+    Promise.resolve(promise).then(() => true, () => true),
+    new Promise((resolve) => {
+      timerId = setTimeout(() => resolve(false), timeoutMs);
+    }),
+  ]);
+  clearTimeout(timerId);
+  return settled;
+}
+
+async function abortRemoteAgentRunBestEffort(url, runId) {
+  if (!url || !runId) return null;
+  const controller = new AbortController();
+  const timerId = setTimeout(() => controller.abort(), REMOTE_ABORT_TIMEOUT_MS);
+  try {
+    return await abortRemoteAgentRun(url, runId, controller.signal);
+  } catch (error) {
+    // A local abort must not be held hostage by an unreachable runtime. The
+    // server-side run is best-effort once this bounded request has finished.
+    // Only a confirmed missing run releases the stale local record. Auth and
+    // validation failures do not prove that the server-side run stopped.
+    if ([404, 410].includes(error?.status)) return { status: 'unavailable' };
+    if ([400, 401, 403, 405, 422].includes(error?.status)) return { status: 'cancel-blocked' };
+    return null;
+  } finally {
+    clearTimeout(timerId);
+  }
+}
 
 function contextFilePromptPath(file) {
   if (file?.relativePath) return file.relativePath;
@@ -203,7 +242,12 @@ function App() {
   const [startupRecoveryBusy, setStartupRecoveryBusy] = useState(null);
   const [startupRecoveryError, setStartupRecoveryError] = useState(null);
   const [_llmReady, setLlmReady] = useState(false); // triggers re-render on config change
-  const [streaming, setStreaming] = useState(false);
+  const [runningSessionIds, setRunningSessionIds] = useState(() => new Set());
+  const [pendingSessionIds, setPendingSessionIds] = useState(() => new Set());
+  const [stoppingSessionIds, setStoppingSessionIds] = useState(() => new Set());
+  const [loadingSessionIds, setLoadingSessionIds] = useState(() => new Set());
+  const [remoteResumeVersion, setRemoteResumeVersion] = useState(0);
+  const [remoteDiscoveryVersion, setRemoteDiscoveryVersion] = useState(0);
   const [theme, setTheme] = useState('system'); // 'light' | 'dark' | 'system'
   const [localePref, setLocalePref] = useState('auto'); // persisted language preference
   const [agents, setAgents] = useState([]); // [{url, name, status:'connected'|'disconnected'}]
@@ -215,6 +259,7 @@ function App() {
   const [userNickname, setUserNickname] = useState('');
   const [avatar, setAvatar] = useState('');
   const [agentList, setAgentList] = useState([]); // [{ id, name, createdAt }]
+  const [agentListReady, setAgentListReady] = useState(false);
   const [sessionAgents, setSessionAgents] = useState({}); // { sessionId -> agentId }
   const [lastAgentId, setLastAgentId] = useState(null); // agent used by most recent session
   const [sessionLlmProfiles, setSessionLlmProfiles] = useState({}); // { sessionId -> llmProfileId }
@@ -225,27 +270,37 @@ function App() {
   const skipNextSessionSaveRef = useRef(null);
   const persistedSessionsRef = useRef([]);
   const sessionSaveCoordinatorRef = useRef(null);
-  const abortRef = useRef(null);
-  const remoteRunRef = useRef(null);
   const resumedRemoteRunsRef = useRef(new Set());
   const resumingWaitingRunsRef = useRef(new Set());
+  const waitingRemoteTimersRef = useRef(new Map());
+  const remoteResumeRetryTimersRef = useRef(new Map());
+  const remoteAbortRetryTimersRef = useRef(new Map());
   const remoteDiscoveryRef = useRef(new Set());
-  const streamCompletionRef = useRef(null);
+  const remoteDiscoveryRetryTimersRef = useRef(new Map());
   const titleGenerationControllersRef = useRef(new Map());
   const factoryResetInProgressRef = useRef(false);
   const startupRecoveryBusyRef = useRef(false);
   const pendingStreamStartsRef = useRef(new Map());
+  const sessionStopPromisesRef = useRef(new Map());
   const claimedWakeupIdsRef = useRef(new Set());
-  const streamingContentRef = useRef('');  // accumulates chunks outside React state
-  const streamingThinkingRef = useRef(''); // accumulates thinking/reasoning chunks
-  const rafRef = useRef(null);            // requestAnimationFrame id for UI sync
+  const deletedSessionIdsRef = useRef(new Set());
+  const deletingSessionIdsRef = useRef(new Set());
+  const sessionIncarnationsRef = useRef(new Map());
+  const sessionDeletionTailRef = useRef(Promise.resolve());
   const selectedAgentRef = useRef(null); // avoid stale closure
   const messagePanelRef = useRef(null);
-  const wasStreamingRef = useRef(false);
   const sessionsRef = useRef(sessions);
   const activeSessionIdRef = useRef(activeSessionId);
   const localePrefRef = useRef(localePref);
   const sessionLoadRequestRef = useRef(0);
+  const sessionLoadingRequestsRef = useRef(new Map());
+  const sessionRunsRef = useRef(null);
+
+  if (!sessionRunsRef.current) {
+    sessionRunsRef.current = createSessionRunRegistry({
+      onChange: setRunningSessionIds,
+    });
+  }
 
   if (!sessionSaveCoordinatorRef.current) {
     sessionSaveCoordinatorRef.current = createSessionSaveCoordinator({
@@ -344,6 +399,22 @@ function App() {
       // update above remains authoritative for message content.
       const mergedSessions = previewMerge.sessions;
 
+      // A restored session with the same id is a new incarnation. Clear the
+      // completed deletion fence while invalidating callbacks captured by the
+      // old incarnation.
+      for (const session of mergedSessions) {
+        if (
+          deletedSessionIdsRef.current.has(session.id)
+          && !deletingSessionIdsRef.current.has(session.id)
+        ) {
+          deletedSessionIdsRef.current.delete(session.id);
+          sessionIncarnationsRef.current.set(
+            session.id,
+            (sessionIncarnationsRef.current.get(session.id) || 0) + 1
+          );
+        }
+      }
+
       const agentMap = {};
       const llmMap = {};
       for (const session of mergedSessions) {
@@ -372,6 +443,7 @@ function App() {
 
       const savedAgents = await listAgents();
       setAgentList(savedAgents);
+      setAgentListReady(true);
 
       // config.yaml may have gained or lost sandbox hosts during sync/import.
       // Rebuild the runtime view so Settings and sandbox selectors reflect the
@@ -470,9 +542,20 @@ function App() {
 
         ensureDefaultSkills().catch((err) => console.warn('Ensure default skills failed:', err));
 
-        ensureDefaultAgent().then(() => listAgents()).then((agents) => {
-          setAgentList(agents);
-        }).catch((err) => console.warn('Ensure default agent failed:', err));
+        ensureDefaultAgent()
+          .catch((err) => console.warn('Ensure default agent failed:', err))
+          .then(() => listAgents())
+          .then((agentItems) => {
+            setAgentList(agentItems);
+            setAgentListReady(true);
+          })
+          .catch((err) => {
+            // Agentless browser sessions can still use the configured LLM.
+            // A stale agent-bound session will show an explicit unavailable
+            // message instead of silently switching runtimes.
+            console.warn('Load agents failed:', err);
+            setAgentListReady(true);
+          });
       })
       .catch((err) => {
         console.error('Config init failed:', err);
@@ -569,6 +652,27 @@ function App() {
 
   const activeSession = sessions.find((c) => c.id === activeSessionId);
   const messages = activeSession?.messages || [];
+  const activeSessionStreaming = Boolean(
+    activeSessionId
+    && (
+      runningSessionIds.has(activeSessionId)
+      || pendingSessionIds.has(activeSessionId)
+      || stoppingSessionIds.has(activeSessionId)
+      || activeSession?.remoteRun?.status === 'running'
+    )
+  );
+  const activeSessionLoading = Boolean(activeSessionId && loadingSessionIds.has(activeSessionId));
+  const activeSessionAgentLoading = Boolean(
+    !agentListReady && (!activeSessionId || activeSession?.agentId)
+  );
+  const busySessionIdsForUi = new Set([
+    ...runningSessionIds,
+    ...pendingSessionIds,
+    ...stoppingSessionIds,
+    ...sessions
+      .filter((session) => session.remoteRun?.status === 'running')
+      .map((session) => session.id),
+  ]);
   const selectedAgentId = activeSession?.agentId || lastAgentId || null;
   const activeAgentConfig = selectedAgentId ? agentList.find((agent) => agent.id === selectedAgentId) : null;
   const firstLlmProfileId = llm.getProfiles()[0]?.id || null;
@@ -582,12 +686,109 @@ function App() {
     return agent?.llmProfileId || null;
   }, [agentList]);
 
+  const cancelPendingSessionStart = useCallback((sessionId) => {
+    const pendingStart = pendingStreamStartsRef.current.get(sessionId);
+    if (!pendingStart) return null;
+    clearTimeout(pendingStart.timerId);
+    pendingStreamStartsRef.current.delete(sessionId);
+    setPendingSessionIds((prev) => {
+      if (!prev.has(sessionId)) return prev;
+      const next = new Set(prev);
+      next.delete(sessionId);
+      return next;
+    });
+    return pendingStart;
+  }, []);
+
+  const stopSessionRun = useCallback((sessionId, { skipAutomaticTitle = false } = {}) => {
+    const sessionIncarnation = sessionIncarnationsRef.current.get(sessionId) || 0;
+    const run = sessionRunsRef.current.get(sessionId);
+    if (skipAutomaticTitle && run) run.skipAutomaticTitle = true;
+    const existingStop = sessionStopPromisesRef.current.get(sessionId);
+    if (existingStop) return existingStop;
+    const storedRemote = sessionsRef.current.find((session) => session.id === sessionId)?.remoteRun;
+    const remote = run?.remoteRun || (
+      storedRemote && (storedRemote.status === 'running' || skipAutomaticTitle)
+        ? storedRemote
+        : null
+    );
+    if (!run && !remote) return Promise.resolve();
+    setStoppingSessionIds((prev) => {
+      if (prev.has(sessionId)) return prev;
+      const next = new Set(prev);
+      next.add(sessionId);
+      return next;
+    });
+    if (remote) {
+      resumedRemoteRunsRef.current.add(remote.id);
+      resumingWaitingRunsRef.current.delete(remote.id);
+    }
+    run?.controller.abort();
+    const remoteAbort = remote
+      ? abortRemoteAgentRunBestEffort(remote.url, remote.id).then(function handleResult(result) {
+          if (
+            factoryResetInProgressRef.current
+            || deletedSessionIdsRef.current.has(sessionId)
+            || (sessionIncarnationsRef.current.get(sessionId) || 0) !== sessionIncarnation
+          ) return;
+          if (result?.status === 'cancel-blocked') return;
+          if (result && !['running', 'waiting'].includes(result.status)) {
+            const retryTimer = remoteAbortRetryTimersRef.current.get(remote.id);
+            if (retryTimer) clearTimeout(retryTimer);
+            remoteAbortRetryTimersRef.current.delete(remote.id);
+            setSessions((prev) => prev.map((session) => (
+              session.id === sessionId && session.remoteRun?.id === remote.id
+                ? { ...session, remoteRun: { ...session.remoteRun, status: 'aborted' } }
+                : session
+            )));
+            return;
+          }
+          if (remoteAbortRetryTimersRef.current.has(remote.id)) return;
+          const timerId = setTimeout(() => {
+            remoteAbortRetryTimersRef.current.delete(remote.id);
+            const currentSession = sessionsRef.current.find((session) => session.id === sessionId);
+            if (
+              factoryResetInProgressRef.current
+              || deletedSessionIdsRef.current.has(sessionId)
+              || (sessionIncarnationsRef.current.get(sessionId) || 0) !== sessionIncarnation
+              || currentSession?.remoteRun?.id !== remote.id
+              || !['running', 'waiting'].includes(currentSession.remoteRun.status)
+            ) return;
+            void abortRemoteAgentRunBestEffort(remote.url, remote.id).then(handleResult);
+          }, REMOTE_ABORT_RETRY_MS);
+          remoteAbortRetryTimersRef.current.set(remote.id, timerId);
+        })
+      : Promise.resolve();
+    const localStop = run
+      ? waitForSettlement(run.completion, LOCAL_RUN_STOP_TIMEOUT_MS).then((settled) => {
+          // A broken provider/tool may ignore AbortSignal forever. Detach its
+          // UI generation after a bounded grace period; identity checks in the
+          // stream callbacks prevent that late task from touching a newer run.
+          if (!settled) sessionRunsRef.current.finish(sessionId, run);
+        })
+      : Promise.resolve();
+    const stopPromise = Promise.allSettled([remoteAbort, localStop])
+      .finally(() => {
+        if (sessionStopPromisesRef.current.get(sessionId) !== stopPromise) return;
+        sessionStopPromisesRef.current.delete(sessionId);
+        setStoppingSessionIds((prev) => {
+          if (!prev.has(sessionId)) return prev;
+          const next = new Set(prev);
+          next.delete(sessionId);
+          return next;
+        });
+      });
+    sessionStopPromisesRef.current.set(sessionId, stopPromise);
+    return stopPromise;
+  }, []);
+
   const handleNewSession = useCallback(async () => {
     messagePanelRef.current?.focusInput();
+    if (!agentListReady) return;
 
     // If the active session is still empty, just keep it — don't spawn another
     const current = sessions.find((c) => c.id === activeSessionId);
-    if (current && (current.messages || []).length === 0) return;
+    if (current && Array.isArray(current.messages) && current.messages.length === 0) return;
 
     // Use last used agent, falling back to first available agent
     const agentId = lastAgentId ?? (agentList.length > 0 ? agentList[0].id : null);
@@ -603,10 +804,22 @@ function App() {
       ...(llmProfileId && { llmProfileId }),
       ...(agentId && { agentId }),
     };
-    if (!streaming) await flushPendingSessionSave();
+    // Invalidate any metadata-only session load that belonged to the previous
+    // selection before switching to the newly materialized conversation.
+    sessionLoadRequestRef.current += 1;
+    let preserveLoadedMessages = sessionRunsRef.current.values().length > 0
+      || pendingStreamStartsRef.current.size > 0
+      || sessionStopPromisesRef.current.size > 0
+      || messageQueue.length > 0;
+    if (!preserveLoadedMessages) await flushPendingSessionSave();
+    preserveLoadedMessages ||= sessionRunsRef.current.values().length > 0
+      || pendingStreamStartsRef.current.size > 0
+      || sessionStopPromisesRef.current.size > 0
+      || messageQueue.length > 0;
+    if (!activeSessionId) messagePanelRef.current?.adoptNewSessionDraft(newSession.id);
     setSessions((prev) => sortSessions([
       newSession,
-      ...prev.map((session) => streaming ? session : sessionMetadataOnly(session)),
+      ...prev.map((session) => preserveLoadedMessages ? session : sessionMetadataOnly(session)),
     ]));
     setActiveSessionId(newSession.id);
 
@@ -617,10 +830,11 @@ function App() {
       setSessionLlmProfiles((prev) => ({ ...prev, [newSession.id]: llmProfileId }));
       setCurrentLlmProfileId(llmProfileId);
     }
-  }, [sessions, activeSessionId, agentList, lastAgentId, currentLlmProfileId, getAgentDefaultLlmId, streaming, flushPendingSessionSave]);
+  }, [sessions, activeSessionId, agentList, agentListReady, lastAgentId, currentLlmProfileId, getAgentDefaultLlmId, flushPendingSessionSave, messageQueue]);
 
   const handleSelectSession = useCallback(async (sessionId) => {
     const requestId = ++sessionLoadRequestRef.current;
+    const sessionIncarnation = sessionIncarnationsRef.current.get(sessionId) || 0;
     setActiveSessionId(sessionId);
     // Restore the agent for this session and update tracking
     const session = sessions.find((c) => c.id === sessionId);
@@ -631,56 +845,184 @@ function App() {
     const llmProfileId = session?.llmProfileId || llm.getActiveProfileId();
     setCurrentLlmProfileId(llmProfileId || null);
     if (session?.messages) {
-      if (!streaming) {
-        setSessions((prev) => prev.map((item) => (
-          item.id === sessionId ? item : sessionMetadataOnly(item)
-        )));
-      }
+      sessionLoadingRequestsRef.current.delete(sessionId);
+      setLoadingSessionIds((prev) => {
+        if (!prev.has(sessionId)) return prev;
+        const next = new Set(prev);
+        next.delete(sessionId);
+        return next;
+      });
+      if (
+        sessionRunsRef.current.values().length > 0
+        || pendingStreamStartsRef.current.size > 0
+        || sessionStopPromisesRef.current.size > 0
+        || messageQueue.length > 0
+      ) return;
+      await flushPendingSessionSave();
+      if (
+        requestId !== sessionLoadRequestRef.current
+        || deletedSessionIdsRef.current.has(sessionId)
+        || (sessionIncarnationsRef.current.get(sessionId) || 0) !== sessionIncarnation
+        || sessionRunsRef.current.values().length > 0
+        || pendingStreamStartsRef.current.size > 0
+        || sessionStopPromisesRef.current.size > 0
+        || messageQueue.length > 0
+      ) return;
+      setSessions((prev) => prev.map((item) => (
+        item.id === sessionId
+          ? (Object.prototype.hasOwnProperty.call(item, 'messages')
+              ? item
+              : { ...item, messages: session.messages })
+          : sessionMetadataOnly(item)
+      )));
       return;
     }
 
+    sessionLoadingRequestsRef.current.set(sessionId, requestId);
+    setLoadingSessionIds((prev) => {
+      if (prev.has(sessionId)) return prev;
+      const next = new Set(prev);
+      next.add(sessionId);
+      return next;
+    });
     try {
-      if (!streaming) await flushPendingSessionSave();
+      let preserveLoadedMessages = sessionRunsRef.current.values().length > 0
+        || pendingStreamStartsRef.current.size > 0
+        || sessionStopPromisesRef.current.size > 0
+        || messageQueue.length > 0;
+      if (!preserveLoadedMessages) await flushPendingSessionSave();
       const loadedMessages = await loadSessionMessages(sessionId);
-      if (requestId !== sessionLoadRequestRef.current) return;
-      setSessions((prev) => prev.map((item) => {
-        if (item.id === sessionId) return { ...item, messages: loadedMessages };
-        return streaming ? item : sessionMetadataOnly(item);
-      }));
+      if (
+        requestId !== sessionLoadRequestRef.current
+        || deletedSessionIdsRef.current.has(sessionId)
+        || (sessionIncarnationsRef.current.get(sessionId) || 0) !== sessionIncarnation
+      ) return;
+      preserveLoadedMessages ||= sessionRunsRef.current.values().length > 0
+        || pendingStreamStartsRef.current.size > 0
+        || sessionStopPromisesRef.current.size > 0
+        || messageQueue.length > 0;
+      setSessions((prev) => {
+        return prev.map((item) => {
+          if (item.id === sessionId) {
+            return Object.prototype.hasOwnProperty.call(item, 'messages')
+              ? item
+              : { ...item, messages: loadedMessages };
+          }
+          return preserveLoadedMessages ? item : sessionMetadataOnly(item);
+        });
+      });
     } catch (error) {
       console.error(`Failed to load session ${sessionId}:`, error);
+    } finally {
+      if (sessionLoadingRequestsRef.current.get(sessionId) === requestId) {
+        sessionLoadingRequestsRef.current.delete(sessionId);
+        setLoadingSessionIds((prev) => {
+          if (!prev.has(sessionId)) return prev;
+          const next = new Set(prev);
+          next.delete(sessionId);
+          return next;
+        });
+      }
     }
-  }, [sessions, streaming, flushPendingSessionSave]);
+  }, [sessions, flushPendingSessionSave, messageQueue]);
 
   const handleDeleteSession = useCallback(async (sessionId) => {
-    titleGenerationControllersRef.current.get(sessionId)?.abort();
-    await flushPendingSessionSave();
+    // A stale row can dispatch twice before React removes it. One owner per id
+    // keeps the deletion fence and its cleanup reference-count safe.
+    if (
+      deletingSessionIdsRef.current.has(sessionId)
+      || deletedSessionIdsRef.current.has(sessionId)
+    ) return;
+    deletingSessionIdsRef.current.add(sessionId);
+    sessionIncarnationsRef.current.set(
+      sessionId,
+      (sessionIncarnationsRef.current.get(sessionId) || 0) + 1
+    );
+    deletedSessionIdsRef.current.add(sessionId);
+    let deleteSucceeded = false;
+    try {
+      titleGenerationControllersRef.current.get(sessionId)?.abort();
+      cancelPendingSessionStart(sessionId);
+      sessionLoadingRequestsRef.current.delete(sessionId);
+      setLoadingSessionIds((prev) => {
+        if (!prev.has(sessionId)) return prev;
+        const next = new Set(prev);
+        next.delete(sessionId);
+        return next;
+      });
+      setMessageQueue((prev) => prev.filter((item) => item.sessionId !== sessionId));
 
-    // First, delete the session file from OPFS
-    await deleteSessionFile(sessions, sessionId);
-
-    // Clean up agent assignment for this session
-    setSessionAgents((prev) => {
-      const next = { ...prev };
-      delete next[sessionId];
-      return next;
-    });
-    setSessionLlmProfiles((prev) => {
-      const next = { ...prev };
-      delete next[sessionId];
-      return next;
-    });
-
-    // Then update the React state
-    setSessions((prev) => {
-      const updated = prev.filter((c) => c.id !== sessionId);
-      // If we deleted the active session, select the next one (or none)
-      if (sessionId === activeSessionId) {
-        setActiveSessionId(updated.length > 0 ? updated[0].id : null);
+      const session = sessionsRef.current.find((item) => item.id === sessionId);
+      if (session?.remoteRun && !sessionRunsRef.current.has(sessionId)) {
+        resumedRemoteRunsRef.current.add(session.remoteRun.id);
+        resumingWaitingRunsRef.current.delete(session.remoteRun.id);
       }
-      return updated;
-    });
-  }, [activeSessionId, sessions, flushPendingSessionSave]);
+      const waitingTimer = session?.remoteRun
+        ? waitingRemoteTimersRef.current.get(session.remoteRun.id)
+        : null;
+      if (waitingTimer) {
+        clearTimeout(waitingTimer);
+        waitingRemoteTimersRef.current.delete(session.remoteRun.id);
+      }
+      const abortRetryTimer = session?.remoteRun
+        ? remoteAbortRetryTimersRef.current.get(session.remoteRun.id)
+        : null;
+      if (abortRetryTimer) {
+        clearTimeout(abortRetryTimer);
+        remoteAbortRetryTimersRef.current.delete(session.remoteRun.id);
+      }
+      await stopSessionRun(sessionId, { skipAutomaticTitle: true });
+      titleGenerationControllersRef.current.get(sessionId)?.abort();
+
+      // Serialize destructive session-index writes. A storage barrier suspends
+      // normal saves, but it is not itself a mutex between two rapid deletes.
+      const previousDeletion = sessionDeletionTailRef.current;
+      let releaseDeletion;
+      const deletionTurn = new Promise((resolve) => { releaseDeletion = resolve; });
+      sessionDeletionTailRef.current = previousDeletion.then(() => deletionTurn);
+      await previousDeletion;
+      try {
+        // Fence the delete against persistence from other sessions that may still
+        // be streaming. Their later updates remain queued behind this barrier.
+        const releaseBarrier = await beginSessionStorageBarrier();
+        try {
+          const deletionSnapshot = sessionsRef.current.filter((item) => (
+            !deletedSessionIdsRef.current.has(item.id)
+          ));
+          await deleteSessionFile(deletionSnapshot, sessionId);
+          messagePanelRef.current?.discardSessionDraft(sessionId);
+
+          setSessionAgents((prev) => {
+            const next = { ...prev };
+            delete next[sessionId];
+            return next;
+          });
+          setSessionLlmProfiles((prev) => {
+            const next = { ...prev };
+            delete next[sessionId];
+            return next;
+          });
+
+          setSessions((prev) => {
+            const updated = prev.filter((item) => item.id !== sessionId);
+            sessionsRef.current = updated;
+            if (sessionId === activeSessionIdRef.current) {
+              setActiveSessionId(updated.length > 0 ? updated[0].id : null);
+            }
+            return updated;
+          });
+        } finally {
+          releaseBarrier();
+        }
+      } finally {
+        releaseDeletion();
+      }
+      deleteSucceeded = true;
+    } finally {
+      deletingSessionIdsRef.current.delete(sessionId);
+      if (!deleteSucceeded) deletedSessionIdsRef.current.delete(sessionId);
+    }
+  }, [beginSessionStorageBarrier, cancelPendingSessionStart, stopSessionRun]);
 
   const handleExportDebug = useCallback(() => {
     const session = sessions.find((c) => c.id === activeSessionId);
@@ -708,7 +1050,7 @@ function App() {
       agent,
       runtime: {
         activeSessionId,
-        streaming: streaming && session.id === activeSessionId,
+        streaming: runningSessionIds.has(session.id) || pendingSessionIds.has(session.id),
         hasToolContext,
       },
     });
@@ -722,7 +1064,8 @@ function App() {
     sessionAgents,
     sessionLlmProfiles,
     sessions,
-    streaming,
+    runningSessionIds,
+    pendingSessionIds,
   ]);
 
   const generateAutomaticSessionTitle = useCallback(async ({
@@ -803,14 +1146,37 @@ function App() {
     // A reset invalidates every in-memory session/message reference. Keep this
     // guard at the final entry point as well as in the timer scheduler so a
     // callback that was already dequeued cannot start work during the reset.
-    if (factoryResetInProgressRef.current) return;
+    if (factoryResetInProgressRef.current || deletedSessionIdsRef.current.has(sessionId)) return null;
 
-    // Prevent duplicate calls (StrictMode double-invoke guard)
-    if (abortRef.current) return;
+    // Prevent duplicate turns only within the same conversation. Different
+    // sessions intentionally own independent run records and may execute at
+    // the same time.
+    const runRegistry = sessionRunsRef.current;
+    if (runRegistry.has(sessionId) || sessionStopPromisesRef.current.has(sessionId)) return null;
 
-    const sessionAgentId = opts.agentId ?? sessionAgents[sessionId] ?? null;
+    const sessionSnapshot = sessionsRef.current.find((session) => session.id === sessionId);
+    if (!opts.resumeRunId && sessionSnapshot?.remoteRun?.status === 'running') return null;
+    const sessionAgentId = opts.agentId ?? sessionSnapshot?.agentId ?? sessionAgents[sessionId] ?? null;
+    if (!opts.resumeRunId && sessionAgentId && !agentListReady) return { status: 'blocked' };
     const agentConfig = sessionAgentId ? agentList.find((agent) => agent.id === sessionAgentId) : null;
-    const llmProfileId = opts.llmProfileId ?? sessionLlmProfiles[sessionId] ?? currentLlmProfileId ?? agentConfig?.llmProfileId ?? llm.getActiveProfileId() ?? getFirstLlmProfileId();
+    if (!opts.resumeRunId && sessionAgentId && !agentConfig) {
+      const hintId = generateId();
+      setSessions((prev) => sortSessions(prev.map((session) => (
+        session.id === sessionId
+          ? {
+              ...session,
+              lastMessage: 'The selected agent is unavailable.',
+              ...sessionTimeFields(),
+              messages: [
+                ...(session.messages || sessionMessages || []),
+                { id: hintId, role: 'assistant', content: 'The selected agent is unavailable. Choose an available agent and try again.' },
+              ],
+            }
+          : session
+      ))));
+      return { status: 'blocked' };
+    }
+    const llmProfileId = opts.llmProfileId ?? sessionSnapshot?.llmProfileId ?? sessionLlmProfiles[sessionId] ?? agentConfig?.llmProfileId ?? currentLlmProfileId ?? llm.getActiveProfileId() ?? getFirstLlmProfileId();
     if (!opts.resumeRunId && !llm.isProfileConfigured(llmProfileId)) {
       const hintId = generateId();
       setSessions((prev) =>
@@ -821,79 +1187,91 @@ function App() {
                 lastMessage: 'Please configure an LLM provider in Settings.',
                 ...sessionTimeFields(),
                 messages: [
-                  ...c.messages,
+                  ...(c.messages || sessionMessages || []),
                   { id: hintId, role: 'assistant', content: 'No LLM provider configured yet. Please open Settings (gear icon) to add your API key and select a provider.' },
                 ],
               }
             : c
         ))
       );
-      return;
+      return { status: 'blocked' };
     }
 
     const replyId = opts.replyId || generateId();
+    const run = runRegistry.begin(sessionId, {
+      remoteRun: null,
+      streamingContent: '',
+      streamingThinking: '',
+      rafId: null,
+      skipAutomaticTitle: false,
+    });
+    if (!run) return null;
+    const isRunCurrent = () => runRegistry.get(sessionId) === run;
+    const assertRunActive = () => {
+      if (!isRunCurrent() || run.controller.signal.aborted) {
+        throw new DOMException('Agent run aborted', 'AbortError');
+      }
+    };
+    const updateSessionsForRun = (updater) => {
+      setSessions((prev) => isRunCurrent() ? updater(prev) : prev);
+    };
+
     // Add empty assistant message for streaming
     if (!opts.resumeRunId) {
-      setSessions((prev) =>
+      updateSessionsForRun((prev) =>
         prev.map((c) =>
           c.id === sessionId
             ? {
                 ...c,
-                messages: [...c.messages, { id: replyId, role: 'assistant', content: '', thinking: '', toolCalls: [], transcript: [] }],
+                messages: [...(c.messages || sessionMessages || []), { id: replyId, role: 'assistant', content: '', thinking: '', toolCalls: [], transcript: [] }],
               }
             : c
         )
       );
     }
-
-    const controller = new AbortController();
-    abortRef.current = controller;
-    let finishStream;
     let automaticTitleInput = null;
-    const streamCompletion = new Promise((resolve) => { finishStream = resolve; });
-    streamCompletionRef.current = streamCompletion;
-    streamingContentRef.current = '';
-    streamingThinkingRef.current = '';
-    setStreaming(true);
+    let runOutcome = { status: 'completed' };
 
     // Track tool calls for this message
     const toolCalls = [];
     let agentEventState = createAgentEventState();
 
     const applyStreamEvent = (event) => {
+      if (!isRunCurrent() || run.controller.signal.aborted) return;
       agentEventState = applyAgentEvent(agentEventState, event);
-      streamingContentRef.current = agentEventState.content;
-      streamingThinkingRef.current = agentEventState.thinking;
+      run.streamingContent = agentEventState.content;
+      run.streamingThinking = agentEventState.thinking;
       toolCalls.splice(0, toolCalls.length, ...agentEventState.toolCalls);
       scheduleFlush();
     };
 
     // Helper: update message in state
-    const updateMessage = (fields) => {
-      setSessions((prev) =>
-        sortSessions(prev.map((c) =>
+    const updateMessage = (fields, { touch = false } = {}) => {
+      updateSessionsForRun((prev) => {
+        const next = prev.map((c) =>
           c.id === sessionId
             ? {
                 ...c,
-                lastMessage: (fields.content || streamingContentRef.current).slice(0, 60),
-                ...sessionTimeFields(),
-                messages: c.messages.map((m) =>
+                lastMessage: (fields.content ?? run.streamingContent).slice(0, 60),
+                ...(touch ? sessionTimeFields() : {}),
+                messages: (c.messages || []).map((m) =>
                   m.id === replyId ? { ...m, ...fields } : m
                 ),
               }
             : c
-        ))
-      );
+        );
+        return touch ? sortSessions(next) : next;
+      });
     };
 
     // Flush accumulated content to React state via rAF for real-time char sync
     const scheduleFlush = () => {
-      if (rafRef.current) return; // already scheduled
-      rafRef.current = requestAnimationFrame(() => {
-        rafRef.current = null;
+      if (run.rafId) return; // already scheduled for this session
+      run.rafId = requestAnimationFrame(() => {
+        run.rafId = null;
         updateMessage({
-          content: streamingContentRef.current,
-          thinking: streamingThinkingRef.current,
+          content: run.streamingContent,
+          thinking: run.streamingThinking,
           toolCalls: [...toolCalls],
           transcript: agentEventState.transcript,
           ...(agentEventState.usage ? { usage: agentEventState.usage } : {}),
@@ -903,13 +1281,19 @@ function App() {
 
     try {
       const activeConfig = llm.getActiveConfig(llmProfileId);
-
       const sandboxUrl = opts.sandboxUrl ?? agentConfig?.sandboxUrl ?? null;
       const hasToolContext = sandboxUrl || sessionAgentId;
+      const useRemoteRuntime = Boolean(opts.resumeRunId || agentConfig?.runtimeMode === 'sandbox');
+      // Freeze the executable model/config at turn start. Settings changes in
+      // another session must not retarget an already-started turn.
+      const languageModel = useRemoteRuntime ? null : llm.getLanguageModel(llmProfileId);
+      const remoteModelConfig = useRemoteRuntime && !opts.resumeRunId
+        ? llm.getRuntimeConfig(llmProfileId)
+        : null;
 
       let result;
       let responseCompleted = false;
-      if (opts.resumeRunId || agentConfig?.runtimeMode === 'sandbox') {
+      if (useRemoteRuntime) {
         if (!sandboxUrl || sandboxUrl === E2B_AGENT_ID) {
           throw new Error('Sandbox runtime requires a connected VertexAgent agent server; direct E2B sandboxes currently provide command execution only.');
         }
@@ -917,33 +1301,78 @@ function App() {
         if (opts.resumeRunId) {
           remoteRun = { id: opts.resumeRunId, status: 'running' };
         } else {
+          const requestedRunId = `run-${globalThis.crypto?.randomUUID?.() || generateId()}`;
+          // Keep the id locally before POST resolves so Stop/Delete/Reset can
+          // address a run that the server accepted while the response is still
+          // in flight.
+          run.remoteRun = { id: requestedRunId, url: sandboxUrl };
           const runtimeContext = await prepareAgentRuntimeContext(sessionAgentId, { runtimeMode: 'sandbox' });
-          remoteRun = await startRemoteAgentRun(sandboxUrl, {
-            sessionId,
-            replyId,
-            messages: expandMessagesForSandboxRuntime(sessionMessages),
-            systemPrompt: SANDBOX_AGENT_SYSTEM_PROMPT,
-            agentId: sessionAgentId,
-            modelConfig: llm.getRuntimeConfig(llmProfileId),
-            runtimeContext: {
-              ...runtimeContext,
-              // Memory stays browser-only; identity and enabled skills are a
-              // bounded startup snapshot for the isolated runtime.
-              memorySnapshot: { memory: null, user: null },
-            },
-          }, controller.signal);
-          setSessions((prev) => prev.map((session) => session.id === sessionId ? {
+          assertRunActive();
+          try {
+            remoteRun = await startRemoteAgentRun(sandboxUrl, {
+              runId: requestedRunId,
+              sessionId,
+              replyId,
+              messages: expandMessagesForSandboxRuntime(sessionMessages),
+              systemPrompt: SANDBOX_AGENT_SYSTEM_PROMPT,
+              agentId: sessionAgentId,
+              modelConfig: remoteModelConfig,
+              runtimeContext: {
+                ...runtimeContext,
+                // Memory stays browser-only; identity and enabled skills are a
+                // bounded startup snapshot for the isolated runtime.
+                memorySnapshot: { memory: null, user: null },
+              },
+            }, run.controller.signal);
+            assertRunActive();
+          } catch (startError) {
+            if (run.controller.signal.aborted) throw startError;
+            try {
+              // The POST may have committed even if its response was lost.
+              // Confirm the client-generated id before treating start as a
+              // failure, then let the normal polling path replay all events.
+              await getRemoteAgentRun(sandboxUrl, requestedRunId, 0, run.controller.signal);
+              assertRunActive();
+              remoteRun = { id: requestedRunId, status: 'running' };
+            } catch {
+              if (run.controller.signal.aborted || !isRunCurrent()) {
+                throw new DOMException('Agent run aborted', 'AbortError');
+              }
+              if (!Number.isFinite(startError?.status)) {
+                // Both responses can be lost after the POST committed. Persist
+                // the provisional id so the normal resume loop keeps probing
+                // instead of orphaning an unknown server-owned run.
+                updateSessionsForRun((prev) => prev.map((session) => session.id === sessionId ? {
+                  ...session,
+                  remoteRun: {
+                    id: requestedRunId,
+                    url: sandboxUrl,
+                    replyId,
+                    status: 'running',
+                  },
+                  ...sessionTimeFields(),
+                } : session));
+              }
+              throw startError;
+            }
+          }
+          assertRunActive();
+          updateSessionsForRun((prev) => prev.map((session) => session.id === sessionId ? {
             ...session,
             remoteRun: { id: remoteRun.id, url: sandboxUrl, replyId, status: remoteRun.status },
             ...sessionTimeFields(),
           } : session));
         }
-        remoteRunRef.current = { id: remoteRun.id, url: sandboxUrl };
+        run.remoteRun = { id: remoteRun.id, url: sandboxUrl };
+        let remoteEventCursor = 0;
         while (remoteRun.status === 'running') {
-          remoteRun = await getRemoteAgentRun(sandboxUrl, remoteRun.id, 0, controller.signal);
-          agentEventState = createAgentEventState();
-          for (const event of remoteRun.events || []) applyStreamEvent(event);
-          setSessions((prev) => prev.map((session) => session.id === sessionId ? {
+          remoteRun = await getRemoteAgentRun(sandboxUrl, remoteRun.id, remoteEventCursor, run.controller.signal);
+          assertRunActive();
+          for (const event of remoteRun.events || []) {
+            applyStreamEvent(event);
+            remoteEventCursor = Math.max(remoteEventCursor, Number(event.remoteSequence) || 0);
+          }
+          updateSessionsForRun((prev) => prev.map((session) => session.id === sessionId ? {
             ...session,
             remoteRun: {
               id: remoteRun.id,
@@ -955,11 +1384,15 @@ function App() {
           } : session));
           if (remoteRun.status === 'running') {
             await new Promise((resolve, reject) => {
-              const timer = setTimeout(resolve, 750);
-              controller.signal.addEventListener('abort', () => {
+              const onAbort = () => {
                 clearTimeout(timer);
                 reject(new DOMException('Polling aborted', 'AbortError'));
-              }, { once: true });
+              };
+              const timer = setTimeout(() => {
+                run.controller.signal.removeEventListener('abort', onAbort);
+                resolve();
+              }, 750);
+              run.controller.signal.addEventListener('abort', onAbort, { once: true });
             });
           }
         }
@@ -968,24 +1401,27 @@ function App() {
         }
         result = remoteRun.result;
         responseCompleted = remoteRun.status === 'completed';
+        runOutcome = { status: remoteRun.status };
       } else {
         result = await runAgentLoop({
           messages: expandMessagesForLlm(sessionMessages),
           systemPrompt: hasToolContext ? AGENT_SYSTEM_PROMPT : '',
           agentUrl: sandboxUrl,
           agentId: sessionAgentId,
-          signal: controller.signal,
+          signal: run.controller.signal,
           provider: activeConfig.provider,
           model: activeConfig.model,
           contextWindow: activeConfig.contextWindow,
           llmProfileId,
+          languageModel,
           scheduleWakeup: async ({ delaySeconds, prompt }) => {
+            assertRunActive();
             const wakeup = createWakeup({
               id: generateId(),
               delaySeconds,
               prompt,
             });
-            setSessions((prev) => sortSessions(prev.map((session) => (
+            updateSessionsForRun((prev) => sortSessions(prev.map((session) => (
               session.id === sessionId
                 ? {
                     ...session,
@@ -998,6 +1434,7 @@ function App() {
           },
           onEvent: applyStreamEvent,
         });
+        assertRunActive();
         responseCompleted = true;
       }
 
@@ -1006,131 +1443,308 @@ function App() {
         if (tc.status === 'running' || tc.status === 'writing') tc.status = 'completed';
       }
 
-      const finalContent = result.content || streamingContentRef.current;
-      const finalThinking = result.thinking || streamingThinkingRef.current;
-      updateMessage({ content: finalContent, thinking: finalThinking, toolCalls: [...toolCalls], transcript: agentEventState.transcript, usage: result.usage });
+      const finalContent = result?.content || run.streamingContent;
+      const finalThinking = result?.thinking || run.streamingThinking;
+      updateMessage({ content: finalContent, thinking: finalThinking, toolCalls: [...toolCalls], transcript: agentEventState.transcript, usage: result?.usage }, { touch: true });
       if (responseCompleted) {
         automaticTitleInput = { sessionId, sessionMessages, replyId, finalContent };
       }
-      if (result.toolCalls?.some((tc) => tc.name === 'spawn_agent')) {
-        setAgentList(await listAgents());
+      if (result?.toolCalls?.some((tc) => tc.name === 'spawn_agent')) {
+        const nextAgentList = await listAgents();
+        assertRunActive();
+        setAgentList(nextAgentList);
       }
     } catch (err) {
       if (err.name === 'AbortError') {
+        runOutcome = { status: 'aborted', error: err };
         for (const tc of toolCalls) {
           if (tc.status === 'running' || tc.status === 'writing') {
             tc.status = 'aborted';
             tc.result = tc.result || 'Aborted';
           }
         }
-        updateMessage({ content: streamingContentRef.current, thinking: streamingThinkingRef.current, toolCalls: [...toolCalls], transcript: agentEventState.transcript });
+        updateMessage({ content: run.streamingContent, thinking: run.streamingThinking, toolCalls: [...toolCalls], transcript: agentEventState.transcript }, { touch: true });
       } else {
-        const errorContent = streamingContentRef.current || `Error: ${err.message}`;
-        updateMessage({ content: errorContent, toolCalls: [...toolCalls], transcript: agentEventState.transcript });
+        runOutcome = { status: 'error', error: err };
+        const errorContent = run.streamingContent || `Error: ${err.message}`;
+        updateMessage({ content: errorContent, toolCalls: [...toolCalls], transcript: agentEventState.transcript }, { touch: true });
       }
     } finally {
-      if (rafRef.current) {
-        cancelAnimationFrame(rafRef.current);
-        rafRef.current = null;
+      if (run.rafId) {
+        cancelAnimationFrame(run.rafId);
+        run.rafId = null;
       }
-      abortRef.current = null;
-      remoteRunRef.current = null;
-      streamingContentRef.current = '';
-      streamingThinkingRef.current = '';
-      setStreaming(false);
-      if (streamCompletionRef.current === streamCompletion) {
-        streamCompletionRef.current = null;
-      }
-      finishStream();
-      if (automaticTitleInput) {
+      const finishedCurrentRun = runRegistry.finish(sessionId, run);
+      if (finishedCurrentRun && automaticTitleInput && !run.skipAutomaticTitle) {
         void generateAutomaticSessionTitle(automaticTitleInput);
       }
     }
-  }, [agentList, sessionAgents, sessionLlmProfiles, currentLlmProfileId, generateAutomaticSessionTitle, getFirstLlmProfileId]);
+    return runOutcome;
+  }, [agentList, agentListReady, sessionAgents, sessionLlmProfiles, currentLlmProfileId, generateAutomaticSessionTitle, getFirstLlmProfileId]);
 
   const scheduleStreamResponse = useCallback((sessionId, sessionMessages, opts = {}) => {
-    if (factoryResetInProgressRef.current) return;
+    const session = sessionsRef.current.find((item) => item.id === sessionId);
+    if (
+      factoryResetInProgressRef.current
+      || deletedSessionIdsRef.current.has(sessionId)
+      || sessionRunsRef.current.has(sessionId)
+      || pendingStreamStartsRef.current.has(sessionId)
+      || sessionStopPromisesRef.current.has(sessionId)
+      || (!opts.resumeRunId && session?.agentId && !agentListReady)
+      || (!opts.resumeRunId && session?.remoteRun?.status === 'running')
+    ) return false;
 
-    const pendingStart = { sessionId, sessionMessages, opts };
+    const scheduledAgentId = opts.agentId ?? session?.agentId ?? null;
+    const scheduledAgent = scheduledAgentId
+      ? agentList.find((agent) => agent.id === scheduledAgentId)
+      : null;
+    const pendingStart = {
+      sessionId,
+      sessionMessages,
+      opts: {
+        ...opts,
+        agentId: scheduledAgentId,
+        llmProfileId: opts.llmProfileId
+          ?? session?.llmProfileId
+          ?? scheduledAgent?.llmProfileId
+          ?? currentLlmProfileId
+          ?? llm.getActiveProfileId()
+          ?? getFirstLlmProfileId(),
+      },
+      timerId: null,
+    };
     const timerId = setTimeout(() => {
-      pendingStreamStartsRef.current.delete(timerId);
-      if (factoryResetInProgressRef.current) return;
-      void streamResponse(sessionId, sessionMessages, opts);
+      void (async () => {
+        // Superseding a sleeping remote turn must reach the server before the
+        // replacement starts. Keeping this session in the pending registry
+        // also prevents a second replacement from racing through the gap.
+        await Promise.resolve(pendingStart.opts.startAfter).catch(() => {});
+        if (pendingStreamStartsRef.current.get(sessionId) !== pendingStart) return;
+        pendingStreamStartsRef.current.delete(sessionId);
+        setPendingSessionIds((prev) => {
+          if (!prev.has(sessionId)) return prev;
+          const next = new Set(prev);
+          next.delete(sessionId);
+          return next;
+        });
+        if (
+          factoryResetInProgressRef.current
+          || deletedSessionIdsRef.current.has(sessionId)
+        ) return;
+        const { startAfter: _startAfter, ...streamOpts } = pendingStart.opts;
+        void streamResponse(sessionId, sessionMessages, streamOpts);
+      })();
     }, 0);
-    pendingStreamStartsRef.current.set(timerId, pendingStart);
-  }, [streamResponse]);
+    pendingStart.timerId = timerId;
+    pendingStreamStartsRef.current.set(sessionId, pendingStart);
+    setPendingSessionIds((prev) => {
+      if (prev.has(sessionId)) return prev;
+      const next = new Set(prev);
+      next.add(sessionId);
+      return next;
+    });
+    return true;
+  }, [agentList, agentListReady, currentLlmProfileId, getFirstLlmProfileId, streamResponse]);
 
   // Reattach to runs that were started before a reload/browser close. The
   // server owns execution; this effect only rebuilds UI state from its log.
   useEffect(() => {
-    if (!loaded || agentList.length === 0 || abortRef.current) return;
-    const session = sessions.find((item) => item.remoteRun?.status === 'running');
-    if (!session || resumedRemoteRunsRef.current.has(session.remoteRun.id)) return;
-    const agent = agentList.find((item) => item.id === session.agentId);
-    if (!agent) return;
-    resumedRemoteRunsRef.current.add(session.remoteRun.id);
-    void (async () => {
-      const runMessages = session.messages || await loadSessionMessages(session.id);
-      setSessions((prev) => prev.map((item) => (
-        item.id === session.id ? { ...item, messages: runMessages } : item
-      )));
-      await streamResponse(session.id, runMessages, {
-        agentId: session.agentId,
-        llmProfileId: session.llmProfileId,
-        sandboxUrl: session.remoteRun.url,
-        resumeRunId: session.remoteRun.id,
-        replyId: session.remoteRun.replyId,
-      });
-    })().catch((error) => console.warn('Remote agent run resume failed:', error));
-  }, [agentList, loaded, sessions, streamResponse]);
-
-  // A waiting sandbox run is owned by the agent server, so it does not keep
-  // the browser UI in streaming mode. Reattach around its scheduled time.
-  useEffect(() => {
-    if (!loaded || abortRef.current || pendingStreamStartsRef.current.size > 0) return undefined;
-    const session = sessions
-      .filter((item) => item.remoteRun?.status === 'waiting' && item.remoteRun?.wakeup?.runAtMs)
-      .sort((a, b) => a.remoteRun.wakeup.runAtMs - b.remoteRun.wakeup.runAtMs)[0];
-    if (!session || resumingWaitingRunsRef.current.has(session.remoteRun.id)) return undefined;
-
-    const delay = Math.max(0, session.remoteRun.wakeup.runAtMs - Date.now());
-    const timerId = setTimeout(() => {
-      if (abortRef.current || pendingStreamStartsRef.current.size > 0) return;
-      resumingWaitingRunsRef.current.add(session.remoteRun.id);
+    if (!loaded || factoryResetInProgressRef.current) return;
+    const scheduleRetry = (runId) => {
+      if (factoryResetInProgressRef.current) return;
+      if (remoteResumeRetryTimersRef.current.has(runId)) return;
+      const timerId = setTimeout(() => {
+        remoteResumeRetryTimersRef.current.delete(runId);
+        if (factoryResetInProgressRef.current) return;
+        resumedRemoteRunsRef.current.delete(runId);
+        setRemoteResumeVersion((version) => version + 1);
+      }, 1500);
+      remoteResumeRetryTimersRef.current.set(runId, timerId);
+    };
+    const resumable = sessions.filter((session) => (
+      session.remoteRun?.status === 'running'
+      && !deletedSessionIdsRef.current.has(session.id)
+      && !resumedRemoteRunsRef.current.has(session.remoteRun.id)
+      && !sessionRunsRef.current.has(session.id)
+      && !pendingStreamStartsRef.current.has(session.id)
+      && !sessionStopPromisesRef.current.has(session.id)
+    ));
+    for (const session of resumable) {
+      const sessionIncarnation = sessionIncarnationsRef.current.get(session.id) || 0;
+      resumedRemoteRunsRef.current.add(session.remoteRun.id);
       void (async () => {
         try {
-          const messages = session.messages || await loadSessionMessages(session.id);
-          await streamResponse(session.id, messages, {
+          const runMessages = session.messages || await loadSessionMessages(session.id);
+          const currentSession = sessionsRef.current.find((item) => item.id === session.id);
+          if (
+            factoryResetInProgressRef.current
+            || deletedSessionIdsRef.current.has(session.id)
+            || (sessionIncarnationsRef.current.get(session.id) || 0) !== sessionIncarnation
+            || !currentSession
+            || currentSession.remoteRun?.id !== session.remoteRun.id
+            || sessionRunsRef.current.has(session.id)
+            || pendingStreamStartsRef.current.has(session.id)
+            || sessionStopPromisesRef.current.has(session.id)
+          ) {
+            resumedRemoteRunsRef.current.delete(session.remoteRun.id);
+            return;
+          }
+          setSessions((prev) => prev.map((item) => (
+            item.id === session.id ? { ...item, messages: runMessages } : item
+          )));
+          const outcome = await streamResponse(session.id, runMessages, {
             agentId: session.agentId,
             llmProfileId: session.llmProfileId,
             sandboxUrl: session.remoteRun.url,
             resumeRunId: session.remoteRun.id,
             replyId: session.remoteRun.replyId,
           });
-        } finally {
-          resumingWaitingRunsRef.current.delete(session.remoteRun.id);
+          if ((!outcome || outcome.status === 'error') && !factoryResetInProgressRef.current) {
+            scheduleRetry(session.remoteRun.id);
+          }
+        } catch (error) {
+          console.warn('Remote agent run resume failed:', error);
+          if (!factoryResetInProgressRef.current) scheduleRetry(session.remoteRun.id);
         }
-      })().catch((error) => console.warn('Waiting sandbox run resume failed:', error));
-    }, Math.min(Math.max(delay, 250), 2_147_483_647));
+      })();
+    }
+  }, [agentList, loaded, pendingSessionIds, remoteResumeVersion, runningSessionIds, sessions, streamResponse]);
 
-    return () => clearTimeout(timerId);
+  // A waiting sandbox run is owned by the agent server, so it does not keep
+  // the browser UI in streaming mode. Reattach around its scheduled time.
+  useEffect(() => {
+    if (!loaded || factoryResetInProgressRef.current) return;
+    const waitingRunIds = new Set();
+
+    const scheduleResume = (session, delay) => {
+      const runId = session.remoteRun.id;
+      const sessionIncarnation = sessionIncarnationsRef.current.get(session.id) || 0;
+      const timerId = setTimeout(() => {
+        waitingRemoteTimersRef.current.delete(runId);
+        const currentSession = sessionsRef.current.find((item) => item.id === session.id);
+        if (
+          !currentSession
+          || deletedSessionIdsRef.current.has(currentSession.id)
+          || (sessionIncarnationsRef.current.get(currentSession.id) || 0) !== sessionIncarnation
+          || currentSession.remoteRun?.id !== runId
+          || currentSession.remoteRun.status !== 'waiting'
+          || factoryResetInProgressRef.current
+        ) return;
+
+        const remainingDelay = currentSession.remoteRun.wakeup?.runAtMs - Date.now();
+        if (Number.isFinite(remainingDelay) && remainingDelay > 50) {
+          scheduleResume(currentSession, remainingDelay);
+          return;
+        }
+
+        if (
+          sessionRunsRef.current.has(currentSession.id)
+          || pendingStreamStartsRef.current.has(currentSession.id)
+          || sessionStopPromisesRef.current.has(currentSession.id)
+        ) {
+          scheduleResume(currentSession, 250);
+          return;
+        }
+
+        resumingWaitingRunsRef.current.add(runId);
+        void (async () => {
+          try {
+            const runMessages = currentSession.messages || await loadSessionMessages(currentSession.id);
+            if (
+              factoryResetInProgressRef.current
+              || deletedSessionIdsRef.current.has(currentSession.id)
+              || (sessionIncarnationsRef.current.get(currentSession.id) || 0) !== sessionIncarnation
+            ) return;
+            await streamResponse(currentSession.id, runMessages, {
+              agentId: currentSession.agentId,
+              llmProfileId: currentSession.llmProfileId,
+              sandboxUrl: currentSession.remoteRun.url,
+              resumeRunId: runId,
+              replyId: currentSession.remoteRun.replyId,
+            });
+          } finally {
+            resumingWaitingRunsRef.current.delete(runId);
+            const latestSession = sessionsRef.current.find((item) => item.id === currentSession.id);
+            if (
+              latestSession?.remoteRun?.id === runId
+              && latestSession.remoteRun.status === 'waiting'
+              && !deletedSessionIdsRef.current.has(latestSession.id)
+              && !waitingRemoteTimersRef.current.has(runId)
+              && !factoryResetInProgressRef.current
+            ) {
+              scheduleResume(
+                latestSession,
+                Math.max(1000, latestSession.remoteRun.wakeup?.runAtMs - Date.now() || 0)
+              );
+            }
+          }
+        })().catch((error) => console.warn('Waiting sandbox run resume failed:', error));
+      }, Math.min(Math.max(delay, 250), 2_147_483_647));
+      waitingRemoteTimersRef.current.set(runId, timerId);
+    };
+
+    for (const session of sessions) {
+      if (deletedSessionIdsRef.current.has(session.id)) continue;
+      if (!session.remoteRun?.wakeup?.runAtMs || session.remoteRun.status !== 'waiting') continue;
+      const runId = session.remoteRun.id;
+      waitingRunIds.add(runId);
+      if (
+        waitingRemoteTimersRef.current.has(runId)
+        || resumingWaitingRunsRef.current.has(runId)
+      ) continue;
+      scheduleResume(session, Math.max(0, session.remoteRun.wakeup.runAtMs - Date.now()));
+    }
+
+    for (const [runId, timerId] of waitingRemoteTimersRef.current) {
+      if (waitingRunIds.has(runId)) continue;
+      clearTimeout(timerId);
+      waitingRemoteTimersRef.current.delete(runId);
+    }
   }, [loaded, sessions, streamResponse]);
 
   // A page can close in the narrow interval before the returned run id is
   // flushed to OPFS. Discover server-owned runs by session id as a fallback.
   useEffect(() => {
-    if (!loaded || agentList.length === 0) return;
+    if (!loaded || factoryResetInProgressRef.current || agentList.length === 0) return;
+    const scheduleDiscoveryRetry = (discoveryKey) => {
+      if (factoryResetInProgressRef.current) return;
+      if (remoteDiscoveryRetryTimersRef.current.has(discoveryKey)) return;
+      const timerId = setTimeout(() => {
+        remoteDiscoveryRetryTimersRef.current.delete(discoveryKey);
+        if (factoryResetInProgressRef.current) return;
+        remoteDiscoveryRef.current.delete(discoveryKey);
+        setRemoteDiscoveryVersion((version) => version + 1);
+      }, 1500);
+      remoteDiscoveryRetryTimersRef.current.set(discoveryKey, timerId);
+    };
     for (const session of sessions) {
-      if (session.remoteRun) continue;
+      if (deletedSessionIdsRef.current.has(session.id)) continue;
+      if (
+        session.remoteRun
+        || sessionRunsRef.current.has(session.id)
+        || pendingStreamStartsRef.current.has(session.id)
+        || sessionStopPromisesRef.current.has(session.id)
+      ) continue;
       const agent = agentList.find((item) => item.id === session.agentId);
       if (agent?.runtimeMode !== 'sandbox' || !agent.sandboxUrl || agent.sandboxUrl === E2B_AGENT_ID) continue;
       const discoveryKey = `${agent.sandboxUrl}:${session.id}`;
+      const sessionIncarnation = sessionIncarnationsRef.current.get(session.id) || 0;
       if (remoteDiscoveryRef.current.has(discoveryKey)) continue;
       remoteDiscoveryRef.current.add(discoveryKey);
       void listRemoteAgentRuns(agent.sandboxUrl, session.id).then(async ({ runs }) => {
+        if (
+          factoryResetInProgressRef.current
+          || deletedSessionIdsRef.current.has(session.id)
+          || (sessionIncarnationsRef.current.get(session.id) || 0) !== sessionIncarnation
+        ) return;
         const latest = runs?.[0];
         if (!latest || latest.status === 'aborted' || latest.status === 'error' || latest.status === 'interrupted') return;
         const storedMessages = session.messages || await loadSessionMessages(session.id);
+        if (
+          factoryResetInProgressRef.current
+          || deletedSessionIdsRef.current.has(session.id)
+          || (sessionIncarnationsRef.current.get(session.id) || 0) !== sessionIncarnation
+        ) return;
         setSessions((prev) => prev.map((item) => {
           if (item.id !== session.id || item.remoteRun) return item;
           const currentMessages = item.messages || storedMessages;
@@ -1156,39 +1770,65 @@ function App() {
             },
           };
         }));
-      }).catch((error) => console.warn('Remote agent run discovery failed:', error));
+      }).catch((error) => {
+        console.warn('Remote agent run discovery failed:', error);
+        if (!factoryResetInProgressRef.current) scheduleDiscoveryRetry(discoveryKey);
+      });
     }
-  }, [agentList, loaded, sessions]);
+  }, [agentList, loaded, pendingSessionIds, remoteDiscoveryVersion, runningSessionIds, sessions]);
 
-  const cancelPendingStreamStarts = useCallback(() => {
+  const cancelPendingStreamStarts = useCallback(({ notify = true } = {}) => {
     const pendingStarts = [...pendingStreamStartsRef.current.values()];
-    for (const timerId of pendingStreamStartsRef.current.keys()) {
-      clearTimeout(timerId);
+    for (const pendingStart of pendingStarts) {
+      clearTimeout(pendingStart.timerId);
     }
     pendingStreamStartsRef.current.clear();
+    if (notify) setPendingSessionIds(new Set());
     return pendingStarts;
   }, []);
 
   useEffect(() => () => {
-    cancelPendingStreamStarts();
+    cancelPendingStreamStarts({ notify: false });
+    for (const timerId of waitingRemoteTimersRef.current.values()) clearTimeout(timerId);
+    waitingRemoteTimersRef.current.clear();
+    for (const timerId of remoteResumeRetryTimersRef.current.values()) clearTimeout(timerId);
+    remoteResumeRetryTimersRef.current.clear();
+    for (const timerId of remoteAbortRetryTimersRef.current.values()) clearTimeout(timerId);
+    remoteAbortRetryTimersRef.current.clear();
+    for (const timerId of remoteDiscoveryRetryTimersRef.current.values()) clearTimeout(timerId);
+    remoteDiscoveryRetryTimersRef.current.clear();
   }, [cancelPendingStreamStarts]);
 
   const handleStopStreaming = useCallback(() => {
-    const remote = remoteRunRef.current;
-    if (remote) void abortRemoteAgentRun(remote.url, remote.id).catch(() => {});
-    if (abortRef.current) abortRef.current.abort();
-  }, []);
+    const sessionId = activeSessionIdRef.current;
+    if (!sessionId) return;
+    cancelPendingSessionStart(sessionId);
+    void stopSessionRun(sessionId);
+  }, [cancelPendingSessionStart, stopSessionRun]);
 
   const sendMessageNow = useCallback(
     (text, images, contextFiles, targetSessionId = activeSessionId) => {
-      if (factoryResetInProgressRef.current) return;
+      const targetSession = targetSessionId
+        ? sessionsRef.current.find((session) => session.id === targetSessionId)
+        : null;
+      if (
+        (!agentListReady && (!targetSessionId || targetSession?.agentId))
+        || factoryResetInProgressRef.current
+        || deletedSessionIdsRef.current.has(targetSessionId)
+      ) return false;
 
       // A new user turn in the same conversation supersedes its sleeping
       // continuation. This prevents the server from later resuming with a
       // stale message snapshot while the new turn is already in progress.
       const waitingRemote = sessionsRef.current.find((item) => item.id === targetSessionId)?.remoteRun;
+      let startAfter;
       if (waitingRemote?.status === 'waiting') {
-        void abortRemoteAgentRun(waitingRemote.url, waitingRemote.id).catch(() => {});
+        startAfter = abortRemoteAgentRunBestEffort(waitingRemote.url, waitingRemote.id);
+        resumedRemoteRunsRef.current.add(waitingRemote.id);
+        resumingWaitingRunsRef.current.delete(waitingRemote.id);
+        const waitingTimer = waitingRemoteTimersRef.current.get(waitingRemote.id);
+        if (waitingTimer) clearTimeout(waitingTimer);
+        waitingRemoteTimersRef.current.delete(waitingRemote.id);
       }
 
       if (!targetSessionId) {
@@ -1214,33 +1854,35 @@ function App() {
           setSessionLlmProfiles((prev) => ({ ...prev, [newSession.id]: llmProfileId }));
         }
         scheduleStreamResponse(newSession.id, [userMsg], { agentId, llmProfileId });
-        return;
+        return true;
       }
 
       const userMsg = { id: generateId(), role: 'user', content: text, ...(images && { images }), ...(contextFiles && { contextFiles }) };
       const sessionId = targetSessionId;
+      const currentSession = sessionsRef.current.find((session) => session.id === sessionId);
+      if (!currentSession?.messages) return false;
+      const nextMessages = [...currentSession.messages, userMsg];
 
-      setSessions((prev) => {
-        const updated = sortSessions(prev.map((c) =>
-          c.id === sessionId
-            ? {
-                ...c,
-                title: c.messages.length === 0 ? text.slice(0, 30) + (text.length > 30 ? '...' : '') : c.title,
-                lastMessage: text || (images ? '[Image]' : ''),
-                ...sessionTimeFields(),
-                messages: [...c.messages, userMsg],
-              }
-            : c
-        ));
-        // Schedule stream outside of state updater
-        const session = updated.find((c) => c.id === sessionId);
-        if (session) {
-          scheduleStreamResponse(sessionId, session.messages);
-        }
-        return updated;
+      setSessions((prev) => sortSessions(prev.map((session) => {
+        if (session.id !== sessionId) return session;
+        const next = {
+          ...session,
+          title: (session.messages || []).length === 0 ? text.slice(0, 30) + (text.length > 30 ? '...' : '') : session.title,
+          lastMessage: text || (images ? '[Image]' : ''),
+          ...sessionTimeFields(),
+          messages: [...(session.messages || currentSession.messages), userMsg],
+        };
+        if (session.remoteRun?.status === 'waiting') delete next.remoteRun;
+        return next;
+      })));
+      scheduleStreamResponse(sessionId, nextMessages, {
+        agentId: currentSession.agentId,
+        llmProfileId: currentSession.llmProfileId,
+        ...(startAfter ? { startAfter } : {}),
       });
+      return true;
     },
-    [activeSessionId, scheduleStreamResponse, lastAgentId, agentList, currentLlmProfileId, getAgentDefaultLlmId]
+    [activeSessionId, agentListReady, scheduleStreamResponse, lastAgentId, agentList, currentLlmProfileId, getAgentDefaultLlmId]
   );
 
   // Wake-ups are persisted in session metadata. Only the next one needs an
@@ -1248,15 +1890,28 @@ function App() {
   useEffect(() => {
     if (!loaded || factoryResetInProgressRef.current) return undefined;
 
-    const next = findNextWakeup(sessions, claimedWakeupIdsRef.current);
+    const unavailableWakeupIds = new Set(claimedWakeupIdsRef.current);
+    for (const session of sessions) {
+      if (
+        !sessionRunsRef.current.has(session.id)
+        && !pendingStreamStartsRef.current.has(session.id)
+        && !sessionStopPromisesRef.current.has(session.id)
+        && session.remoteRun?.status !== 'running'
+      ) continue;
+      for (const wakeup of session.wakeups || []) unavailableWakeupIds.add(wakeup.id);
+    }
+    const next = findNextWakeup(sessions, unavailableWakeupIds);
     if (!next) return undefined;
 
     const delay = Math.max(0, next.wakeup.runAtMs - Date.now());
+    const sessionIncarnation = sessionIncarnationsRef.current.get(next.session.id) || 0;
     const timerId = setTimeout(() => {
       if (
-        streaming
-        || abortRef.current
-        || pendingStreamStartsRef.current.size > 0
+        sessionRunsRef.current.has(next.session.id)
+        || pendingStreamStartsRef.current.has(next.session.id)
+        || sessionStopPromisesRef.current.has(next.session.id)
+        || sessionHasRunningRemote(sessionsRef.current, next.session.id)
+        || (sessionIncarnationsRef.current.get(next.session.id) || 0) !== sessionIncarnation
         || factoryResetInProgressRef.current
       ) return;
 
@@ -1266,11 +1921,18 @@ function App() {
       void (async () => {
         try {
           const currentSession = sessionsRef.current.find((item) => item.id === scheduledSession.id);
-          if (!currentSession) return;
+          if (!currentSession || deletedSessionIdsRef.current.has(currentSession.id)) return;
           const messages = currentSession.messages || await loadSessionMessages(currentSession.id);
           // Loading a metadata-only session is asynchronous. Another turn may
           // have started in that gap, so leave this wake-up pending for retry.
-          if (abortRef.current || pendingStreamStartsRef.current.size > 0) {
+          if (
+            sessionRunsRef.current.has(currentSession.id)
+            || pendingStreamStartsRef.current.has(currentSession.id)
+            || sessionStopPromisesRef.current.has(currentSession.id)
+            || sessionHasRunningRemote(sessionsRef.current, currentSession.id)
+            || deletedSessionIdsRef.current.has(currentSession.id)
+            || (sessionIncarnationsRef.current.get(currentSession.id) || 0) !== sessionIncarnation
+          ) {
             claimedWakeupIdsRef.current.delete(wakeup.id);
             return;
           }
@@ -1280,6 +1942,15 @@ function App() {
             content: buildWakeupMessage(wakeup),
           };
           const nextMessages = [...messages, wakeMessage];
+
+          const scheduled = scheduleStreamResponse(currentSession.id, nextMessages, {
+            agentId: currentSession.agentId,
+            llmProfileId: currentSession.llmProfileId,
+          });
+          if (!scheduled) {
+            claimedWakeupIdsRef.current.delete(wakeup.id);
+            return;
+          }
 
           setSessions((prev) => sortSessions(prev.map((item) => {
             if (item.id !== currentSession.id) return item;
@@ -1291,11 +1962,6 @@ function App() {
               ...sessionTimeFields(),
             };
           })));
-
-          scheduleStreamResponse(currentSession.id, nextMessages, {
-            agentId: currentSession.agentId,
-            llmProfileId: currentSession.llmProfileId,
-          });
         } catch (error) {
           claimedWakeupIdsRef.current.delete(wakeup.id);
           console.warn('Scheduled wake-up failed:', error);
@@ -1304,13 +1970,30 @@ function App() {
     }, Math.min(delay, 2_147_483_647));
 
     return () => clearTimeout(timerId);
-  }, [loaded, scheduleStreamResponse, sessions, streaming]);
+  }, [loaded, pendingSessionIds, runningSessionIds, scheduleStreamResponse, sessions, stoppingSessionIds]);
 
   const handleSendMessage = useCallback(
     (text, images, contextFiles) => {
-      if (factoryResetInProgressRef.current) return;
+      if (activeSessionAgentLoading || factoryResetInProgressRef.current) return false;
 
-      if (streaming && activeSessionId) {
+      if (activeSessionId && sessionLoadingRequestsRef.current.has(activeSessionId)) return false;
+      if (
+        activeSessionId
+        && !sessionsRef.current.find((session) => session.id === activeSessionId)?.messages
+      ) {
+        void handleSelectSession(activeSessionId);
+        return false;
+      }
+
+      if (
+        activeSessionId
+        && (
+          sessionRunsRef.current.has(activeSessionId)
+          || pendingStreamStartsRef.current.has(activeSessionId)
+          || sessionStopPromisesRef.current.has(activeSessionId)
+          || sessionHasRunningRemote(sessionsRef.current, activeSessionId)
+        )
+      ) {
         setMessageQueue((prev) => [
           ...prev,
           {
@@ -1321,12 +2004,12 @@ function App() {
             ...(contextFiles && { contextFiles }),
           },
         ]);
-        return;
+        return true;
       }
 
-      sendMessageNow(text, images, contextFiles);
+      return sendMessageNow(text, images, contextFiles);
     },
-    [activeSessionId, streaming, sendMessageNow]
+    [activeSessionId, activeSessionAgentLoading, handleSelectSession, sendMessageNow]
   );
 
   const handleRemoveQueuedMessage = useCallback((queueId) => {
@@ -1335,18 +2018,36 @@ function App() {
 
   useEffect(() => {
     if (factoryResetInProgressRef.current) return;
+    if (messageQueue.length === 0) return;
 
-    const justFinishedStreaming = wasStreamingRef.current && !streaming;
-    wasStreamingRef.current = streaming;
-    if (!justFinishedStreaming || messageQueue.length === 0) return;
+    const claimedSessions = new Set();
+    const ready = [];
+    for (const item of messageQueue) {
+      if (
+        claimedSessions.has(item.sessionId)
+        || sessionRunsRef.current.has(item.sessionId)
+        || pendingStreamStartsRef.current.has(item.sessionId)
+        || sessionStopPromisesRef.current.has(item.sessionId)
+        || sessionHasRunningRemote(sessionsRef.current, item.sessionId)
+      ) continue;
+      claimedSessions.add(item.sessionId);
+      ready.push(item);
+    }
+    if (ready.length === 0) return;
 
-    const [next, ...rest] = messageQueue;
-    setMessageQueue(rest);
-    sendMessageNow(next.text, next.images, next.contextFiles, next.sessionId);
-  }, [streaming, messageQueue, sendMessageNow]);
+    const acceptedIds = new Set();
+    for (const item of ready) {
+      if (sendMessageNow(item.text, item.images, item.contextFiles, item.sessionId)) {
+        acceptedIds.add(item.id);
+      }
+    }
+    if (acceptedIds.size > 0) {
+      setMessageQueue((prev) => prev.filter((item) => !acceptedIds.has(item.id)));
+    }
+  }, [runningSessionIds, pendingSessionIds, stoppingSessionIds, messageQueue, sendMessageNow, sessions]);
 
   const handleEditMessage = useCallback((messageId, text) => {
-    if (factoryResetInProgressRef.current || streaming || !activeSessionId) return;
+    if (activeSessionAgentLoading || factoryResetInProgressRef.current || activeSessionStreaming || !activeSessionId) return;
     const sessionId = activeSessionId;
     const session = sessions.find((c) => c.id === sessionId);
     if (!session) return;
@@ -1380,7 +2081,7 @@ function App() {
     );
 
     scheduleStreamResponse(sessionId, trimmedMessages);
-  }, [activeSessionId, sessions, streaming, scheduleStreamResponse]);
+  }, [activeSessionId, activeSessionStreaming, activeSessionAgentLoading, sessions, scheduleStreamResponse]);
 
   const handleSelectLLM = useCallback(async (profileId) => {
     const nextProfileId = profileId || null;
@@ -1409,7 +2110,8 @@ function App() {
     if (factoryResetInProgressRef.current) return;
     factoryResetInProgressRef.current = true;
     const cancelledStreamStarts = cancelPendingStreamStarts();
-    const streamCompletion = streamCompletionRef.current;
+    const activeRuns = sessionRunsRef.current.values();
+    const activeStops = [...sessionStopPromisesRef.current.values()];
     let resumeAutoSync;
     let resetComplete = false;
     let configResetStarted = false;
@@ -1417,9 +2119,34 @@ function App() {
     let releaseSessionBarrier;
     try {
       resumeAutoSync = suspendAutoSync();
-      abortRef.current?.abort();
+      for (const timerId of waitingRemoteTimersRef.current.values()) clearTimeout(timerId);
+      waitingRemoteTimersRef.current.clear();
+      for (const timerId of remoteResumeRetryTimersRef.current.values()) clearTimeout(timerId);
+      remoteResumeRetryTimersRef.current.clear();
+      for (const timerId of remoteAbortRetryTimersRef.current.values()) clearTimeout(timerId);
+      remoteAbortRetryTimersRef.current.clear();
+      for (const timerId of remoteDiscoveryRetryTimersRef.current.values()) clearTimeout(timerId);
+      remoteDiscoveryRetryTimersRef.current.clear();
+      remoteDiscoveryRef.current.clear();
+      const remoteAborts = [];
+      for (const run of activeRuns) {
+        run.skipAutomaticTitle = true;
+        if (run.remoteRun) {
+          remoteAborts.push(abortRemoteAgentRunBestEffort(run.remoteRun.url, run.remoteRun.id));
+        }
+      }
+      for (const session of sessionsRef.current) {
+        if (session.remoteRun && !sessionRunsRef.current.has(session.id)) {
+          remoteAborts.push(abortRemoteAgentRunBestEffort(session.remoteRun.url, session.remoteRun.id));
+        }
+      }
+      sessionRunsRef.current.abortAll();
+      const runCompletions = activeRuns.map(async (run) => {
+        const settled = await waitForSettlement(run.completion, LOCAL_RUN_STOP_TIMEOUT_MS);
+        if (!settled) sessionRunsRef.current.finish(run.sessionId, run);
+      });
       for (const controller of titleGenerationControllersRef.current.values()) controller.abort();
-      if (streamCompletion) await streamCompletion;
+      await Promise.allSettled([...remoteAborts, ...runCompletions, ...activeStops]);
       await waitForSyncIdle();
       releaseSessionBarrier = await coordinator.beginBarrier();
       coordinator.cancelScheduled();
@@ -1436,6 +2163,10 @@ function App() {
       sessionsRef.current = emptySessions;
       setSessions(emptySessions);
       setActiveSessionId(null);
+      sessionLoadingRequestsRef.current.clear();
+      setLoadingSessionIds(new Set());
+      sessionStopPromisesRef.current.clear();
+      setStoppingSessionIds(new Set());
       setMessageQueue([]);
       resetComplete = true;
       setTimeout(() => window.location.reload(), 500);
@@ -1454,9 +2185,9 @@ function App() {
             pendingStart.opts
           );
         }
-        // If aborting the active stream made a queued message eligible while
-        // the gate was closed, retrigger the queue effect now.
-        if (streamCompletion && cancelledStreamStarts.length === 0) {
+        // If aborting runs made queued messages eligible while the reset gate
+        // was closed, retrigger the per-session queue effect now.
+        if (activeRuns.length > 0 && cancelledStreamStarts.length === 0) {
           setMessageQueue((current) => [...current]);
         }
       }
@@ -1578,6 +2309,7 @@ function App() {
         onToggleCollapse={() => setLeftPanelCollapsed(prev => !prev)}
         sessionAgents={sessionAgents}
         agentList={agentList}
+        runningSessionIds={busySessionIdsForUi}
       />
       {/* Expand button - visible when left panel is collapsed (PC mode only) */}
       {leftPanelCollapsed && (
@@ -1599,7 +2331,7 @@ function App() {
         onRemoveQueuedMessage={handleRemoveQueuedMessage}
         onEditMessage={handleEditMessage}
         onRetry={() => {
-          if (factoryResetInProgressRef.current) return;
+          if (activeSessionAgentLoading || factoryResetInProgressRef.current || activeSessionStreaming) return;
           const sessionId = activeSessionId;
           const session = sessions.find((c) => c.id === sessionId);
           if (!session) return;
@@ -1609,7 +2341,8 @@ function App() {
           setSessions((prev) => prev.map((c) => c.id === sessionId ? { ...c, messages: trimmed } : c));
           scheduleStreamResponse(sessionId, trimmed);
         }}
-        streaming={streaming}
+        streaming={activeSessionStreaming}
+        inputDisabled={activeSessionLoading || activeSessionAgentLoading}
         onStopStreaming={handleStopStreaming}
         llmConfig={llm.getActiveConfig(activeLlmProfileId)}
         llmProfiles={llm.getProfiles()}

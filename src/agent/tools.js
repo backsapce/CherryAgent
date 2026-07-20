@@ -42,7 +42,7 @@ import {
   writeAgentSkillPath,
 } from '../vfs/opfs.js';
 import config from '../config/config.js';
-import { getAgent, listAgents, updateAgentConfig } from '../agents/agents.js';
+import { getAgent, listAgents } from '../agents/agents.js';
 
 const DEFAULT_READ_FILE_MAX_BYTES = 256 * 1024;
 const ABSOLUTE_READ_FILE_MAX_BYTES = 1024 * 1024;
@@ -1250,11 +1250,6 @@ async function runSpawnedAgent(item, index, total, sharedContext, maxRounds, ctx
     subAgent = await getAgent(ctx.agentId);
     if (!subAgent) throw new Error(`Current agent not found: ${ctx.agentId}`);
   }
-
-  await updateAgentConfig(subAgent.id, {
-    llmProfileId: ctx.llmProfileId,
-    sandboxUrl: ctx.agentUrl || null,
-  });
 
   const messages = buildSubAgentMessages(sharedContext, item.task, index, total);
   const result = await runAgentLoop({
