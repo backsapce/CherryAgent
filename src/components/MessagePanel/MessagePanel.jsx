@@ -87,6 +87,10 @@ function resetEmptyTextareaCaret(textarea) {
   textarea.setSelectionRange(0, 0);
 }
 
+function isImeComposing(event) {
+  return event.isComposing || event.nativeEvent?.isComposing || event.keyCode === 229;
+}
+
 function getMentionRange(value, caret) {
   const head = value.slice(0, caret);
   const start = head.lastIndexOf('@');
@@ -1168,6 +1172,8 @@ const MessagePanel = forwardRef(({
   };
 
   const handleEditKeyDown = (e) => {
+    if (isImeComposing(e)) return;
+
     if (e.key === 'Escape') {
       e.preventDefault();
       cancelEditMessage();
@@ -1263,6 +1269,8 @@ const MessagePanel = forwardRef(({
   };
 
   const handleKeyDown = (e) => {
+    if (isImeComposing(e)) return;
+
     if (mentionOpen) {
       if (e.key === 'ArrowDown') {
         e.preventDefault();
