@@ -1,10 +1,15 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { useI18n } from '../../i18n/context';
-import { Plus, X, Menu, ChevronLeft, ChevronRight, Bug } from '../Icons/Icons';
+import { Plus, X, Menu, ChevronLeft, ChevronRight, Bug, Clock } from '../Icons/Icons';
 import './SessionList.css';
 
 // Breakpoint for mobile/tablet
 const MOBILE_BREAKPOINT = 768;
+
+const hasScheduledWakeup = (session) => (
+  (session.wakeups || []).length > 0
+  || (session.remoteRun?.status === 'waiting' && Boolean(session.remoteRun.wakeup))
+);
 
 const SessionList = ({
   sessions,
@@ -153,6 +158,15 @@ const SessionList = ({
                         title={t('message.running')}
                         aria-label={t('message.running')}
                       />
+                    )}
+                    {hasScheduledWakeup(session) && (
+                      <span
+                        className="session-wakeup-indicator"
+                        title={t('session.wakeupScheduled')}
+                        aria-label={t('session.wakeupScheduled')}
+                      >
+                        <Clock width={14} height={14} aria-hidden="true" />
+                      </span>
                     )}
                     {session.title}
                     {sessionAgents[session.id] && (

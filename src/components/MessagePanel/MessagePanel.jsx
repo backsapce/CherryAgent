@@ -662,12 +662,16 @@ const ToolBlock = ({ toolCall, onStopStreaming, agentId, sandboxUrl }) => {
   }
 
   // New tool call format: { name, status?, result?, summary? }
-  const { name, status, result, summary, command, exitCode } = toolCall;
+  const { name, status, result, summary, command, exitCode, parsedArgs, rawArgs } = toolCall;
   const showShutdown = name === 'execute_command' && ['pending', 'running'].includes(status) && onStopStreaming;
   const renderTerminal = name === 'execute_command';
   const isImageGeneration = isImageGenerationToolName(name);
   const imageReference = parseImageReference(toolCall);
   const label = renderTerminal ? t('message.execute') : (isImageGeneration ? t('message.imageGeneration') : name);
+  const controlInput = name === 'schedule_wakeup'
+    ? (parsedArgs ? JSON.stringify(parsedArgs, null, 2) : rawArgs || '')
+    : '';
+  const detailOutput = result || controlInput;
 
   return (
     <div className={`tool-block ${isImageGeneration ? 'image-generation-tool' : ''}`}>
@@ -709,9 +713,9 @@ const ToolBlock = ({ toolCall, onStopStreaming, agentId, sandboxUrl }) => {
           <ToolImageReference reference={imageReference} agentId={agentId} sandboxUrl={sandboxUrl} />
         </div>
       )}
-      {effectiveExpanded && (result || (renderTerminal && ['pending', 'running'].includes(status))) && (
+      {effectiveExpanded && (detailOutput || (renderTerminal && ['pending', 'running'].includes(status))) && (
         <div className={`tool-output ${renderTerminal ? 'terminal-output' : ''}`}>
-          {renderTerminal ? <ToolTerminal output={executeTerminalOutput(toolCall)} /> : <pre>{result}</pre>}
+          {renderTerminal ? <ToolTerminal output={executeTerminalOutput(toolCall)} /> : <pre>{detailOutput}</pre>}
         </div>
       )}
     </div>

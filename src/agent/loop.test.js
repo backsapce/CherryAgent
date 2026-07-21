@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { simulateReadableStream } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
+import { APICallError } from '@ai-sdk/provider';
 import { runAgentLoop } from './loop.js';
 import { compactToolResultForModel } from './toolObservation.js';
 
@@ -21,6 +22,21 @@ const TEST_TOOL_SCHEMA = {
 const TEST_USAGE = {
   inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
   outputTokens: { total: 1, text: 1, reasoning: 0 },
+};
+
+const WAKEUP_TOOL_SCHEMA = {
+  name: 'schedule_wakeup',
+  description: 'Schedule a future continuation.',
+  parameters: {
+    type: 'object',
+    properties: {
+      delay: { type: 'integer' },
+      unit: { type: 'string', enum: ['seconds', 'minutes', 'hours', 'days'] },
+      prompt: { type: 'string' },
+    },
+    required: ['delay', 'unit', 'prompt'],
+    additionalProperties: false,
+  },
 };
 
 test('compactToolResultForModel leaves short tool results unchanged', () => {
@@ -46,6 +62,221 @@ test('compactToolResultForModel bounds long tool results and preserves head and 
   assert.match(compacted, /START/);
   assert.match(compacted, /END_MARKER/);
   assert.match(compacted, /omitted \d+ chars from middle/);
+});
+
+test('a successful wake-up ends the current model loop immediately', async () => {
+  let modelCallCount = 0;
+  const scheduled = [];
+  const model = new MockLanguageModelV3({
+    doStream: async () => {
+      modelCallCount += 1;
+      if (modelCallCount > 1) throw new Error('model was called again after scheduling a wake-up');
+      return {
+        stream: simulateReadableStream({
+          chunks: [
+            { type: 'stream-start', warnings: [] },
+            {
+              type: 'tool-call',
+              toolCallId: 'call-wakeup',
+              toolName: 'schedule_wakeup',
+              input: JSON.stringify({ delay: 10, unit: 'minutes', prompt: 'check the build' }),
+            },
+            {
+              type: 'finish',
+              finishReason: { unified: 'tool-calls', raw: undefined },
+              usage: TEST_USAGE,
+            },
+          ],
+          initialDelayInMs: null,
+          chunkDelayInMs: null,
+        }),
+      };
+    },
+  });
+
+  const result = await runAgentLoop({
+    ...createConcurrentRunOptions('wakeup'),
+    maxRounds: 4,
+    toolSchemas: [WAKEUP_TOOL_SCHEMA],
+    languageModel: model,
+    scheduleWakeup: async (request) => {
+      scheduled.push(request);
+      return { id: 'wake-one', runAtMs: Date.now() + request.delaySeconds * 1_000, prompt: request.prompt };
+    },
+  });
+
+  assert.equal(modelCallCount, 1);
+  assert.deepEqual(scheduled, [{ delaySeconds: 600, prompt: 'check the build' }]);
+  assert.equal(result.content, '');
+  assert.equal(result.run.finishReason, 'tool-calls');
+  assert.equal(result.toolCalls.at(-1)?.name, 'schedule_wakeup');
+  assert.equal(result.toolCalls.at(-1)?.status, 'completed');
+});
+
+test('a successful wake-up does not wait for the provider stream to finish', async () => {
+  let scheduled = null;
+  let providerAbortSignal = null;
+  const events = [];
+  const controller = new AbortController();
+  const model = new MockLanguageModelV3({
+    doStream: async (options) => {
+      providerAbortSignal = options.abortSignal;
+      return {
+        // Deliberately omit both a finish chunk and controller.close(). Some
+        // OpenAI-compatible providers leave the SSE open after a tool call.
+        stream: new ReadableStream({
+          start(streamController) {
+            streamController.enqueue({ type: 'stream-start', warnings: [] });
+            streamController.enqueue({
+              type: 'tool-call',
+              toolCallId: 'call-stalled-wakeup',
+              toolName: 'schedule_wakeup',
+              input: JSON.stringify({ delay: 5, unit: 'seconds', prompt: 'resume after the stall' }),
+            });
+          },
+        }),
+      };
+    },
+  });
+
+  let timeoutId;
+  try {
+    const result = await Promise.race([
+      runAgentLoop({
+        ...createConcurrentRunOptions('stalled-wakeup'),
+        toolSchemas: [WAKEUP_TOOL_SCHEMA],
+        languageModel: model,
+        signal: controller.signal,
+        scheduleWakeup: async (request) => {
+          scheduled = request;
+          return { id: 'wake-stalled', runAtMs: Date.now() + 5_000, prompt: request.prompt };
+        },
+        onEvent: (event) => events.push(event),
+      }),
+      new Promise((_resolve, reject) => {
+        timeoutId = setTimeout(() => reject(new Error('wake-up turn did not terminate')), 1_500);
+      }),
+    ]);
+
+    assert.deepEqual(scheduled, { delaySeconds: 5, prompt: 'resume after the stall' });
+    assert.equal(result.run.finishReason, 'tool-calls');
+    assert.equal(result.toolCalls.at(-1)?.status, 'completed');
+    assert.equal(providerAbortSignal?.aborted, true);
+    assert.ok(events.some((event) => event.type === 'run-finish'));
+    assert.equal(events.some((event) => event.type === 'run-error' || event.type === 'run-abort'), false);
+  } finally {
+    clearTimeout(timeoutId);
+    controller.abort();
+  }
+});
+
+test('a provider error racing a successful wake-up cannot discard the schedule', async () => {
+  let providerController;
+  const events = [];
+  const model = new MockLanguageModelV3({
+    doStream: async () => ({
+      stream: new ReadableStream({
+        start(controller) {
+          providerController = controller;
+          controller.enqueue({ type: 'stream-start', warnings: [] });
+          controller.enqueue({
+            type: 'tool-call',
+            toolCallId: 'call-error-race-wakeup',
+            toolName: 'schedule_wakeup',
+            input: JSON.stringify({ delay: 5, unit: 'seconds', prompt: 'keep the successful schedule' }),
+          });
+        },
+      }),
+    }),
+  });
+
+  const result = await runAgentLoop({
+    ...createConcurrentRunOptions('error-race-wakeup'),
+    toolSchemas: [WAKEUP_TOOL_SCHEMA],
+    languageModel: model,
+    scheduleWakeup: async (request) => ({
+      id: 'wake-error-race',
+      runAtMs: Date.now() + request.delaySeconds * 1_000,
+      prompt: request.prompt,
+    }),
+    onEvent: (event) => {
+      events.push(event);
+      if (event.type === 'tool-result' && event.toolName === 'schedule_wakeup') {
+        providerController.enqueue({
+          type: 'error',
+          error: new Error('PROVIDER_BROKE_AFTER_TOOL_CALL'),
+        });
+      }
+    },
+  });
+
+  assert.equal(result.run.finishReason, 'tool-calls');
+  assert.equal(result.toolCalls.at(-1)?.status, 'completed');
+  assert.equal(events.some((event) => event.type === 'run-error'), false);
+});
+
+test('a retryable model connection failure is retried before failing the run', async () => {
+  let modelCallCount = 0;
+  const model = new MockLanguageModelV3({
+    doStream: async () => {
+      modelCallCount += 1;
+      if (modelCallCount === 1) {
+        throw new APICallError({
+          message: 'Cannot connect to API: ETIMEDOUT',
+          url: 'https://model.example/v1/chat/completions',
+          requestBodyValues: {},
+          cause: Object.assign(new Error('connect timed out'), { code: 'ETIMEDOUT' }),
+          isRetryable: true,
+        });
+      }
+      return {
+        stream: simulateReadableStream({
+          chunks: [
+            { type: 'stream-start', warnings: [] },
+            { type: 'text-start', id: 'answer' },
+            { type: 'text-delta', id: 'answer', delta: 'recovered' },
+            { type: 'text-end', id: 'answer' },
+            { type: 'finish', finishReason: { unified: 'stop' }, usage: TEST_USAGE },
+          ],
+          initialDelayInMs: null,
+          chunkDelayInMs: null,
+        }),
+      };
+    },
+  });
+
+  const result = await runAgentLoop({
+    ...createConcurrentRunOptions('retry'),
+    languageModel: model,
+    modelMaxRetries: 1,
+  });
+
+  assert.equal(modelCallCount, 2);
+  assert.equal(result.content, 'recovered');
+});
+
+test('an empty API connection error includes its nested network code', async () => {
+  const model = new MockLanguageModelV3({
+    doStream: async () => {
+      const cause = Object.assign(new Error(''), { code: 'ETIMEDOUT', errors: [] });
+      throw new APICallError({
+        message: 'Cannot connect to API: ',
+        url: 'https://model.example/v1/chat/completions',
+        requestBodyValues: {},
+        cause,
+        isRetryable: true,
+      });
+    },
+  });
+
+  await assert.rejects(
+    runAgentLoop({
+      ...createConcurrentRunOptions('network-error'),
+      languageModel: model,
+      modelMaxRetries: 0,
+    }),
+    /Cannot connect to API: ETIMEDOUT/
+  );
 });
 
 test('concurrent agent loops isolate events, abort signals, and tool contexts', async () => {

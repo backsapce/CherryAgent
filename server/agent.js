@@ -297,7 +297,15 @@ const agentRunManager = createAgentRunManager({
 
 function json(res, status, data, req) {
   if (res.writableEnded) return;
-  const headers = { 'Content-Type': 'application/json', ...corsHeaders(req) };
+  const headers = {
+    'Content-Type': 'application/json',
+    // API JSON is live state, especially /agent/runs/:id. Prevent browsers
+    // and reverse proxies from turning repeated run polling into an empty 304.
+    'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+    'Pragma': 'no-cache',
+    'Expires': '0',
+    ...corsHeaders(req),
+  };
   res.writeHead(status, headers);
   res.end(JSON.stringify(data));
 }
@@ -427,7 +435,9 @@ const server = createServer(async (req, res) => {
       filesRoot: PUBLIC_WORKSPACE_LABEL,
       capabilities: {
         backgroundAgentRuns: true,
-        agentRunProtocol: 1,
+        // Protocol 2 guarantees that a successful schedule_wakeup call ends
+        // the current model turn before the durable run enters waiting.
+        agentRunProtocol: 2,
         backgroundCommands: true,
         backgroundCommandProtocol: 1,
       },

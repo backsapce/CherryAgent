@@ -119,6 +119,7 @@ const TOOL_HISTORY_MARKER = 'Tool calls performed during this assistant turn:';
 const TOOL_HISTORY_RESULT_MAX_CHARS = 4000;
 const REMOTE_ABORT_TIMEOUT_MS = 5000;
 const REMOTE_ABORT_RETRY_MS = 1500;
+const REMOTE_WAITING_RECONCILE_MS = 5000;
 const LOCAL_RUN_STOP_TIMEOUT_MS = 5000;
 
 async function waitForSettlement(promise, timeoutMs) {
@@ -272,6 +273,7 @@ function App() {
   const sessionSaveCoordinatorRef = useRef(null);
   const resumedRemoteRunsRef = useRef(new Set());
   const resumingWaitingRunsRef = useRef(new Set());
+  const probingWaitingRunsRef = useRef(new Set());
   const waitingRemoteTimersRef = useRef(new Map());
   const remoteResumeRetryTimersRef = useRef(new Map());
   const remoteAbortRetryTimersRef = useRef(new Map());
@@ -1213,7 +1215,11 @@ function App() {
       }
     };
     const updateSessionsForRun = (updater) => {
-      setSessions((prev) => isRunCurrent() ? updater(prev) : prev);
+      // Validate ownership when the update is enqueued. React may execute a
+      // functional updater after this run has been removed from the registry;
+      // checking inside the updater would then discard its terminal waiting /
+      // completed state and leave the UI permanently stuck on "running".
+      runRegistry.enqueueIfCurrent(sessionId, run, () => setSessions(updater));
     };
 
     // Add empty assistant message for streaming
@@ -1327,6 +1333,7 @@ function App() {
             assertRunActive();
           } catch (startError) {
             if (run.controller.signal.aborted) throw startError;
+            if (startError?.agentRunRequestStarted !== true) throw startError;
             try {
               // The POST may have committed even if its response was lost.
               // Confirm the client-generated id before treating start as a
@@ -1359,7 +1366,13 @@ function App() {
           assertRunActive();
           updateSessionsForRun((prev) => prev.map((session) => session.id === sessionId ? {
             ...session,
-            remoteRun: { id: remoteRun.id, url: sandboxUrl, replyId, status: remoteRun.status },
+            remoteRun: {
+              id: remoteRun.id,
+              url: sandboxUrl,
+              replyId,
+              status: remoteRun.status,
+              sequence: Number(remoteRun.sequence) || 0,
+            },
             ...sessionTimeFields(),
           } : session));
         }
@@ -1379,6 +1392,7 @@ function App() {
               url: sandboxUrl,
               replyId,
               status: remoteRun.status,
+              sequence: Number(remoteRun.sequence) || remoteEventCursor,
               ...(remoteRun.wakeup ? { wakeup: remoteRun.wakeup } : {}),
             },
           } : session));
@@ -1445,10 +1459,22 @@ function App() {
         responseCompleted = true;
       }
 
-      // Mark unfinished tool calls as completed.
-      for (const tc of toolCalls) {
-        if (tc.status === 'running' || tc.status === 'writing') tc.status = 'completed';
-      }
+      // A wake-up preempts sibling tools in the same model step. If their
+      // final abort event raced with the server's waiting transition, reflect
+      // that control flow instead of presenting them as successfully finished.
+      const wakeupEndedTurn = runOutcome.status === 'waiting'
+        || toolCalls.some((tc) => tc.name === 'schedule_wakeup' && tc.status === 'completed');
+      toolCalls.splice(0, toolCalls.length, ...toolCalls.map((tc) => {
+        if (!['pending', 'running', 'writing'].includes(tc.status)) return tc;
+        if (wakeupEndedTurn && tc.name !== 'schedule_wakeup') {
+          return {
+            ...tc,
+            status: 'aborted',
+            result: tc.result || 'Stopped when the wake-up was scheduled.',
+          };
+        }
+        return { ...tc, status: 'completed' };
+      }));
 
       const finalContent = result?.content || run.streamingContent;
       const finalThinking = result?.thinking || run.streamingThinking;
@@ -1464,15 +1490,19 @@ function App() {
     } catch (err) {
       if (err.name === 'AbortError') {
         runOutcome = { status: 'aborted', error: err };
-        for (const tc of toolCalls) {
-          if (tc.status === 'running' || tc.status === 'writing') {
-            tc.status = 'aborted';
-            tc.result = tc.result || 'Aborted';
-          }
-        }
+        toolCalls.splice(0, toolCalls.length, ...toolCalls.map((tc) => (
+          ['pending', 'running', 'writing'].includes(tc.status)
+            ? { ...tc, status: 'aborted', result: tc.result || 'Aborted' }
+            : tc
+        )));
         updateMessage({ content: run.streamingContent, thinking: run.streamingThinking, toolCalls: [...toolCalls], transcript: agentEventState.transcript }, { touch: true });
       } else {
         runOutcome = { status: 'error', error: err };
+        toolCalls.splice(0, toolCalls.length, ...toolCalls.map((tc) => (
+          ['pending', 'running', 'writing'].includes(tc.status)
+            ? { ...tc, status: 'error', result: tc.result || `Error: ${err.message}` }
+            : tc
+        )));
         const errorContent = run.streamingContent || `Error: ${err.message}`;
         updateMessage({ content: errorContent, toolCalls: [...toolCalls], transcript: agentEventState.transcript }, { touch: true });
       }
@@ -1648,6 +1678,8 @@ function App() {
           sessionRunsRef.current.has(currentSession.id)
           || pendingStreamStartsRef.current.has(currentSession.id)
           || sessionStopPromisesRef.current.has(currentSession.id)
+          || probingWaitingRunsRef.current.has(runId)
+          || resumingWaitingRunsRef.current.has(runId)
         ) {
           scheduleResume(currentSession, 250);
           return;
@@ -1708,6 +1740,133 @@ function App() {
       waitingRemoteTimersRef.current.delete(runId);
     }
   }, [loaded, sessions, streamResponse]);
+
+  // Browser timers can be throttled or discarded while a tab is backgrounded.
+  // Reconcile visible waiting sessions with the server independently of the
+  // deadline timer so a server-owned wake-up cannot finish without the final
+  // events being replayed into the conversation UI.
+  useEffect(() => {
+    if (!loaded || factoryResetInProgressRef.current) return undefined;
+    const controller = new AbortController();
+    let disposed = false;
+
+    const reconcileWaitingRuns = async () => {
+      if (
+        disposed
+        || controller.signal.aborted
+        || factoryResetInProgressRef.current
+        || document.visibilityState === 'hidden'
+      ) return;
+
+      const waitingSessions = sessionsRef.current.filter((session) => (
+        session.remoteRun?.status === 'waiting'
+        && session.remoteRun.id
+        && session.remoteRun.url
+        && !deletedSessionIdsRef.current.has(session.id)
+      ));
+
+      await Promise.all(waitingSessions.map(async (session) => {
+        const runId = session.remoteRun.id;
+        if (
+          probingWaitingRunsRef.current.has(runId)
+          || resumingWaitingRunsRef.current.has(runId)
+          || sessionRunsRef.current.has(session.id)
+          || pendingStreamStartsRef.current.has(session.id)
+          || sessionStopPromisesRef.current.has(session.id)
+        ) return;
+
+        probingWaitingRunsRef.current.add(runId);
+        try {
+          const remoteRun = await getRemoteAgentRun(
+            session.remoteRun.url,
+            runId,
+            Number(session.remoteRun.sequence) || 0,
+            controller.signal
+          );
+          if (disposed || controller.signal.aborted) return;
+
+          if (remoteRun.status === 'waiting') {
+            setSessions((prev) => prev.map((item) => {
+              if (item.id !== session.id || item.remoteRun?.id !== runId) return item;
+              const sequence = Number(remoteRun.sequence) || item.remoteRun.sequence || 0;
+              const currentWakeup = item.remoteRun.wakeup;
+              const nextWakeup = remoteRun.wakeup || currentWakeup;
+              if (
+                item.remoteRun.sequence === sequence
+                && currentWakeup?.id === nextWakeup?.id
+                && currentWakeup?.runAtMs === nextWakeup?.runAtMs
+                && currentWakeup?.prompt === nextWakeup?.prompt
+              ) return item;
+              return {
+                ...item,
+                remoteRun: {
+                  ...item.remoteRun,
+                  status: 'waiting',
+                  sequence,
+                  ...(nextWakeup ? { wakeup: nextWakeup } : {}),
+                },
+              };
+            }));
+            return;
+          }
+
+          const currentSession = sessionsRef.current.find((item) => item.id === session.id);
+          if (
+            !currentSession
+            || currentSession.remoteRun?.id !== runId
+            || currentSession.remoteRun.status !== 'waiting'
+            || deletedSessionIdsRef.current.has(currentSession.id)
+            || sessionRunsRef.current.has(currentSession.id)
+            || pendingStreamStartsRef.current.has(currentSession.id)
+            || sessionStopPromisesRef.current.has(currentSession.id)
+            || resumingWaitingRunsRef.current.has(runId)
+          ) return;
+
+          const waitingTimer = waitingRemoteTimersRef.current.get(runId);
+          if (waitingTimer) clearTimeout(waitingTimer);
+          waitingRemoteTimersRef.current.delete(runId);
+          resumingWaitingRunsRef.current.add(runId);
+          try {
+            const runMessages = currentSession.messages || await loadSessionMessages(currentSession.id);
+            await streamResponse(currentSession.id, runMessages, {
+              agentId: currentSession.agentId,
+              llmProfileId: currentSession.llmProfileId,
+              sandboxUrl: currentSession.remoteRun.url,
+              resumeRunId: runId,
+              replyId: currentSession.remoteRun.replyId,
+            });
+          } finally {
+            resumingWaitingRunsRef.current.delete(runId);
+          }
+        } catch (error) {
+          if (error?.name !== 'AbortError' && !disposed) {
+            console.warn('Waiting sandbox run reconciliation failed:', error);
+          }
+        } finally {
+          probingWaitingRunsRef.current.delete(runId);
+        }
+      }));
+    };
+
+    const intervalId = setInterval(() => {
+      void reconcileWaitingRuns();
+    }, REMOTE_WAITING_RECONCILE_MS);
+    const onFocus = () => { void reconcileWaitingRuns(); };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') void reconcileWaitingRuns();
+    };
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    void reconcileWaitingRuns();
+
+    return () => {
+      disposed = true;
+      controller.abort();
+      clearInterval(intervalId);
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [loaded, streamResponse]);
 
   // A page can close in the narrow interval before the returned run id is
   // flushed to OPFS. Discover server-owned runs by session id as a fallback.
@@ -1770,6 +1929,7 @@ function App() {
               id: latest.id,
               url: agent.sandboxUrl,
               replyId: latest.replyId,
+              sequence: Number(latest.sequence) || 0,
               // Mark completed discoveries as pending once so streamResponse
               // fetches their event log and durable result.
               status: latest.status === 'waiting' ? 'waiting' : 'running',
@@ -1798,6 +1958,8 @@ function App() {
     cancelPendingStreamStarts({ notify: false });
     for (const timerId of waitingRemoteTimersRef.current.values()) clearTimeout(timerId);
     waitingRemoteTimersRef.current.clear();
+    probingWaitingRunsRef.current.clear();
+    resumingWaitingRunsRef.current.clear();
     for (const timerId of remoteResumeRetryTimersRef.current.values()) clearTimeout(timerId);
     remoteResumeRetryTimersRef.current.clear();
     for (const timerId of remoteAbortRetryTimersRef.current.values()) clearTimeout(timerId);

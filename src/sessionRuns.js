@@ -47,6 +47,12 @@ export function createSessionRunRegistry({
   return {
     begin,
     finish,
+    enqueueIfCurrent(sessionId, record, enqueue) {
+      const id = String(sessionId || '');
+      if (!record || runs.get(id) !== record) return false;
+      enqueue();
+      return true;
+    },
     get(sessionId) {
       return runs.get(String(sessionId || '')) || null;
     },

@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { simulateReadableStream } from 'ai';
+import { MockLanguageModelV3 } from 'ai/test';
 import { createAgentRunManager, createRuntimeToolDispatcher, materializeMessageImages, materializeRuntimeFiles, REMOTE_TOOL_SCHEMAS } from './agent-runtime.js';
 
 function createManager(runsDir, overrides = {}) {
@@ -21,12 +23,22 @@ function createManager(runsDir, overrides = {}) {
 }
 
 async function waitForRunStatus(manager, id, expected) {
-  for (let attempt = 0; attempt < 50; attempt += 1) {
+  for (let attempt = 0; attempt < 250; attempt += 1) {
     const run = manager.get(id);
     if (run?.status === expected) return run;
-    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setTimeout(resolve, 2));
   }
   assert.fail(`Run ${id} did not reach ${expected}; current status is ${manager.get(id)?.status}`);
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
 }
 
 test('sandbox runtime exposes no browser-owned tools', () => {
@@ -154,6 +166,315 @@ test('sandbox run reuses duplicate wake-ups and replaces a changed request in on
     await manager.abort(started.id);
     await waitForRunStatus(manager, started.id, 'aborted');
   } finally {
+    rmSync(runsDir, { recursive: true, force: true });
+  }
+});
+
+test('sandbox run enters waiting and resumes after a real agent-loop wake-up', async () => {
+  const runsDir = mkdtempSync(join(tmpdir(), 'vertex-runs-'));
+  let releaseWakeup;
+  const wakeupGate = new Promise((resolve) => { releaseWakeup = resolve; });
+  let modelCallCount = 0;
+  const usage = {
+    inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
+    outputTokens: { total: 1, text: 1, reasoning: 0 },
+  };
+  const model = new MockLanguageModelV3({
+    doStream: async () => {
+      modelCallCount += 1;
+      const chunks = modelCallCount === 1
+        ? [
+            { type: 'stream-start', warnings: [] },
+            {
+              type: 'tool-call',
+              toolCallId: 'call-wakeup',
+              toolName: 'schedule_wakeup',
+              input: JSON.stringify({ delay: 30, unit: 'seconds', prompt: 'continue the task' }),
+            },
+            { type: 'finish', finishReason: { unified: 'tool-calls' }, usage },
+          ]
+        : [
+            { type: 'stream-start', warnings: [] },
+            { type: 'text-start', id: 'answer' },
+            { type: 'text-delta', id: 'answer', delta: 'awake' },
+            { type: 'text-end', id: 'answer' },
+            { type: 'finish', finishReason: { unified: 'stop' }, usage },
+          ];
+      return {
+        stream: simulateReadableStream({
+          chunks,
+          initialDelayInMs: null,
+          chunkDelayInMs: null,
+        }),
+      };
+    },
+  });
+
+  try {
+    const manager = createManager(runsDir, {
+      createModel: () => model,
+      waitUntilWakeup: () => wakeupGate,
+    });
+    const started = manager.start({
+      runId: 'run-wakeup-resume',
+      sessionId: 'session-wakeup-resume',
+      replyId: 'reply-wakeup-resume',
+      messages: [{ role: 'user', content: 'wake in 30 seconds' }],
+      modelConfig: { provider: 'openai', model: 'test', apiKey: 'test' },
+      runtimeContext: { memorySnapshot: { memory: null, user: null } },
+    });
+
+    const waiting = await waitForRunStatus(manager, started.id, 'waiting');
+    assert.equal(modelCallCount, 1);
+    assert.equal(waiting.wakeup.prompt, 'continue the task');
+    assert.equal(
+      manager.get(started.id).events.find((event) => event.type === 'tool-result')?.status,
+      'completed'
+    );
+
+    releaseWakeup();
+    const completed = await waitForRunStatus(manager, started.id, 'completed');
+    assert.equal(modelCallCount, 2);
+    assert.equal(completed.result.content, 'awake');
+    assert.equal(completed.wakeup, null);
+  } finally {
+    releaseWakeup?.();
+    rmSync(runsDir, { recursive: true, force: true });
+  }
+});
+
+test('sandbox run enters waiting when the provider leaves the wake-up stream open', async () => {
+  const runsDir = mkdtempSync(join(tmpdir(), 'vertex-runs-'));
+  const model = new MockLanguageModelV3({
+    doStream: async () => ({
+      stream: new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: 'stream-start', warnings: [] });
+          controller.enqueue({
+            type: 'tool-call',
+            toolCallId: 'call-stalled-wakeup',
+            toolName: 'schedule_wakeup',
+            input: JSON.stringify({ delay: 5, unit: 'seconds', prompt: 'continue after the open stream' }),
+          });
+          // Intentionally no finish chunk and no close().
+        },
+      }),
+    }),
+  });
+
+  try {
+    const manager = createManager(runsDir, {
+      createModel: () => model,
+      waitUntilWakeup: (_runAtMs, signal) => new Promise((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true });
+      }),
+    });
+    const started = manager.start({
+      runId: 'run-stalled-wakeup',
+      sessionId: 'session-stalled-wakeup',
+      replyId: 'reply-stalled-wakeup',
+      messages: [{ role: 'user', content: 'wake even if the provider stream stalls' }],
+      modelConfig: { provider: 'openai', model: 'test', apiKey: 'test' },
+      runtimeContext: { memorySnapshot: { memory: null, user: null } },
+    });
+
+    const waiting = await waitForRunStatus(manager, started.id, 'waiting');
+    assert.equal(waiting.wakeup.prompt, 'continue after the open stream');
+    assert.equal(
+      waiting.events.find((event) => event.type === 'tool-result' && event.toolName === 'schedule_wakeup')?.status,
+      'completed'
+    );
+    await manager.abort(started.id);
+    await waitForRunStatus(manager, started.id, 'aborted');
+  } finally {
+    rmSync(runsDir, { recursive: true, force: true });
+  }
+});
+
+test('schedule_wakeup bypasses a blocking tool in the same model step', async () => {
+  const runsDir = mkdtempSync(join(tmpdir(), 'vertex-runs-'));
+  let commandStarted = false;
+  let commandAborted = false;
+  const usage = {
+    inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
+    outputTokens: { total: 1, text: 1, reasoning: 0 },
+  };
+  const model = new MockLanguageModelV3({
+    doStream: async () => ({
+      stream: new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: 'stream-start', warnings: [] });
+          controller.enqueue({
+            type: 'tool-call',
+            toolCallId: 'call-blocking-command',
+            toolName: 'execute_command',
+            input: JSON.stringify({ command: 'long-running-command' }),
+          });
+          setTimeout(() => {
+            controller.enqueue({
+              type: 'tool-call',
+              toolCallId: 'call-priority-wakeup',
+              toolName: 'schedule_wakeup',
+              input: JSON.stringify({ delay: 30, unit: 'seconds', prompt: 'check the background command' }),
+            });
+            controller.enqueue({ type: 'finish', finishReason: { unified: 'tool-calls' }, usage });
+            controller.close();
+          }, 10);
+        },
+      }),
+    }),
+  });
+
+  try {
+    const manager = createManager(runsDir, {
+      createModel: () => model,
+      execCommand: async (_command, { signal }) => {
+        commandStarted = true;
+        return new Promise((_resolve, reject) => {
+          signal.addEventListener('abort', () => {
+            commandAborted = true;
+            reject(new DOMException('Aborted', 'AbortError'));
+          }, { once: true });
+        });
+      },
+      waitUntilWakeup: (_runAtMs, signal) => new Promise((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true });
+      }),
+    });
+    const started = manager.start({
+      runId: 'run-priority-wakeup',
+      sessionId: 'session-priority-wakeup',
+      replyId: 'reply-priority-wakeup',
+      messages: [{ role: 'user', content: 'start work and wake later' }],
+      modelConfig: { provider: 'openai', model: 'test', apiKey: 'test' },
+      runtimeContext: { memorySnapshot: { memory: null, user: null } },
+    });
+
+    const waiting = await waitForRunStatus(manager, started.id, 'waiting');
+    assert.equal(commandStarted, true);
+    assert.equal(commandAborted, true);
+    assert.equal(waiting.wakeup.prompt, 'check the background command');
+    assert.equal(
+      waiting.events.find((event) => event.type === 'tool-result' && event.toolName === 'schedule_wakeup')?.status,
+      'completed'
+    );
+    await manager.abort(started.id);
+    await waitForRunStatus(manager, started.id, 'aborted');
+  } finally {
+    rmSync(runsDir, { recursive: true, force: true });
+  }
+});
+
+test('late output from a pre-wakeup turn cannot pollute the resumed turn', async () => {
+  const runsDir = mkdtempSync(join(tmpdir(), 'vertex-runs-'));
+  const oldCommandGate = deferred();
+  const lateOutputAttempted = deferred();
+  let modelCallCount = 0;
+  let resumedCommandStarted = false;
+  const usage = {
+    inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
+    outputTokens: { total: 1, text: 1, reasoning: 0 },
+  };
+  const model = new MockLanguageModelV3({
+    doStream: async () => {
+      modelCallCount += 1;
+      if (modelCallCount === 1) {
+        return {
+          stream: new ReadableStream({
+            start(controller) {
+              controller.enqueue({ type: 'stream-start', warnings: [] });
+              controller.enqueue({
+                type: 'tool-call',
+                toolCallId: 'call-old-command',
+                toolName: 'execute_command',
+                input: JSON.stringify({ command: 'old-command' }),
+              });
+              setTimeout(() => {
+                controller.enqueue({
+                  type: 'tool-call',
+                  toolCallId: 'call-turn-wakeup',
+                  toolName: 'schedule_wakeup',
+                  input: JSON.stringify({ delay: 5, unit: 'seconds', prompt: 'start the resumed turn' }),
+                });
+                controller.enqueue({ type: 'finish', finishReason: { unified: 'tool-calls' }, usage });
+                controller.close();
+              }, 10);
+            },
+          }),
+        };
+      }
+      return {
+        stream: simulateReadableStream({
+          chunks: [
+            { type: 'stream-start', warnings: [] },
+            {
+              type: 'tool-call',
+              toolCallId: 'call-resumed-command',
+              toolName: 'execute_command',
+              input: JSON.stringify({ command: 'resumed-command' }),
+            },
+            { type: 'finish', finishReason: { unified: 'tool-calls' }, usage },
+          ],
+          initialDelayInMs: null,
+          chunkDelayInMs: null,
+        }),
+      };
+    },
+  });
+
+  try {
+    const manager = createManager(runsDir, {
+      createModel: () => model,
+      execCommand: async (command, options) => {
+        if (command === 'old-command') {
+          // Deliberately ignore options.signal. This models a provider/tool
+          // implementation that completes after its turn was preempted.
+          await oldCommandGate.promise;
+          setTimeout(() => {
+            let callbackError = null;
+            try {
+              options.onStdout?.('LATE_OLD_OUTPUT');
+            } catch (error) {
+              callbackError = error;
+            } finally {
+              lateOutputAttempted.resolve(callbackError);
+            }
+          }, 0);
+          return { stdout: 'LATE_OLD_RESULT', stderr: '', code: 0 };
+        }
+        resumedCommandStarted = true;
+        return new Promise((_resolve, reject) => {
+          options.signal.addEventListener('abort', () => {
+            reject(new DOMException('Aborted', 'AbortError'));
+          }, { once: true });
+        });
+      },
+      waitUntilWakeup: async () => {},
+    });
+    const started = manager.start({
+      runId: 'run-turn-epoch',
+      sessionId: 'session-turn-epoch',
+      replyId: 'reply-turn-epoch',
+      messages: [{ role: 'user', content: 'run across a wake-up boundary' }],
+      modelConfig: { provider: 'openai', model: 'test', apiKey: 'test' },
+      runtimeContext: { memorySnapshot: { memory: null, user: null } },
+    });
+
+    for (let attempt = 0; attempt < 100 && !resumedCommandStarted; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 2));
+    }
+    assert.equal(resumedCommandStarted, true);
+    assert.equal(manager.get(started.id).status, 'running');
+
+    oldCommandGate.resolve();
+    assert.equal(await lateOutputAttempted.promise, null);
+    const afterLateCompletion = manager.get(started.id);
+    assert.doesNotMatch(JSON.stringify(afterLateCompletion.events), /LATE_OLD_(?:OUTPUT|RESULT)/);
+
+    await manager.abort(started.id);
+    await waitForRunStatus(manager, started.id, 'aborted');
+  } finally {
+    oldCommandGate.resolve();
     rmSync(runsDir, { recursive: true, force: true });
   }
 });
@@ -456,7 +777,7 @@ test('sandbox abort returns within a bound when a provider ignores cancellation'
   }
 });
 
-test('a cancelled sandbox run rejects late events and cannot become completed', async () => {
+test('a cancelled sandbox run drops detached late events and cannot become completed', async () => {
   const runsDir = mkdtempSync(join(tmpdir(), 'vertex-runs-'));
   try {
     let activeRun;
@@ -479,10 +800,12 @@ test('a cancelled sandbox run rejects late events and cannot become completed', 
     await new Promise((resolve) => setImmediate(resolve));
     await manager.abort(started.id);
 
-    assert.throws(
-      () => activeRun.onEvent({ type: 'text-delta', text: 'too late' }),
-      (error) => error?.name === 'AbortError'
-    );
+    await new Promise((resolve) => {
+      setTimeout(() => {
+        activeRun.onEvent({ type: 'text-delta', text: 'too late' });
+        resolve();
+      }, 0);
+    });
     activeRun.resolve({ content: 'must not complete' });
     const aborted = await waitForRunStatus(manager, started.id, 'aborted');
 

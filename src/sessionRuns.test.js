@@ -44,6 +44,53 @@ test('a stale completion cannot clear a newer run for the same session', () => {
   assert.equal(registry.finish('session-a', second), true);
 });
 
+test('a terminal state update queued by the current run survives later cleanup', () => {
+  const registry = createSessionRunRegistry();
+  const run = registry.begin('session-a');
+  const queued = [];
+  let state = { remoteStatus: 'running', toolStatus: 'running' };
+
+  assert.equal(registry.enqueueIfCurrent('session-a', run, () => {
+    queued.push((current) => ({
+      ...current,
+      remoteStatus: 'waiting',
+      toolStatus: 'completed',
+    }));
+  }), true);
+  assert.equal(registry.finish('session-a', run), true);
+
+  // React functional updaters can run after finish() because state updates are
+  // batched. Ownership was established at enqueue time, so the terminal state
+  // must still be applied.
+  for (const update of queued) state = update(state);
+  assert.deepEqual(state, { remoteStatus: 'waiting', toolStatus: 'completed' });
+
+  const replacement = registry.begin('session-a');
+  assert.equal(registry.enqueueIfCurrent('session-a', run, () => queued.push(() => state)), false);
+  assert.equal(registry.finish('session-a', replacement), true);
+});
+
+test('a replacement run update remains newer than an already queued terminal update', () => {
+  const registry = createSessionRunRegistry();
+  const queued = [];
+  let state = { remoteStatus: 'running-old' };
+  const first = registry.begin('session-a');
+
+  registry.enqueueIfCurrent('session-a', first, () => {
+    queued.push((current) => ({ ...current, remoteStatus: 'waiting-old' }));
+  });
+  registry.finish('session-a', first);
+
+  const replacement = registry.begin('session-a');
+  registry.enqueueIfCurrent('session-a', replacement, () => {
+    queued.push((current) => ({ ...current, remoteStatus: 'running-new' }));
+  });
+
+  for (const update of queued) state = update(state);
+  assert.equal(state.remoteStatus, 'running-new');
+  registry.finish('session-a', replacement);
+});
+
 test('abortAll signals every active session and returns every completion', async () => {
   const registry = createSessionRunRegistry();
   const first = registry.begin('session-a');

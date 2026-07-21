@@ -157,6 +157,7 @@ export function createAgentRunManager({
   fileExists,
   runAgent = runAgentLoop,
   createModel = createLanguageModel,
+  waitUntilWakeup = waitForWakeup,
   abortWaitMs = RUN_ABORT_WAIT_MS,
   maxEventBytes = MAX_EVENT_BYTES,
 }) {
@@ -283,39 +284,59 @@ export function createAgentRunManager({
         throwIfRunCancelled(run);
         const modelConfig = input.modelConfig;
         let result;
+        let activeTurnToken = null;
         while (true) {
+          const turnToken = {};
+          activeTurnToken = turnToken;
           let scheduledWakeup = null;
-          result = await runAgent({
-            messages: runtimeMessages,
-            systemPrompt: input.systemPrompt || '',
-            agentId: input.agentId || null,
-            provider: modelConfig.provider,
-            model: modelConfig.model,
-            contextWindow: modelConfig.contextWindow || undefined,
-            maxRounds: input.maxRounds,
-            signal: run.controller.signal,
-            languageModel: createModel(modelConfig),
-            runtimeContext: normalizeRuntimeContext(input.runtimeContext),
-            toolSchemas: REMOTE_TOOL_SCHEMAS,
-            dispatchTool,
-            scheduleWakeup: async ({ delaySeconds, prompt }) => {
-              throwIfRunCancelled(run);
-              scheduledWakeup = createOrReplaceTurnWakeup({
-                currentWakeup: scheduledWakeup,
-                id: scheduledWakeup?.id || `wake-${randomUUID()}`,
-                delaySeconds,
-                prompt,
-              });
-              return scheduledWakeup;
-            },
-            autoSummarize: false,
-            runtimeMode: 'sandbox',
-            onEvent: (event) => {
-              if (run.status !== 'running') throw createRunAbortError();
-              throwIfRunCancelled(run);
-              emit(run, event);
-            },
-          });
+          try {
+            result = await runAgent({
+              messages: runtimeMessages,
+              systemPrompt: input.systemPrompt || '',
+              agentId: input.agentId || null,
+              provider: modelConfig.provider,
+              model: modelConfig.model,
+              contextWindow: modelConfig.contextWindow || undefined,
+              maxRounds: input.maxRounds,
+              signal: run.controller.signal,
+              languageModel: createModel(modelConfig),
+              runtimeContext: normalizeRuntimeContext(input.runtimeContext),
+              toolSchemas: REMOTE_TOOL_SCHEMAS,
+              dispatchTool,
+              scheduleWakeup: async ({ delaySeconds, prompt }) => {
+                if (activeTurnToken !== turnToken) throw createRunAbortError();
+                throwIfRunCancelled(run);
+                scheduledWakeup = createOrReplaceTurnWakeup({
+                  currentWakeup: scheduledWakeup,
+                  id: scheduledWakeup?.id || `wake-${randomUUID()}`,
+                  delaySeconds,
+                  prompt,
+                });
+                return scheduledWakeup;
+              },
+              autoSummarize: false,
+              runtimeMode: 'sandbox',
+              onEvent: (event) => {
+                // A provider or tool may ignore the per-turn abort and report
+                // late output after the scheduled continuation has begun. A
+                // run-level status check alone cannot distinguish those turns.
+                // Drop stale callback output instead of throwing: callbacks
+                // from an EventEmitter/setTimeout may live outside the tool's
+                // promise chain, where a throw would become an uncaughtException
+                // and terminate the entire agent server.
+                if (
+                  activeTurnToken !== turnToken
+                  || run.status !== 'running'
+                  || run.cancelRequested
+                  || !run.controller
+                  || run.controller.signal.aborted
+                ) return;
+                emit(run, event);
+              },
+            });
+          } finally {
+            if (activeTurnToken === turnToken) activeTurnToken = null;
+          }
 
           throwIfRunCancelled(run);
           run.result = result;
@@ -325,7 +346,7 @@ export function createAgentRunManager({
           run.wakeup = scheduledWakeup;
           run.updatedAt = new Date().toISOString();
           persist(run);
-          await waitForWakeup(scheduledWakeup.runAtMs, run.controller.signal);
+          await waitUntilWakeup(scheduledWakeup.runAtMs, run.controller.signal);
           throwIfRunCancelled(run);
 
           run.status = 'running';

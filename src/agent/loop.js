@@ -22,8 +22,12 @@ import { getAgent, getWorkspaceDirName } from '../agents/agents.js';
 
 const DEFAULT_MAX_ROUNDS = 40;
 const ABSOLUTE_MAX_ROUNDS = 80;
+const DEFAULT_MODEL_MAX_RETRIES = 2;
+const ABSOLUTE_MODEL_MAX_RETRIES = 5;
 const MAX_CONTINUATION_GUARDS = 2;
 const STREAMING_TOOL_OUTPUT_MAX_CHARS = 80_000;
+const WAKEUP_SCHEDULED_CONTROL_CODE = 'VERTEX_WAKEUP_SCHEDULED';
+const WAKEUP_SCHEDULED_CONTROL_BRAND = Symbol('vertex-wakeup-scheduled');
 
 const CONTINUATION_INTENT_RE =
   /\b(?:wait(?:ing)?|poll|check(?:ing)?|download(?:ing)?|compare|continue|next step|not (?:done|finished|complete)|after .*complete|once .*complete)\b|(?:等待|生成完成后|完成后|下载|对比|继续|下一步|稍后|轮生成任务)/i;
@@ -54,6 +58,7 @@ const FINALIZE_PROMPT =
  * the current conversation. When omitted, the scheduling tool is hidden.
  * @param {AbortSignal} [opts.signal]
  * @param {number} [opts.maxRounds]
+ * @param {number} [opts.modelMaxRetries]
  * @returns {Promise<{ content: string, thinking: string, toolCalls: Array, usage: Object|null }>}
  */
 export async function runAgentLoop(opts) {
@@ -70,6 +75,7 @@ export async function runAgentLoop(opts) {
   } = opts;
 
   const maxRounds = normalizeMaxRounds(opts.maxRounds);
+  const modelMaxRetries = normalizeModelMaxRetries(opts.modelMaxRetries);
   const runtimeContext = opts.runtimeContext || await prepareAgentRuntimeContext(agentId);
   const workspaceDirName = runtimeContext.workspaceDirName;
   const activeAgent = runtimeContext.activeAgent;
@@ -84,22 +90,6 @@ export async function runAgentLoop(opts) {
     subAgentDepth,
     scheduleWakeup: opts.scheduleWakeup,
   });
-  const toolContext = {
-    agentUrl,
-    agentId,
-    agentName: activeAgent?.name || workspaceDirName,
-    agentWorkspace: workspaceDirName,
-    llmProfileId: opts.llmProfileId,
-    provider: opts.provider,
-    model: opts.model,
-    contextWindow,
-    subAgentDepth,
-    signal,
-    onPermissionRequest,
-    scheduleWakeup: opts.scheduleWakeup,
-    toolLoopGuard: createToolLoopGuard(),
-    dispatchTool: opts.dispatchTool || ((name, input, context) => registry.dispatch(name, input, context)),
-  };
   const packed = await assembleApiMessages({
     messages,
     systemPrompt,
@@ -113,6 +103,42 @@ export async function runAgentLoop(opts) {
     autoSummarize: opts.autoSummarize !== false,
     runtimeMode: opts.runtimeMode || 'browser',
   });
+
+  // Sleeping ends only this model/tool turn. The caller's signal continues to
+  // own the durable run so the sandbox can start a fresh turn at the deadline.
+  const turn = createTurnController(signal, typeof opts.scheduleWakeup === 'function');
+  const loopControl = {
+    wakeupScheduled: false,
+    wakeup: null,
+    parentAborted: () => Boolean(signal?.aborted),
+    abortTurn: () => turn.abort(createWakeupScheduledControl()),
+  };
+  const toolContext = {
+    agentUrl,
+    agentId,
+    agentName: activeAgent?.name || workspaceDirName,
+    agentWorkspace: workspaceDirName,
+    llmProfileId: opts.llmProfileId,
+    provider: opts.provider,
+    model: opts.model,
+    contextWindow,
+    subAgentDepth,
+    signal: turn.signal,
+    onPermissionRequest,
+    scheduleWakeup: typeof opts.scheduleWakeup === 'function'
+      ? async (request) => {
+        const wakeup = await opts.scheduleWakeup(request);
+        if (wakeup) {
+          loopControl.wakeupScheduled = true;
+          loopControl.wakeup = wakeup;
+        }
+        return wakeup;
+      }
+      : undefined,
+    loopControl,
+    toolLoopGuard: createToolLoopGuard(),
+    dispatchTool: opts.dispatchTool || ((name, input, context) => registry.dispatch(name, input, context)),
+  };
 
   const runId = createAgentRunId();
   const lifecycle = { stepIndex: 0, currentStepId: null };
@@ -135,14 +161,13 @@ export async function runAgentLoop(opts) {
     });
   };
 
-  emit({
-    type: 'run-start',
-    maxRounds,
-    contextWindow,
-    estimatedInputTokens: packed.estimatedTokens,
-  });
-
   try {
+    emit({
+      type: 'run-start',
+      maxRounds,
+      contextWindow,
+      estimatedInputTokens: packed.estimatedTokens,
+    });
     const model = opts.languageModel || llm.getLanguageModel(opts.llmProfileId);
     const tools = createAgentTools(schemas, toolContext, emit);
     const initial = await consumeAgentStream({
@@ -151,17 +176,19 @@ export async function runAgentLoop(opts) {
       system: packed.systemPrompt,
       tools,
       maxRounds,
+      modelMaxRetries,
       contextWindow,
-      signal,
+      signal: turn.signal,
       emit,
       lifecycle,
+      loopControl,
     });
 
     let latestRun = initial;
     let responseMessages = [...initial.responseMessages];
     let latestUsage = initial.usage;
     let totalUsage = initial.totalUsage;
-    let modelCallCount = initial.steps.length;
+    let modelCallCount = initial.modelCallCount ?? initial.steps.length;
     let continuationGuardCount = 0;
 
     while (modelCallCount < maxRounds && shouldContinueWithoutToolCall(latestRun, schemas, continuationGuardCount)) {
@@ -176,21 +203,23 @@ export async function runAgentLoop(opts) {
         system: packed.systemPrompt,
         tools,
         maxRounds: Math.max(1, maxRounds - modelCallCount),
+        modelMaxRetries,
         contextWindow,
-        signal,
+        signal: turn.signal,
         emit,
         lifecycle,
+        loopControl,
       });
       latestRun = continuation;
       responseMessages.push(...continuation.responseMessages);
       latestUsage = continuation.usage || latestUsage;
       totalUsage = addUsage(totalUsage, continuation.totalUsage);
-      modelCallCount += continuation.steps.length;
+      modelCallCount += continuation.modelCallCount ?? continuation.steps.length;
     }
 
     // `stepCountIs` ends on a tool-call step. Give the model one tool-free turn
     // to report a useful status, matching the old loop's bounded finalizer.
-    if (latestRun.finishReason === 'tool-calls' && !signal?.aborted) {
+    if (latestRun.finishReason === 'tool-calls' && !loopControl.wakeupScheduled && !signal?.aborted) {
       const finalizer = await consumeAgentStream({
         model,
         messages: [
@@ -201,15 +230,17 @@ export async function runAgentLoop(opts) {
         system: packed.systemPrompt,
         tools: {},
         maxRounds: 1,
+        modelMaxRetries,
         contextWindow,
-        signal,
+        signal: turn.signal,
         emit,
         lifecycle,
+        loopControl,
       });
       latestRun = finalizer;
       latestUsage = finalizer.usage || latestUsage;
       totalUsage = addUsage(totalUsage, finalizer.totalUsage);
-      modelCallCount += finalizer.steps.length;
+      modelCallCount += finalizer.modelCallCount ?? finalizer.steps.length;
     }
 
     throwIfAborted(signal);
@@ -221,26 +252,36 @@ export async function runAgentLoop(opts) {
       modelCallCount,
     });
 
-    return {
-      content: state.content,
-      thinking: state.thinking,
-      toolCalls: state.toolCalls,
-      usage,
-      run: {
-        id: runId,
-        status: state.status,
-        finishReason: state.finishReason,
-        steps: state.steps,
-        compactions: state.compactions,
-      },
-    };
-  } catch (err) {
+    return buildAgentLoopResult({ state, runId, usage });
+  } catch (caughtError) {
+    const err = enrichEmptyCauseMessage(asError(caughtError));
+    if (loopControl.wakeupScheduled && !signal?.aborted) {
+      loopControl.abortTurn();
+      if (lifecycle.currentStepId) {
+        emit({
+          type: 'step-finish',
+          stepId: lifecycle.currentStepId,
+          finishReason: 'tool-calls',
+        });
+        lifecycle.currentStepId = null;
+      }
+      const usage = state.usage || null;
+      emit({
+        type: 'run-finish',
+        usage,
+        finishReason: 'tool-calls',
+        modelCallCount: Math.max(1, lifecycle.stepIndex),
+      });
+      return buildAgentLoopResult({ state, runId, usage });
+    }
     if (isAbortError(err) || signal?.aborted) {
       emit({ type: 'run-abort', reason: err?.message || 'aborted' });
     } else {
       emit({ type: 'run-error', error: err });
     }
     throw err;
+  } finally {
+    turn.dispose();
   }
 }
 
@@ -296,14 +337,19 @@ function createAgentTools(schemas, toolContext, emit) {
       description: schema.description,
       inputSchema: jsonSchema(schema.parameters || { type: 'object', properties: {} }),
       execute: (input, execution) => {
-        const scheduled = executionTail.then(() => executeAgentTool({
+        const execute = () => executeAgentTool({
           toolCallId: execution.toolCallId,
           toolName: schema.name,
           input,
           signal: execution.abortSignal || toolContext.signal,
           toolContext,
           emit,
-        }));
+        });
+        // A wake-up is a terminal control action, not a workspace mutation. It
+        // must not wait behind a command that may itself be blocked for hours.
+        if (schema.name === 'schedule_wakeup') return execute();
+
+        const scheduled = executionTail.then(execute);
         executionTail = scheduled.catch(() => {});
         return scheduled;
       },
@@ -368,13 +414,24 @@ async function executeAgentTool({ toolCallId, toolName, input, signal, toolConte
       signal,
       onToolUpdate: updateRunningOutput,
     });
+    // A tool implementation may resolve after ignoring cancellation. Never
+    // publish that stale result into a later wake-up turn.
+    throwIfAborted(signal);
     const output = String(result);
     const summary = formatToolCallSummary(toolName, input, output);
     emit({ type: 'tool-result', ...baseEvent, status: 'completed', output, summary });
+    if (toolName === 'schedule_wakeup' && toolContext.loopControl?.wakeupScheduled) {
+      // AI SDK publishes rejected tool executions immediately. This private
+      // control signal therefore ends the turn even if the provider never
+      // sends a finish chunk or closes its stream. The completed UI event has
+      // already been emitted above and is deliberately kept successful.
+      throw createWakeupScheduledControl(toolContext.loopControl.wakeup);
+    }
     return compactToolResultForModel({ name: toolName, parsedArgs: input }, output, {
       contextWindow: toolContext.contextWindow,
     });
   } catch (err) {
+    if (isWakeupScheduledControl(err)) throw err;
     if (err?.name === 'AbortError') {
       emit({
         type: 'tool-status',
@@ -398,12 +455,30 @@ async function executeAgentTool({ toolCallId, toolName, input, signal, toolConte
   }
 }
 
-async function consumeAgentStream({ model, messages, system, tools, maxRounds, contextWindow, signal, emit, lifecycle }) {
+async function consumeAgentStream({
+  model,
+  messages,
+  system,
+  tools,
+  maxRounds,
+  modelMaxRetries,
+  contextWindow,
+  signal,
+  emit,
+  lifecycle,
+  loopControl,
+}) {
   const result = streamText({
     model,
     messages,
     ...(system ? { system } : {}),
-    ...(Object.keys(tools).length ? { tools, stopWhen: stepCountIs(maxRounds) } : {}),
+    ...(Object.keys(tools).length ? {
+      tools,
+      stopWhen: [
+        stepCountIs(maxRounds),
+        () => loopControl?.wakeupScheduled === true,
+      ],
+    } : {}),
     ...(signal ? { abortSignal: signal } : {}),
     prepareStep: ({ messages: stepMessages }) => {
       const compacted = compactAiMessages(stepMessages, contextWindow);
@@ -419,7 +494,7 @@ async function consumeAgentStream({ model, messages, system, tools, maxRounds, c
       }
       return compacted === stepMessages ? undefined : { messages: compacted };
     },
-    maxRetries: 0,
+    maxRetries: modelMaxRetries,
   });
 
   let finishReason = null;
@@ -494,6 +569,12 @@ async function consumeAgentStream({ model, messages, system, tools, maxRounds, c
         });
         break;
       case 'tool-error':
+        if (
+          part.toolName === 'schedule_wakeup'
+          && loopControl?.wakeupScheduled
+        ) {
+          return finishStreamForWakeup({ loopControl, lifecycle, emit });
+        }
         emit({
           type: 'tool-error',
           toolCallId: part.toolCallId,
@@ -515,8 +596,14 @@ async function consumeAgentStream({ model, messages, system, tools, maxRounds, c
         finishReason = part.finishReason;
         break;
       case 'abort':
+        if (loopControl?.wakeupScheduled && !loopControl.parentAborted?.()) {
+          return finishStreamForWakeup({ loopControl, lifecycle, emit });
+        }
         throw createAbortError(part.reason);
       case 'error':
+        if (loopControl?.wakeupScheduled && !loopControl.parentAborted?.()) {
+          return finishStreamForWakeup({ loopControl, lifecycle, emit });
+        }
         throw asError(part.error);
       default:
         break;
@@ -534,6 +621,80 @@ async function consumeAgentStream({ model, messages, system, tools, maxRounds, c
     usage: normalizeAiUsage(usage),
     totalUsage: normalizeAiUsage(totalUsage),
     responseMessages: steps.flatMap((step) => step.response.messages),
+    modelCallCount: steps.length,
+  };
+}
+
+function finishStreamForWakeup({ loopControl, lifecycle, emit }) {
+  loopControl?.abortTurn?.();
+  if (lifecycle?.currentStepId) {
+    emit({
+      type: 'step-finish',
+      stepId: lifecycle.currentStepId,
+      finishReason: 'tool-calls',
+    });
+    lifecycle.currentStepId = null;
+  }
+  return {
+    finishReason: 'tool-calls',
+    steps: [],
+    usage: null,
+    totalUsage: null,
+    responseMessages: [],
+    modelCallCount: 1,
+  };
+}
+
+function createWakeupScheduledControl(wakeup = null) {
+  const error = new Error('Wake-up scheduled');
+  error.name = 'WakeupScheduledControl';
+  error.code = WAKEUP_SCHEDULED_CONTROL_CODE;
+  error[WAKEUP_SCHEDULED_CONTROL_BRAND] = true;
+  error.wakeup = wakeup;
+  return error;
+}
+
+function isWakeupScheduledControl(error) {
+  return error?.[WAKEUP_SCHEDULED_CONTROL_BRAND] === true;
+}
+
+function buildAgentLoopResult({ state, runId, usage }) {
+  return {
+    content: state.content,
+    thinking: state.thinking,
+    toolCalls: state.toolCalls,
+    usage,
+    run: {
+      id: runId,
+      status: state.status,
+      finishReason: state.finishReason,
+      steps: state.steps,
+      compactions: state.compactions,
+    },
+  };
+}
+
+function createTurnController(parentSignal, enabled) {
+  if (!enabled) {
+    return {
+      signal: parentSignal,
+      abort() {},
+      dispose() {},
+    };
+  }
+  const controller = new AbortController();
+  const relayAbort = () => controller.abort(parentSignal?.reason);
+  if (parentSignal?.aborted) relayAbort();
+  else parentSignal?.addEventListener('abort', relayAbort, { once: true });
+
+  return {
+    signal: controller.signal,
+    abort(reason) {
+      if (!controller.signal.aborted) controller.abort(reason);
+    },
+    dispose() {
+      parentSignal?.removeEventListener('abort', relayAbort);
+    },
   };
 }
 
@@ -683,6 +844,30 @@ function normalizeMaxRounds(value) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_MAX_ROUNDS;
   return Math.min(Math.max(Math.floor(parsed), 1), ABSOLUTE_MAX_ROUNDS);
+}
+
+function normalizeModelMaxRetries(value) {
+  if (value === undefined || value === null || value === '') return DEFAULT_MODEL_MAX_RETRIES;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_MODEL_MAX_RETRIES;
+  return Math.min(Math.floor(parsed), ABSOLUTE_MODEL_MAX_RETRIES);
+}
+
+function enrichEmptyCauseMessage(error) {
+  if (!error?.message || !/:\s*$/.test(error.message)) return error;
+  const cause = error.cause;
+  const detail = cause?.code
+    || String(cause?.message || '').trim()
+    || cause?.errors?.map((item) => item?.code || item?.message).find(Boolean);
+  if (!detail) return error;
+  try {
+    error.message = `${error.message.trimEnd()} ${detail}`;
+    return error;
+  } catch {
+    const enriched = new Error(`${error.message.trimEnd()} ${detail}`, { cause: error });
+    enriched.name = error.name;
+    return enriched;
+  }
 }
 
 function throwIfAborted(signal) {

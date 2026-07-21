@@ -327,6 +327,14 @@
   animation: session-running-pulse 1.6s ease-out infinite;
 }
 
+.session-wakeup-indicator {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--color-accent-strong);
+}
+
 @keyframes session-running-pulse {
   70% {
     box-shadow: 0 0 0 5px transparent;
