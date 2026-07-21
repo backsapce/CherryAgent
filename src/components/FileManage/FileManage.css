@@ -354,6 +354,15 @@
   color: var(--color-text-heading, #222);
 }
 
+/* A direct child of workspace/ without a matching agent is retained data,
+   rather than an active agent workspace. */
+.tree-node.orphaned-agent-workspace > .tree-item .tree-chevron-btn,
+.tree-node.orphaned-agent-workspace > .tree-item .folder-icon,
+.tree-node.orphaned-agent-workspace > .tree-item .tree-label,
+.tree-node.orphaned-agent-workspace > .tree-item .tree-count {
+  color: var(--color-text-quaternary, #9e9e9e);
+}
+
 .tree-selected-badge {
   margin-left: 6px;
   font-size: 12px;

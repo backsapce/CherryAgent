@@ -15,3 +15,9 @@ export function joinFileManagerPath(...parts) {
       .join('/')
   );
 }
+
+export function isOrphanedAgentWorkspace(parentDir, directoryName, agentIds) {
+  if (!(agentIds instanceof Set)) return false;
+  return normalizeFileManagerPath(parentDir) === 'workspace'
+    && !agentIds.has(directoryName);
+}
