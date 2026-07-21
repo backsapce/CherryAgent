@@ -6,7 +6,7 @@ import { suspendAutoSync, waitForSyncIdle } from '../../sync/syncManager';
 import { enqueueStorageOperation } from '../Settings/storageOperationQueue';
 import { ChevronRight, ChevronDown, Folder, File, FilePlus, FolderPlus, Refresh, X, Upload, Cloud, HardDrive, Trash, Download, FileEdit, Spinner, MultiSelect } from '../Icons/Icons';
 import FileEditor from './FileEditor';
-import { joinFileManagerPath, normalizeFileManagerPath } from './pathUtils';
+import { isOrphanedAgentWorkspace, joinFileManagerPath, normalizeFileManagerPath } from './pathUtils';
 import './FileManage.css';
 
 // Breakpoint for mobile/tablet
@@ -44,7 +44,7 @@ function readDraggedTreeItem(dataTransfer) {
   }
 }
 
-const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandboxUrl }) => {
+const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandboxUrl, agents }) => {
   const { t } = useI18n();
   const [fileSource, setFileSource] = useState('local');
   const [isMobile, setIsMobile] = useState(false);
@@ -79,6 +79,9 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandb
   const dropZoneRef = useRef(null);
   const [editorOpen, setEditorOpen] = useState(false);
   const [editingFile, setEditingFile] = useState(null);
+  const agentIds = useMemo(() => (
+    Array.isArray(agents) ? new Set(agents.map((agent) => agent.id)) : null
+  ), [agents]);
 
   // Adapter: local vs remote file operations, eliminates branching in every handler
   const fileOps = useMemo(() => {
@@ -564,6 +567,8 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandb
       const isMultiSelected = isMultiSelectable && multiSelectedItems.has(itemKey);
       const isDropTarget = dropTargetPath === dirPath;
       const isDragging = draggedItem?.key === itemKey;
+      const isOrphanedWorkspace = fileSource === 'local'
+        && isOrphanedAgentWorkspace(nodeParentDir, node.name, agentIds);
       const selectableItem = {
         key: itemKey,
         name: node.name,
@@ -573,7 +578,7 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandb
       };
 
       return (
-        <div key={node.id} className={`tree-node directory-node ${isSelected ? 'selected' : ''} ${isMultiSelectable ? 'multi-selectable' : ''} ${isMultiSelected ? 'multi-selected' : ''} ${isDropTarget ? 'drop-target' : ''} ${isDragging ? 'dragging' : ''}`} style={{ paddingLeft: depth * 8 }}>
+        <div key={node.id} className={`tree-node directory-node ${isSelected ? 'selected' : ''} ${isMultiSelectable ? 'multi-selectable' : ''} ${isMultiSelected ? 'multi-selected' : ''} ${isDropTarget ? 'drop-target' : ''} ${isDragging ? 'dragging' : ''} ${isOrphanedWorkspace ? 'orphaned-agent-workspace' : ''}`} style={{ paddingLeft: depth * 8 }}>
           <div
             className="tree-item"
             draggable={!multiSelectMode && !movingItem && node.id !== ROOT_ID}

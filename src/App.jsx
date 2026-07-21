@@ -2732,6 +2732,7 @@ function App() {
             width={fileManageWidth}
             onWidthChange={setFileManageWidth}
             sandboxUrl={activeSandboxUrl}
+            agents={agentListReady ? agentList : null}
           />
         </Suspense>
       )}
