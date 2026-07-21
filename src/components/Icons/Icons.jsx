@@ -106,6 +106,13 @@ export const X = ({ width = 18, height = 18, className = '' }) => (
   </IconBase>
 );
 
+export const Clock = ({ width = 18, height = 18, className = '', ...props }) => (
+  <IconBase width={width} height={height} viewBox="0 0 24 24" className={className} {...props}>
+    <circle cx="12" cy="12" r="9" />
+    <polyline points="12 7 12 12 15 14" />
+  </IconBase>
+);
+
 export const Refresh = ({ width = 18, height = 18, className = '', ...props }) => (
   <IconBase width={width} height={height} viewBox="0 0 24 24" className={className} {...props}>
     <polyline points="23 4 23 10 17 10" />

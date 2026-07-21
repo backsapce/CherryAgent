@@ -10,6 +10,7 @@ import config from '../config/config.js';
 import { initE2b, cleanupE2b, getSandboxStatus, executeInSandbox, stopSandbox, enableE2b, listE2bFiles, createE2bFile, createE2bDir, deleteE2bFile, moveE2bFile, uploadE2bFile, downloadE2bFile, readE2bFileText, writeE2bFileText } from './e2b.js';
 
 const E2B_AGENT_ID = '__e2b__';
+const REQUIRED_AGENT_RUN_PROTOCOL = 2;
 
 const DEFAULT_AGENT_PATH = '/agent';
 
@@ -176,13 +177,50 @@ function assertRemoteAgentRuntime(url) {
   }
 }
 
+async function assertAgentRunProtocol(url, signal) {
+  const endpoint = resolveAgentUrl(url);
+  const headers = {};
+  const token = getAgentToken(url);
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const res = await fetch(endpoint, {
+    method: 'GET',
+    headers,
+    cache: 'no-store',
+    ...(signal ? { signal } : {}),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data.error || `Agent runtime health check returned ${res.status}`);
+  }
+  const protocol = Number(data.capabilities?.agentRunProtocol) || 0;
+  if (protocol < REQUIRED_AGENT_RUN_PROTOCOL) {
+    throw new Error(
+      `Sandbox runtime is outdated (agent run protocol ${protocol || 'missing'}; ${REQUIRED_AGENT_RUN_PROTOCOL} required). Reinstall and restart vertex-sandbox.`
+    );
+  }
+}
+
 async function requestAgentRun(url, path = '', options = {}) {
   assertRemoteAgentRuntime(url);
   const endpoint = `${resolveAgentUrl(url)}/runs${path}`;
   const headers = { ...(options.body ? { 'Content-Type': 'application/json' } : {}) };
   const token = getAgentToken(url);
   if (token) headers.Authorization = `Bearer ${token}`;
-  const res = await fetch(endpoint, { ...options, headers: { ...headers, ...options.headers } });
+  const method = options.method || 'GET';
+  const requestOptions = {
+    ...options,
+    headers: { ...headers, ...options.headers },
+    ...(method === 'GET' ? { cache: 'no-store' } : {}),
+  };
+  let res = await fetch(endpoint, requestOptions);
+  if (method === 'GET' && res.status === 304) {
+    // A durable run is mutable even when its URL and event cursor are the
+    // same. Some reverse proxies incorrectly revalidate it as a static JSON
+    // resource, leaving fetch with an empty 304 response. Retry once with a
+    // unique URL so the current run state cannot be hidden by that cache.
+    const separator = endpoint.includes('?') ? '&' : '?';
+    res = await fetch(`${endpoint}${separator}_=${Date.now()}`, requestOptions);
+  }
   const data = await res.json().catch(() => ({ error: 'Invalid agent runtime response' }));
   if (!res.ok) {
     const error = new Error(data.error || `Agent runtime returned ${res.status}`);
@@ -193,12 +231,28 @@ async function requestAgentRun(url, path = '', options = {}) {
 }
 
 /** Start a background run that continues after the browser disconnects. */
-export function startRemoteAgentRun(url, input, signal) {
-  return requestAgentRun(url, '', {
-    method: 'POST',
-    body: JSON.stringify(input),
-    ...(signal ? { signal } : {}),
-  });
+export async function startRemoteAgentRun(url, input, signal) {
+  assertRemoteAgentRuntime(url);
+  await assertAgentRunProtocol(url, signal);
+  const body = JSON.stringify(input);
+  try {
+    return await requestAgentRun(url, '', {
+      method: 'POST',
+      body,
+      ...(signal ? { signal } : {}),
+    });
+  } catch (error) {
+    // Callers may probe the client-generated id only after the POST was
+    // attempted. A failed protocol preflight cannot possibly have committed a
+    // run and must not leave a provisional "running" session behind.
+    try {
+      error.agentRunRequestStarted = true;
+    } catch {
+      // A frozen platform error is still safe to surface; omitting the marker
+      // only disables provisional recovery for that request.
+    }
+    throw error;
+  }
 }
 
 /** Read new events and the current durable result for a background run. */

@@ -4,8 +4,10 @@ import {
   abortRemoteAgentRun,
   executeCommand,
   getCommand,
+  getRemoteAgentRun,
   listFiles,
   listRemoteFiles,
+  startRemoteAgentRun,
   startCommand,
   stopCommand,
   waitCommand,
@@ -123,6 +125,161 @@ test('remote run abort forwards its cancellation signal', async () => {
     assert.equal(request.url, 'https://sandbox.example/agent/runs/run%20one');
     assert.equal(request.options.method, 'DELETE');
     assert.equal(request.options.signal, controller.signal);
+  } finally {
+    restore();
+  }
+});
+
+test('remote run polling bypasses caches', async () => {
+  let request = null;
+  const restore = installBrowserMocks(undefined, async (url, options) => {
+    request = { url, options };
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ id: 'run-one', status: 'waiting', sequence: 34 }),
+    };
+  });
+
+  try {
+    const result = await getRemoteAgentRun('https://sandbox.example', 'run-one', 34);
+    assert.equal(result.status, 'waiting');
+    assert.equal(request.url, 'https://sandbox.example/agent/runs/run-one?after=34');
+    assert.equal(request.options.method, 'GET');
+    assert.equal(request.options.cache, 'no-store');
+  } finally {
+    restore();
+  }
+});
+
+test('remote run polling retries an empty 304 with a cache-busting URL', async () => {
+  const requests = [];
+  const restore = installBrowserMocks(undefined, async (url, options) => {
+    requests.push({ url, options });
+    if (requests.length === 1) {
+      return {
+        ok: false,
+        status: 304,
+        json: async () => { throw new Error('304 has no body'); },
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ id: 'run-one', status: 'completed', sequence: 52 }),
+    };
+  });
+
+  try {
+    const result = await getRemoteAgentRun('https://sandbox.example', 'run-one', 34);
+    assert.equal(result.status, 'completed');
+    assert.equal(requests.length, 2);
+    assert.equal(requests[0].url, 'https://sandbox.example/agent/runs/run-one?after=34');
+    assert.match(requests[1].url, /^https:\/\/sandbox\.example\/agent\/runs\/run-one\?after=34&_=[0-9]+$/);
+    assert.equal(requests[1].options.cache, 'no-store');
+  } finally {
+    restore();
+  }
+});
+
+test('sandbox runs reject an outdated agent run protocol before starting', async () => {
+  const requests = [];
+  const restore = installBrowserMocks(undefined, async (url, options) => {
+    requests.push({ url, options });
+    return {
+      ok: true,
+      json: async () => ({
+        status: 'ok',
+        capabilities: { backgroundAgentRuns: true, agentRunProtocol: 1 },
+      }),
+    };
+  });
+
+  try {
+    await assert.rejects(
+      startRemoteAgentRun('https://sandbox.example', { sessionId: 'one' }),
+      /runtime is outdated.*protocol 1.*2 required/i
+    );
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].url, 'https://sandbox.example/agent');
+    assert.equal(requests[0].options.method, 'GET');
+    assert.equal(requests[0].options.cache, 'no-store');
+  } finally {
+    restore();
+  }
+});
+
+test('sandbox runs start after confirming the current agent run protocol', async () => {
+  const requests = [];
+  const restore = installBrowserMocks(undefined, async (url, options) => {
+    requests.push({ url, options });
+    if (options.method === 'GET') {
+      return {
+        ok: true,
+        json: async () => ({
+          status: 'ok',
+          capabilities: { backgroundAgentRuns: true, agentRunProtocol: 2 },
+        }),
+      };
+    }
+    return { ok: true, json: async () => ({ id: 'run-one', status: 'running' }) };
+  });
+
+  try {
+    const result = await startRemoteAgentRun('https://sandbox.example', { sessionId: 'one' });
+    assert.equal(result.id, 'run-one');
+    assert.deepEqual(requests.map((request) => [request.options.method, request.url]), [
+      ['GET', 'https://sandbox.example/agent'],
+      ['POST', 'https://sandbox.example/agent/runs'],
+    ]);
+  } finally {
+    restore();
+  }
+});
+
+test('sandbox run start errors distinguish preflight failure from an attempted POST', async () => {
+  const preflightRequests = [];
+  let restore = installBrowserMocks(undefined, async (url, options) => {
+    preflightRequests.push({ url, options });
+    throw new Error('health check offline');
+  });
+
+  try {
+    await assert.rejects(
+      startRemoteAgentRun('https://sandbox.example', { sessionId: 'one' }),
+      (error) => {
+        assert.match(error.message, /health check offline/);
+        assert.notEqual(error.agentRunRequestStarted, true);
+        return true;
+      }
+    );
+    assert.equal(preflightRequests.length, 1);
+  } finally {
+    restore();
+  }
+
+  const postRequests = [];
+  restore = installBrowserMocks(undefined, async (url, options) => {
+    postRequests.push({ url, options });
+    if (options.method === 'GET') {
+      return {
+        ok: true,
+        json: async () => ({ capabilities: { agentRunProtocol: 2 } }),
+      };
+    }
+    throw new Error('POST response lost');
+  });
+
+  try {
+    await assert.rejects(
+      startRemoteAgentRun('https://sandbox.example', { sessionId: 'one' }),
+      (error) => {
+        assert.match(error.message, /POST response lost/);
+        assert.equal(error.agentRunRequestStarted, true);
+        return true;
+      }
+    );
+    assert.deepEqual(postRequests.map((request) => request.options.method), ['GET', 'POST']);
   } finally {
     restore();
   }
