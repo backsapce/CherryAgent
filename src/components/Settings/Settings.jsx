@@ -1,6 +1,11 @@
 import { useState, useRef, useEffect } from 'react';
 import { checkAgentAvailable, connectAgent } from '../../models/agent';
 import { exportToZip, getOpfsDataStats, importFromZip } from '../../vfs/opfs';
+import {
+  getStoragePersistenceStatus,
+  requestPersistentStorage,
+  STORAGE_PERSISTENCE_STATUS,
+} from '../../vfs/storagePersistence';
 import config from '../../config/config';
 import {
   cancelPendingAutoSync,
@@ -200,6 +205,8 @@ const Settings = ({
   });
   const [syncBusy, setSyncBusy] = useState(null);
   const [syncMessage, setSyncMessage] = useState(null);
+  const [storagePersistence, setStoragePersistence] = useState(null);
+  const [storagePersistenceBusy, setStoragePersistenceBusy] = useState(false);
 
   useEffect(() => {
     setAgentsTabList(agentList);
@@ -359,6 +366,17 @@ const Settings = ({
     setSyncMessage(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [show]);
+
+  useEffect(() => {
+    if (!show || settingsTab !== 'sync') return undefined;
+    let canceled = false;
+    setStoragePersistence(null);
+    getStoragePersistenceStatus()
+      .then((status) => {
+        if (!canceled) setStoragePersistence(status);
+      });
+    return () => { canceled = true; };
+  }, [show, settingsTab]);
 
   const handleAvatarUpload = async (e) => {
     const file = e.target.files?.[0];
@@ -709,11 +727,23 @@ const Settings = ({
     }
   });
 
+  const requestStorageProtection = async () => {
+    setStoragePersistenceBusy(true);
+    try {
+      const status = await requestPersistentStorage();
+      setStoragePersistence(status);
+      return status;
+    } finally {
+      setStoragePersistenceBusy(false);
+    }
+  };
+
   const handleSaveSync = async () => {
     setSyncMessage(null);
     try {
       let next = syncConfigFromForm();
       if (next.enabled) next = validatedSyncConfigForStorage(next);
+      if (next.enabled) await requestStorageProtection();
       await enqueueStorageOperation(() => config.set('sync', next));
       setSyncForm((form) => ({
         ...form,
@@ -732,6 +762,7 @@ const Settings = ({
     setSyncMessage(null);
     try {
       const next = validatedSyncConfigForStorage(syncConfigFromForm());
+      await requestStorageProtection();
       const result = await runWithStorageBarrier(async () => {
         try {
           await config.set('sync', next);
@@ -1429,6 +1460,43 @@ const Settings = ({
               <div className="sync-warning">
                 <AlertTriangle width={16} height={16} />
                 <span>{t('syncSettings.warning')}</span>
+              </div>
+
+              <div className={`sync-storage-protection sync-storage-protection-${storagePersistence || 'checking'}`}>
+                {storagePersistence === STORAGE_PERSISTENCE_STATUS.PERSISTENT
+                  ? <HardDrive width={18} height={18} />
+                  : <AlertTriangle width={18} height={18} />}
+                <div className="sync-storage-protection-copy">
+                  <span className="sync-storage-protection-title">
+                    {t('syncSettings.storageProtectionTitle')}
+                  </span>
+                  <span>
+                    {storagePersistence === STORAGE_PERSISTENCE_STATUS.PERSISTENT
+                      ? t('syncSettings.storageProtectionGranted')
+                      : storagePersistence === STORAGE_PERSISTENCE_STATUS.BEST_EFFORT
+                        ? t('syncSettings.storageProtectionBestEffort')
+                        : storagePersistence === STORAGE_PERSISTENCE_STATUS.UNSUPPORTED
+                          ? t('syncSettings.storageProtectionUnsupported')
+                          : storagePersistence === STORAGE_PERSISTENCE_STATUS.UNKNOWN
+                            ? t('syncSettings.storageProtectionUnknown')
+                            : t('syncSettings.storageProtectionChecking')}
+                  </span>
+                </div>
+                {[
+                  STORAGE_PERSISTENCE_STATUS.BEST_EFFORT,
+                  STORAGE_PERSISTENCE_STATUS.UNKNOWN,
+                ].includes(storagePersistence) && (
+                  <button
+                    className="settings-secondary"
+                    type="button"
+                    disabled={storagePersistenceBusy}
+                    onClick={requestStorageProtection}
+                  >
+                    {storagePersistenceBusy
+                      ? t('syncSettings.storageProtectionRequesting')
+                      : t('syncSettings.storageProtectionRequest')}
+                  </button>
+                )}
               </div>
 
               <label className="settings-checkbox-row">

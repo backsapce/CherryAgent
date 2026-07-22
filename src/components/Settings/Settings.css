@@ -308,6 +308,51 @@
   margin-top: 1px;
 }
 
+.sync-storage-protection {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, #f59e0b 35%, var(--color-border-subtle));
+  border-radius: 8px;
+  background: color-mix(in srgb, #f59e0b 8%, transparent);
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.sync-storage-protection-persistent {
+  border-color: color-mix(in srgb, var(--color-primary) 35%, var(--color-border-subtle));
+  background: color-mix(in srgb, var(--color-primary) 8%, transparent);
+}
+
+.sync-storage-protection > svg {
+  color: #f59e0b;
+  flex: 0 0 auto;
+}
+
+.sync-storage-protection-persistent > svg {
+  color: var(--color-primary);
+}
+
+.sync-storage-protection-copy {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sync-storage-protection-title {
+  color: var(--color-text-heading);
+  font-weight: 600;
+}
+
+.sync-storage-protection .settings-secondary {
+  flex: 0 0 auto;
+}
+
 .sync-actions {
   display: flex;
   flex-wrap: wrap;
