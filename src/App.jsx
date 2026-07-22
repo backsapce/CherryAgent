@@ -12,6 +12,10 @@ import {
   writeSessionRecoveryJournal,
   clearSessionRecoveryJournal,
 } from './vfs/opfs';
+import {
+  requestPersistentStorage,
+  STORAGE_PERSISTENCE_STATUS,
+} from './vfs/storagePersistence';
 import config from './config/config';
 import llm from './models/llm';
 import { executeCommand, initAgents, enableE2b, E2B_AGENT_ID, getSandboxStatus, stopE2bSandbox, startRemoteAgentRun, getRemoteAgentRun, listRemoteAgentRuns, abortRemoteAgentRun } from './models/agent';
@@ -466,6 +470,18 @@ function App() {
     let sessionLoadSucceeded = false;
     config.init()
       .then(() => {
+        // OSS/S3 credentials intentionally stay local and cannot bootstrap a
+        // restore after the browser evicts this origin. Ask the browser to
+        // protect the OPFS bucket for existing sync users on every startup;
+        // persist() is idempotent and Chromium may grant it as engagement or
+        // PWA-install state changes.
+        if (config.get('sync.enabled')) {
+          requestPersistentStorage().then((status) => {
+            if (status !== STORAGE_PERSISTENCE_STATUS.PERSISTENT) {
+              console.warn(`Browser storage remains ${status}; local sync credentials may be evicted.`);
+            }
+          });
+        }
         // Restore persisted theme preference
         const saved = config.get('theme');
         if (saved && ['light', 'dark', 'system'].includes(saved)) {
