@@ -5,7 +5,9 @@ import { downloadE2bFile, downloadRemoteFile, E2B_AGENT_ID, listFiles, readFileT
 import { getSyncStatus, subscribeSyncStatus } from '../../sync/syncManager';
 import { imageDownloadName } from './imageDownload';
 import { splitTaggedReasoningContent } from '../../agent/reasoningTags';
+import { searchSkills } from '../../agent/skills';
 import { ChevronRight, Settings as SettingsIcon, Folder, File, FileEdit, Copy, MessageSquare, Plus, X, Send, Stop, Plug, PieChart, Cloud, User, ImageGenerate, Refresh } from '../Icons/Icons';
+import { getSkillCommandRange } from './skillCommand';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
@@ -39,6 +41,13 @@ const EMPTY_COMPOSER_DRAFT = Object.freeze({
   mentionFiles: Object.freeze([]),
   mentionLoading: false,
   mentionError: '',
+  skillOpen: false,
+  skillQuery: '',
+  skillRange: null,
+  skillActiveIndex: 0,
+  skillOptions: Object.freeze([]),
+  skillLoading: false,
+  skillError: '',
 });
 const MARKDOWN_REMARK_PLUGINS = [remarkGfm];
 const MARKDOWN_REHYPE_PLUGINS = [
@@ -870,6 +879,7 @@ const MessagePanel = forwardRef(({
   const copiedTimerRef = useRef(null);
   const textareaRef = useRef(null);
   const fileInputRef = useRef(null);
+  const skillListRef = useRef(null);
   const draftKey = activeSessionId || '__new_session__';
   const activeDraftKeyRef = useRef(draftKey);
   const composerDraft = composerDrafts[draftKey] || EMPTY_COMPOSER_DRAFT;
@@ -886,6 +896,13 @@ const MessagePanel = forwardRef(({
     mentionFiles,
     mentionLoading,
     mentionError,
+    skillOpen,
+    skillQuery,
+    skillRange,
+    skillActiveIndex,
+    skillOptions,
+    skillLoading,
+    skillError,
   } = composerDraft;
   const setDraftField = (field, value) => {
     setComposerDrafts((prev) => {
@@ -908,6 +925,10 @@ const MessagePanel = forwardRef(({
   const setMentionRange = (value) => setDraftField('mentionRange', value);
   const setMentionActiveIndex = (value) => setDraftField('mentionActiveIndex', value);
   const setMentionError = (value) => setDraftField('mentionError', value);
+  const setSkillOpen = (value) => setDraftField('skillOpen', value);
+  const setSkillQuery = (value) => setDraftField('skillQuery', value);
+  const setSkillRange = (value) => setDraftField('skillRange', value);
+  const setSkillActiveIndex = (value) => setDraftField('skillActiveIndex', value);
   const selectedAgent = agentList.find((agent) => agent.id === agentId) || agentList[0];
   const userName = userNickname?.trim() || t('message.you');
   const userInitial = Array.from(userName)[0]?.toUpperCase() || 'U';
@@ -1106,6 +1127,52 @@ const MessagePanel = forwardRef(({
     };
   }, [mentionOpen, agentId, activeSandboxUrl, draftKey]);
 
+  useEffect(() => {
+    let cancelled = false;
+    const effectDraftKey = draftKey;
+    const updateSkill = (field, value) => {
+      setComposerDrafts((prev) => {
+        const current = prev[effectDraftKey] || EMPTY_COMPOSER_DRAFT;
+        if (Object.is(current[field], value)) return prev;
+        return {
+          ...prev,
+          [effectDraftKey]: { ...current, [field]: value },
+        };
+      });
+    };
+
+    async function loadSkills() {
+      if (!skillOpen) {
+        if (!cancelled) {
+          updateSkill('skillOptions', []);
+          updateSkill('skillLoading', false);
+          updateSkill('skillError', '');
+        }
+        return;
+      }
+
+      updateSkill('skillLoading', true);
+      updateSkill('skillError', '');
+      try {
+        const skills = await searchSkills(skillQuery, agentId);
+        if (!cancelled) updateSkill('skillOptions', skills.slice(0, 12));
+      } catch (err) {
+        if (!cancelled) {
+          updateSkill('skillOptions', []);
+          updateSkill('skillError', err.message || t('message.skillLoadFailed'));
+        }
+      } finally {
+        if (!cancelled) updateSkill('skillLoading', false);
+      }
+    }
+
+    loadSkills();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [skillOpen, skillQuery, agentId, draftKey, t]);
+
   const filteredMentionFiles = useMemo(() => {
     const query = mentionQuery.trim().toLowerCase();
     const selected = new Set(pendingContextFiles.map((file) => contextFileKey(file)));
@@ -1115,6 +1182,14 @@ const MessagePanel = forwardRef(({
       .slice(0, 12);
   }, [mentionFiles, mentionQuery, pendingContextFiles]);
   const safeMentionActiveIndex = Math.min(mentionActiveIndex, Math.max(filteredMentionFiles.length - 1, 0));
+  const safeSkillActiveIndex = Math.min(skillActiveIndex, Math.max(skillOptions.length - 1, 0));
+
+  useEffect(() => {
+    if (!skillOpen) return;
+    skillListRef.current
+      ?.querySelector(`[data-skill-index="${safeSkillActiveIndex}"]`)
+      ?.scrollIntoView({ block: 'nearest' });
+  }, [skillOpen, safeSkillActiveIndex]);
 
   const handleSend = () => {
     if (inputDisabled) return;
@@ -1130,6 +1205,9 @@ const MessagePanel = forwardRef(({
     setPendingImages([]);
     setPendingContextFiles([]);
     setMentionOpen(false);
+    setSkillOpen(false);
+    setSkillQuery('');
+    setSkillRange(null);
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
       requestAnimationFrame(() => resetEmptyTextareaCaret(textareaRef.current));
@@ -1235,6 +1313,30 @@ const MessagePanel = forwardRef(({
     setMentionActiveIndex(0);
   };
 
+  const closeSkillSelector = () => {
+    setSkillOpen(false);
+    setSkillQuery('');
+    setSkillRange(null);
+    setSkillActiveIndex(0);
+  };
+
+  const selectSkill = (skill) => {
+    if (!skill || !skillRange) return;
+    const selectionDraftKey = draftKey;
+    const command = `/${skill.name} `;
+    const nextInput = input.slice(0, skillRange.start) + command + input.slice(skillRange.end);
+    const nextCaret = skillRange.start + command.length;
+    setInput(nextInput);
+    closeSkillSelector();
+    requestAnimationFrame(() => {
+      if (activeDraftKeyRef.current !== selectionDraftKey || !textareaRef.current) return;
+      textareaRef.current.focus({ preventScroll: true });
+      textareaRef.current.selectionStart = textareaRef.current.selectionEnd = nextCaret;
+      textareaRef.current.style.height = 'auto';
+      textareaRef.current.style.height = Math.min(textareaRef.current.scrollHeight, 160) + 'px';
+    });
+  };
+
   const selectMentionFile = async (file) => {
     if (!file) return;
     const selectionDraftKey = draftKey;
@@ -1270,6 +1372,29 @@ const MessagePanel = forwardRef(({
 
   const handleKeyDown = (e) => {
     if (isImeComposing(e)) return;
+
+    if (skillOpen) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setSkillActiveIndex((prev) => Math.min(prev + 1, Math.max(skillOptions.length - 1, 0)));
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setSkillActiveIndex((prev) => Math.max(prev - 1, 0));
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        closeSkillSelector();
+        return;
+      }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault();
+        if (skillOptions.length > 0) selectSkill(skillOptions[safeSkillActiveIndex]);
+        return;
+      }
+    }
 
     if (mentionOpen) {
       if (e.key === 'ArrowDown') {
@@ -1317,15 +1442,26 @@ const MessagePanel = forwardRef(({
   const handleInputChange = (e) => {
     const ta = e.target;
     const value = ta.value;
-    const nextMentionRange = getMentionRange(value, ta.selectionStart);
+    const caret = ta.selectionStart;
+    const nextSkillRange = getSkillCommandRange(value, caret);
+    const nextMentionRange = nextSkillRange ? null : getMentionRange(value, caret);
     setInput(value);
-    if (nextMentionRange) {
+    if (nextSkillRange) {
+      setSkillOpen(true);
+      setSkillRange(nextSkillRange);
+      setSkillQuery(nextSkillRange.query);
+      setSkillActiveIndex(0);
+      if (mentionOpen) closeMentionSelector();
+    } else if (nextMentionRange) {
       setMentionOpen(true);
       setMentionRange(nextMentionRange);
       setMentionQuery(nextMentionRange.query);
       setMentionActiveIndex(0);
+      if (skillOpen) closeSkillSelector();
     } else if (mentionOpen) {
       closeMentionSelector();
+    } else if (skillOpen) {
+      closeSkillSelector();
     }
     ta.style.height = 'auto';
     ta.style.height = Math.min(ta.scrollHeight, 160) + 'px';
@@ -1644,6 +1780,50 @@ const MessagePanel = forwardRef(({
           </div>
         )}
         <div className="message-input-wrapper">
+          {skillOpen && (
+            <div className="skill-command-popover" role="listbox" id="skill-command-listbox" aria-label={t('message.skillMenuTitle')}>
+              <div className="skill-command-header">
+                <span>{t('message.skillMenuTitle')}</span>
+                <span>{t('message.skillMenuHint')}</span>
+              </div>
+              <div className="skill-command-list" ref={skillListRef}>
+                {skillLoading ? (
+                  <div className="skill-command-empty">{t('message.skillSearching')}</div>
+                ) : skillError ? (
+                  <div className="skill-command-empty">{skillError}</div>
+                ) : skillOptions.length === 0 ? (
+                  <div className="skill-command-empty">{t('message.skillNoMatch')}</div>
+                ) : (
+                  skillOptions.map((skill, index) => (
+                    <button
+                      key={`${skill.source}:${skill.name}`}
+                      type="button"
+                      role="option"
+                      id={`skill-command-option-${index}`}
+                      data-skill-index={index}
+                      aria-selected={index === safeSkillActiveIndex}
+                      className={`skill-command-item${index === safeSkillActiveIndex ? ' active' : ''}`}
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        selectSkill(skill);
+                      }}
+                      onMouseEnter={() => setSkillActiveIndex(index)}
+                      title={skill.description}
+                    >
+                      <span className="skill-command-icon">/</span>
+                      <span className="skill-command-content">
+                        <span className="skill-command-name">{skill.name}</span>
+                        <span className="skill-command-description">{skill.description}</span>
+                      </span>
+                      <span className="skill-command-meta">
+                        {skill.source === 'agent' ? t('message.agentSkill') : t('message.globalSkill')} · v{skill.version}
+                      </span>
+                    </button>
+                  ))
+                )}
+              </div>
+            </div>
+          )}
           {mentionOpen && (
             <div className="file-mention-popover">
               <div className="file-mention-header">
@@ -1703,6 +1883,10 @@ const MessagePanel = forwardRef(({
             onFocus={handleInputFocus}
             onPointerUp={handleInputPointerUp}
             onKeyDown={handleKeyDown}
+            aria-expanded={skillOpen || mentionOpen}
+            aria-controls={skillOpen ? 'skill-command-listbox' : undefined}
+            aria-activedescendant={skillOpen && skillOptions.length > 0 ? `skill-command-option-${safeSkillActiveIndex}` : undefined}
+            aria-autocomplete={skillOpen ? 'list' : undefined}
             disabled={inputDisabled}
             rows={1}
           />
