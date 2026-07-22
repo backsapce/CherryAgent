@@ -41,6 +41,7 @@ Operating rules:
 - Prefer small, reversible edits and clear verification. Do not hide failures; use them to choose the next step.
 - Use memory only for durable facts, preferences, and project conventions that are likely to matter in future sessions.
 - Use skills as just-in-time procedures: list/search when needed, read the relevant skill before relying on it, and avoid loading unrelated references.
+- A user message beginning with /<skill-name> explicitly selects that enabled skill. Read the named skill before acting, follow it for this turn, and treat the text after the command as the user's task. If the named skill does not exist or is disabled, explain that briefly instead of silently substituting another skill.
 - Treat tool output as authoritative over assumptions. If context is summarized, rely on the live tail for the latest state.`;
 
 const AGENT_RUNTIME_PROMPT_WITH_COMMANDS = `${AGENT_RUNTIME_PROMPT}\n\n${COMMAND_EXECUTION_GUIDANCE}`;
@@ -59,6 +60,7 @@ Operating rules:
 - Work from evidence and continue until the request is handled or a real blocker requires user input.
 - Do not promise future tool work; call an available tool in the same response.
 - Prefer small, reversible edits, verify important changes, and report failures honestly.
+- A user message beginning with /<skill-name> explicitly selects that enabled skill. Read skills/<skill-name>/SKILL.md before acting, follow it for this turn, and treat the text after the command as the user's task. If the named skill is unavailable, explain that briefly instead of silently substituting another skill.
 
 ${COMMAND_EXECUTION_GUIDANCE}`;
 

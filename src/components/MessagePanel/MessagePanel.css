@@ -1419,7 +1419,8 @@
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-border-focus) 18%, transparent), 0 14px 34px var(--color-shadow-soft);
 }
 
-.file-mention-popover {
+.file-mention-popover,
+.skill-command-popover {
   position: absolute;
   left: 48px;
   right: 48px;
@@ -1433,7 +1434,8 @@
   z-index: 20;
 }
 
-.file-mention-header {
+.file-mention-header,
+.skill-command-header {
   display: flex;
   justify-content: space-between;
   gap: 12px;
@@ -1444,14 +1446,16 @@
   font-weight: 600;
 }
 
-.file-mention-header span {
+.file-mention-header span,
+.skill-command-header span {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.file-mention-list {
+.file-mention-list,
+.skill-command-list {
   max-height: 242px;
   overflow-y: auto;
   padding: 5px;
@@ -1493,11 +1497,79 @@
   white-space: nowrap;
 }
 
-.file-mention-empty {
+.file-mention-empty,
+.skill-command-empty {
   padding: 18px 10px;
   color: var(--color-hint);
   font-size: 12px;
   text-align: center;
+}
+
+.skill-command-item {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 48px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  padding: 7px 8px;
+}
+
+.skill-command-item:hover,
+.skill-command-item.active {
+  background: color-mix(in srgb, var(--color-primary) 12%, transparent);
+}
+
+.skill-command-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--color-primary) 14%, transparent);
+  color: var(--color-primary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.skill-command-content {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.skill-command-name,
+.skill-command-description {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skill-command-name {
+  color: var(--color-text-heading);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.skill-command-description,
+.skill-command-meta {
+  color: var(--color-hint);
+  font-size: 11px;
+}
+
+.skill-command-meta {
+  white-space: nowrap;
 }
 
 .attach-btn {
@@ -1608,6 +1680,15 @@
   .send-btn {
     min-width: 38px;
     min-height: 38px;
+  }
+
+  .skill-command-popover {
+    left: 0;
+    right: 0;
+  }
+
+  .skill-command-meta {
+    display: none;
   }
 
   .message-empty h3 {
