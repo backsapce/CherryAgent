@@ -289,6 +289,7 @@ function App() {
   const pendingStreamStartsRef = useRef(new Map());
   const sessionStopPromisesRef = useRef(new Map());
   const claimedWakeupIdsRef = useRef(new Set());
+  const cancelledWakeupIdsRef = useRef(new Set());
   const deletedSessionIdsRef = useRef(new Set());
   const deletingSessionIdsRef = useRef(new Set());
   const sessionIncarnationsRef = useRef(new Map());
@@ -800,6 +801,64 @@ function App() {
     return stopPromise;
   }, []);
 
+  const handleCancelWakeup = useCallback((sessionId) => {
+    const session = sessionsRef.current.find((item) => item.id === sessionId);
+    if (!session) return;
+
+    const localWakeupIds = new Set(
+      (session.wakeups || []).map((wakeup) => wakeup?.id).filter(Boolean)
+    );
+    const waitingRemote = session.remoteRun?.status === 'waiting' && session.remoteRun.wakeup
+      ? session.remoteRun
+      : null;
+    if (localWakeupIds.size === 0 && !waitingRemote) return;
+
+    // Fence local timers immediately, including a timer callback that was
+    // already queued before React commits the metadata update below.
+    for (const wakeupId of localWakeupIds) {
+      claimedWakeupIdsRef.current.add(wakeupId);
+      cancelledWakeupIdsRef.current.add(wakeupId);
+    }
+
+    const pendingStart = pendingStreamStartsRef.current.get(sessionId);
+    if (pendingStart?.opts?.wakeupId && localWakeupIds.has(pendingStart.opts.wakeupId)) {
+      cancelPendingSessionStart(sessionId);
+    }
+
+    const activeRun = sessionRunsRef.current.get(sessionId);
+    const localWakeupAlreadyStarted = Boolean(
+      activeRun?.wakeupId && localWakeupIds.has(activeRun.wakeupId)
+    );
+
+    if (waitingRemote) {
+      resumedRemoteRunsRef.current.add(waitingRemote.id);
+      resumingWaitingRunsRef.current.delete(waitingRemote.id);
+      const timerId = waitingRemoteTimersRef.current.get(waitingRemote.id);
+      if (timerId) clearTimeout(timerId);
+      waitingRemoteTimersRef.current.delete(waitingRemote.id);
+    }
+
+    if (localWakeupIds.size > 0) {
+      setSessions((prev) => {
+        const next = prev.map((item) => (
+          item.id === sessionId
+            ? {
+                ...item,
+                wakeups: (item.wakeups || []).filter(
+                  (wakeup) => !localWakeupIds.has(wakeup?.id)
+                ),
+              }
+            : item
+        ));
+        return next;
+      });
+    }
+
+    if (localWakeupAlreadyStarted || waitingRemote) {
+      void stopSessionRun(sessionId, { skipAutomaticTitle: true });
+    }
+  }, [cancelPendingSessionStart, stopSessionRun]);
+
   const handleNewSession = useCallback(async () => {
     messagePanelRef.current?.focusInput();
     if (!agentListReady) return;
@@ -1218,6 +1277,7 @@ function App() {
     const replyId = opts.replyId || generateId();
     const run = runRegistry.begin(sessionId, {
       remoteRun: null,
+      wakeupId: opts.wakeupId || null,
       streamingContent: '',
       streamingThinking: '',
       rafId: null,
@@ -2078,7 +2138,10 @@ function App() {
   useEffect(() => {
     if (!loaded || factoryResetInProgressRef.current) return undefined;
 
-    const unavailableWakeupIds = new Set(claimedWakeupIdsRef.current);
+    const unavailableWakeupIds = new Set([
+      ...claimedWakeupIdsRef.current,
+      ...cancelledWakeupIdsRef.current,
+    ]);
     for (const session of sessions) {
       if (
         !sessionRunsRef.current.has(session.id)
@@ -2095,7 +2158,8 @@ function App() {
     const sessionIncarnation = sessionIncarnationsRef.current.get(next.session.id) || 0;
     const timerId = setTimeout(() => {
       if (
-        sessionRunsRef.current.has(next.session.id)
+        cancelledWakeupIdsRef.current.has(next.wakeup.id)
+        || sessionRunsRef.current.has(next.session.id)
         || pendingStreamStartsRef.current.has(next.session.id)
         || sessionStopPromisesRef.current.has(next.session.id)
         || sessionHasRunningRemote(sessionsRef.current, next.session.id)
@@ -2109,12 +2173,21 @@ function App() {
       void (async () => {
         try {
           const currentSession = sessionsRef.current.find((item) => item.id === scheduledSession.id);
-          if (!currentSession || deletedSessionIdsRef.current.has(currentSession.id)) return;
+          if (
+            !currentSession
+            || deletedSessionIdsRef.current.has(currentSession.id)
+            || cancelledWakeupIdsRef.current.has(wakeup.id)
+            || !(currentSession.wakeups || []).some((candidate) => candidate.id === wakeup.id)
+          ) return;
           const messages = currentSession.messages || await loadSessionMessages(currentSession.id);
           // Loading a metadata-only session is asynchronous. Another turn may
           // have started in that gap, so leave this wake-up pending for retry.
+          const latestSession = sessionsRef.current.find((item) => item.id === currentSession.id);
           if (
-            sessionRunsRef.current.has(currentSession.id)
+            !latestSession
+            || cancelledWakeupIdsRef.current.has(wakeup.id)
+            || !(latestSession.wakeups || []).some((candidate) => candidate.id === wakeup.id)
+            || sessionRunsRef.current.has(currentSession.id)
             || pendingStreamStartsRef.current.has(currentSession.id)
             || sessionStopPromisesRef.current.has(currentSession.id)
             || sessionHasRunningRemote(sessionsRef.current, currentSession.id)
@@ -2132,8 +2205,9 @@ function App() {
           const nextMessages = [...messages, wakeMessage];
 
           const scheduled = scheduleStreamResponse(currentSession.id, nextMessages, {
-            agentId: currentSession.agentId,
-            llmProfileId: currentSession.llmProfileId,
+            agentId: latestSession.agentId,
+            llmProfileId: latestSession.llmProfileId,
+            wakeupId: wakeup.id,
           });
           if (!scheduled) {
             claimedWakeupIdsRef.current.delete(wakeup.id);
@@ -2491,6 +2565,7 @@ function App() {
         onSelectSession={handleSelectSession}
         onNewSession={handleNewSession}
         onDeleteSession={handleDeleteSession}
+        onCancelWakeup={handleCancelWakeup}
         onExportDebug={handleExportDebug}
         debugExportDisabled={!activeSessionId || !activeSession?.messages}
         collapsed={leftPanelCollapsed}

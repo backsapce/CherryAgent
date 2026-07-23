@@ -17,6 +17,7 @@ const SessionList = ({
   onSelectSession,
   onNewSession,
   onDeleteSession,
+  onCancelWakeup,
   onExportDebug,
   debugExportDisabled = false,
   collapsed = false,
@@ -160,13 +161,24 @@ const SessionList = ({
                       />
                     )}
                     {hasScheduledWakeup(session) && (
-                      <span
-                        className="session-wakeup-indicator"
-                        title={t('session.wakeupScheduled')}
-                        aria-label={t('session.wakeupScheduled')}
+                      <button
+                        type="button"
+                        className="session-wakeup-cancel"
+                        title={t('session.cancelWakeup')}
+                        aria-label={t('session.cancelWakeup')}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onCancelWakeup?.(session.id);
+                        }}
                       >
                         <Clock width={14} height={14} aria-hidden="true" />
-                      </span>
+                        <X
+                          width={8}
+                          height={8}
+                          className="session-wakeup-cancel-x"
+                          aria-hidden="true"
+                        />
+                      </button>
                     )}
                     {session.title}
                     {sessionAgents[session.id] && (

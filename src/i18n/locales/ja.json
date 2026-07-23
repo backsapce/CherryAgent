@@ -12,6 +12,7 @@
         "deleteSession": "セッションを削除",
         "exportDebug": "チャットデバッグをエクスポート",
         "wakeupScheduled": "ウェイクアップ予約済み",
+        "cancelWakeup": "予約済みのウェイクアップをキャンセル",
         "noMessages": "メッセージなし",
         "noConversations": "会話はまだありません",
         "clickToStart": "+ をクリックして新しいセッションを開始"
