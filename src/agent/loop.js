@@ -76,7 +76,10 @@ export async function runAgentLoop(opts) {
 
   const maxRounds = normalizeMaxRounds(opts.maxRounds);
   const modelMaxRetries = normalizeModelMaxRetries(opts.modelMaxRetries);
-  const runtimeContext = opts.runtimeContext || await prepareAgentRuntimeContext(agentId);
+  const runtimeContext = opts.runtimeContext || await prepareAgentRuntimeContext(agentId, {
+    runtimeMode: opts.runtimeMode,
+    agentUrl,
+  });
   const workspaceDirName = runtimeContext.workspaceDirName;
   const activeAgent = runtimeContext.activeAgent;
   const memorySnapshot = runtimeContext.memorySnapshot;
@@ -297,7 +300,10 @@ export async function prepareAgentRuntimeContext(agentId, options = {}) {
     loadMemory(agentId),
     agentId ? readAgentAgentsFile(agentId) : null,
   ]);
-  const skillsList = await buildSkillsSection(agentId, { runtimeMode });
+  const skillsList = await buildSkillsSection(agentId, {
+    runtimeMode,
+    agentUrl: options.agentUrl,
+  });
   const skillFiles = runtimeMode === 'sandbox' ? await buildSandboxSkillFiles(agentId) : [];
   const sandboxFiles = runtimeMode === 'sandbox'
     ? [
@@ -371,7 +377,7 @@ async function executeAgentTool({ toolCallId, toolName, input, signal, toolConte
     emit({
       type: 'tool-status',
       ...baseEvent,
-      status: runningToolStatus(toolName),
+      status: runningToolStatus(toolName, input),
       ...(terminalOutput ? { terminalOutput } : {}),
       ...(chunk?.exitCode !== undefined ? { exitCode: chunk.exitCode } : {}),
       ...(chunk?.platform ? { platform: chunk.platform } : {}),
@@ -408,7 +414,7 @@ async function executeAgentTool({ toolCallId, toolName, input, signal, toolConte
       }
     }
 
-    emit({ type: 'tool-status', ...baseEvent, status: runningToolStatus(toolName) });
+    emit({ type: 'tool-status', ...baseEvent, status: runningToolStatus(toolName, input) });
     const result = await toolContext.dispatchTool(toolName, input, {
       ...toolContext,
       signal,
@@ -757,14 +763,20 @@ function estimateAiMessageTokens(messages) {
 }
 
 function formatToolCallSummary(name, args = {}, result = '') {
-  if (name === 'write_browser_file' || name === 'write_sandbox_file' || name === 'write_skill_file') {
+  if (name === 'write_browser_file' || name === 'write_sandbox_file') {
     const path = typeof args.path === 'string' && args.path.trim() ? args.path : 'file';
     const contentSize = typeof args.content === 'string' ? ` (${formatBytes(args.content.length)})` : '';
-    const target = name === 'write_browser_file' ? 'browser' : name === 'write_skill_file' ? 'skill' : 'sandbox';
+    const target = name === 'write_browser_file' ? 'browser' : 'sandbox';
     return `${target}: ${path}${contentSize}`;
   }
   if (name === 'memory') return [args.action, args.type, args.id].filter(Boolean).join(' ');
-  if (name === 'skill') return [args.action, args.name, args.reference_name].filter(Boolean).join(' ');
+  if (name === 'skill') {
+    const target = [args.name, args.reference_name].filter(Boolean).join('/');
+    const contentSize = args.action === 'write' && typeof args.content === 'string'
+      ? ` (${formatBytes(args.content.length)})`
+      : '';
+    return [args.action, target || args.query].filter(Boolean).join(' ') + contentSize;
+  }
   if (name !== 'spawn_agent') return undefined;
 
   const completedAgents = [];
@@ -797,8 +809,8 @@ function formatAbortResult(stdout, stderr) {
   return `${output ? `${output}\n` : ''}Aborted`;
 }
 
-function runningToolStatus(name) {
-  return name === 'write_browser_file' || name === 'write_sandbox_file' || name === 'write_skill_file'
+function runningToolStatus(name, args = {}) {
+  return name === 'write_browser_file' || name === 'write_sandbox_file' || (name === 'skill' && args.action === 'write')
     ? 'writing'
     : 'running';
 }

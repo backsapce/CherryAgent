@@ -1,6 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import yaml from 'js-yaml';
 import { createLanguageModel } from '../src/models/ai.js';
 import { runAgentLoop } from '../src/agent/loop.js';
 import { buildWakeupMessage, createOrReplaceTurnWakeup, wakeupDelayToSeconds } from '../src/agent/wakeup.js';
@@ -15,6 +16,8 @@ const MAX_SANDBOX_IMAGES_BYTES = 64 * 1024 * 1024;
 const CANCELLED_RUN_ID_TTL_MS = 10 * 60_000;
 const RUN_ABORT_WAIT_MS = 5_000;
 const SANDBOX_ATTACHMENTS_MARKER = 'Sandbox attachment files (available to shell commands and sandbox file tools):';
+const MAX_SKILL_CONTENT_CHARS = 60_000;
+const MAX_SKILL_REFERENCE_CHARS = 80_000;
 
 const REMOTE_TOOL_SCHEMAS = [
   {
@@ -113,6 +116,38 @@ const REMOTE_TOOL_SCHEMAS = [
       type: 'object',
       properties: { path: { type: 'string' }, content: { type: 'string' } },
       required: ['path', 'content'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'skill',
+    description: 'List, read, and write progressive skills only in this sandbox runtime under skills/<skill-name>/. This tool never reads from or writes to browser OPFS. Read references individually only when needed.',
+    parameters: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['list', 'read', 'write'],
+          description: 'Skill operation.',
+        },
+        name: {
+          type: 'string',
+          description: 'Skill name for read or write.',
+        },
+        query: {
+          type: 'string',
+          description: 'Optional search query for list.',
+        },
+        reference_name: {
+          type: 'string',
+          description: 'For read or write, target one reference file instead of SKILL.md.',
+        },
+        content: {
+          type: 'string',
+          description: 'Full SKILL.md or reference content for write.',
+        },
+      },
+      required: ['action'],
       additionalProperties: false,
     },
   },
@@ -611,6 +646,9 @@ export function createRuntimeToolDispatcher({
       await writeFile(input.path, input.content);
       return `Successfully wrote sandbox file ${input.path}`;
     }
+    if (name === 'skill') {
+      return dispatchSandboxSkill(input, { listFiles, readFile, writeFile });
+    }
     if (name === 'schedule_wakeup') {
       const delaySeconds = wakeupDelayToSeconds(input.delay, input.unit);
       const wakeup = await context?.scheduleWakeup?.({
@@ -629,6 +667,220 @@ export function createRuntimeToolDispatcher({
     }
     throw new Error(`Tool is unavailable in sandbox runtime: ${name}`);
   };
+}
+
+async function dispatchSandboxSkill(input, fileApi) {
+  try {
+    if (input.action === 'list') {
+      return formatSandboxSkills(await searchSandboxSkills(input.query || '', fileApi));
+    }
+
+    if (input.action === 'read') {
+      if (!input.name) return 'Skill error: name is required for read.';
+      const skillName = normalizeSandboxSkillName(input.name);
+      if (input.reference_name) {
+        const referenceName = normalizeSandboxReferenceName(input.reference_name);
+        const content = await readSandboxText(
+          fileApi.readFile,
+          `skills/${skillName}/references/${referenceName}`
+        );
+        return content == null
+          ? `Skill or reference not found: ${skillName}/${referenceName}`
+          : formatSandboxReference(skillName, referenceName, content);
+      }
+
+      const content = await readSandboxText(fileApi.readFile, `skills/${skillName}/SKILL.md`);
+      if (content == null) return `Skill or reference not found: ${skillName}`;
+      const refs = await listSandboxSkillReferences(skillName, fileApi.listFiles);
+      return refs.length
+        ? `${truncateSandboxText(content, MAX_SKILL_CONTENT_CHARS)}\n\n## Available References\n${refs.map((ref) => `- ${ref.name}`).join('\n')}`
+        : truncateSandboxText(content, MAX_SKILL_CONTENT_CHARS);
+    }
+
+    if (input.action === 'write') {
+      if (!input.name) return 'Skill error: name is required for write.';
+      if (!input.content?.trim()) return 'Skill error: content is required for write.';
+      const skillName = normalizeSandboxSkillName(input.name);
+
+      if (input.reference_name) {
+        const referenceName = normalizeSandboxReferenceName(input.reference_name);
+        const existing = await readSandboxText(fileApi.readFile, `skills/${skillName}/SKILL.md`);
+        if (existing == null) {
+          return `Skill error: Skill "${skillName}" does not exist. Write SKILL.md before writing references.`;
+        }
+        const content = String(input.content);
+        if (content.length > MAX_SKILL_REFERENCE_CHARS) {
+          return `Skill error: Reference content is too large (${content.length}/${MAX_SKILL_REFERENCE_CHARS} chars).`;
+        }
+        await fileApi.writeFile(`skills/${skillName}/references/${referenceName}`, content);
+        return `Successfully wrote sandbox skill reference ${skillName}/${referenceName}.`;
+      }
+
+      validateSandboxSkillContent(skillName, input.content);
+      await fileApi.writeFile(`skills/${skillName}/SKILL.md`, String(input.content));
+      return `Successfully wrote sandbox skill ${skillName}.`;
+    }
+
+    return `Unknown skill action: ${input.action}`;
+  } catch (error) {
+    return `Skill error: ${error.message}`;
+  }
+}
+
+async function searchSandboxSkills(query, { listFiles, readFile }) {
+  const skills = await listSandboxSkills({ listFiles, readFile });
+  const terms = String(query || '').toLowerCase().split(/\s+/).filter(Boolean);
+  if (!terms.length) return skills;
+  return skills
+    .map((skill) => ({ skill, score: scoreSandboxSkill(skill, terms) }))
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score || a.skill.name.localeCompare(b.skill.name))
+    .map((item) => item.skill);
+}
+
+async function listSandboxSkills({ listFiles, readFile }) {
+  let entries;
+  try {
+    entries = runtimeDirectoryEntries(await listFiles('skills'));
+  } catch {
+    return [];
+  }
+
+  const skills = [];
+  for (const entry of entries) {
+    if (entry.type !== 'directory') continue;
+    const skillName = safeSandboxSkillDirectoryName(entry.name);
+    if (!skillName) continue;
+    const content = await readSandboxText(readFile, `skills/${skillName}/SKILL.md`);
+    if (!content) continue;
+    const meta = parseSandboxSkillFrontmatter(content);
+    const references = await listSandboxSkillReferences(skillName, listFiles);
+    skills.push({
+      name: normalizeSandboxSkillName(meta.name || skillName),
+      description: String(meta.description || 'No description provided').trim(),
+      version: String(meta.version || '1.0.0').trim(),
+      source: 'sandbox',
+      references,
+    });
+  }
+  return skills.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+async function listSandboxSkillReferences(skillName, listFiles) {
+  try {
+    return runtimeDirectoryEntries(await listFiles(`skills/${skillName}/references`))
+      .filter((entry) => entry.type !== 'directory')
+      .map((entry) => ({ name: entry.name }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  } catch {
+    return [];
+  }
+}
+
+function runtimeDirectoryEntries(listing) {
+  if (Array.isArray(listing)) return listing;
+  return Array.isArray(listing?.children) ? listing.children : [];
+}
+
+async function readSandboxText(readFile, path) {
+  try {
+    return await readFile(path);
+  } catch {
+    return null;
+  }
+}
+
+function safeSandboxSkillDirectoryName(name) {
+  try {
+    const normalized = normalizeSandboxSkillName(name);
+    return normalized === name ? normalized : null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeSandboxSkillName(name) {
+  const normalized = String(name || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  if (!normalized) throw new Error('Skill name is required.');
+  return normalized.slice(0, 80);
+}
+
+function normalizeSandboxReferenceName(name) {
+  const normalized = String(name || '')
+    .trim()
+    .replace(/\\/g, '/')
+    .split('/')
+    .filter(Boolean)
+    .join('/');
+  if (!normalized || normalized.includes('..')) throw new Error('Reference name is invalid.');
+  return normalized.slice(0, 160);
+}
+
+function parseSandboxSkillFrontmatter(content) {
+  const match = String(content || '').match(/^---\s*\n([\s\S]*?)\n---/);
+  if (!match) return {};
+  try {
+    const parsed = yaml.load(match[1]);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function validateSandboxSkillContent(name, content) {
+  const text = String(content || '').trim();
+  if (!text) throw new Error('Skill content is required.');
+  if (text.length > MAX_SKILL_CONTENT_CHARS) {
+    throw new Error(`Skill content is too large (${text.length}/${MAX_SKILL_CONTENT_CHARS} chars). Move details into references.`);
+  }
+  const meta = parseSandboxSkillFrontmatter(text);
+  if (!meta.name || !meta.description) {
+    throw new Error('Skill content must include YAML frontmatter with name and description.');
+  }
+  if (normalizeSandboxSkillName(meta.name) !== name) {
+    throw new Error(`Skill frontmatter name "${meta.name}" must match "${name}".`);
+  }
+}
+
+function scoreSandboxSkill(skill, terms) {
+  const haystack = `${skill.name} ${skill.description} ${skill.references.map((ref) => ref.name).join(' ')}`.toLowerCase();
+  let score = 0;
+  for (const term of terms) {
+    if (skill.name.toLowerCase() === term) score += 8;
+    if (skill.name.toLowerCase().includes(term)) score += 4;
+    if (haystack.includes(term)) score += 1;
+  }
+  return score;
+}
+
+function formatSandboxSkills(skills) {
+  if (!skills.length) return 'No skills found.';
+  return skills
+    .map((skill) => {
+      const refs = skill.references.length
+        ? ` refs=[${skill.references.map((ref) => ref.name).join(', ')}]`
+        : '';
+      return `- ${skill.name} (${skill.source}, v${skill.version}): ${skill.description}${refs}`;
+    })
+    .join('\n');
+}
+
+function formatSandboxReference(skillName, referenceName, content) {
+  return [
+    `# Reference: ${skillName}/${referenceName}`,
+    '',
+    truncateSandboxText(content, MAX_SKILL_REFERENCE_CHARS),
+  ].join('\n');
+}
+
+function truncateSandboxText(content, maxChars) {
+  const value = String(content || '');
+  if (value.length <= maxChars) return value;
+  return `${value.slice(0, maxChars)}\n\n[truncated at ${maxChars} characters]`;
 }
 
 function splitFilePath(path) {
@@ -701,19 +953,42 @@ function validateRuntimeFiles(files = []) {
 /** Materialize browser-owned startup files without replacing sandbox state. */
 export async function materializeRuntimeFiles(files = [], { fileExists, readFile, writeFile }) {
   validateRuntimeFiles(files);
-  for (const file of files) {
-    let exists = false;
-    if (fileExists) {
-      exists = await fileExists(file.path);
-    } else {
-      try {
-        await readFile(file.path);
-        exists = true;
-      } catch {
-        exists = false;
-      }
+  const existingSandboxSkills = new Set();
+  const skillNames = new Set(
+    files
+      .map((file) => sandboxSnapshotSkillName(file.path))
+      .filter(Boolean)
+  );
+  for (const skillName of skillNames) {
+    if (await runtimeFileExists(`skills/${skillName}/SKILL.md`, { fileExists, readFile })) {
+      existingSandboxSkills.add(skillName);
     }
+  }
+
+  for (const file of files) {
+    const skillName = sandboxSnapshotSkillName(file.path);
+    if (skillName && existingSandboxSkills.has(skillName)) continue;
+    if (skillName) {
+      await writeFile(file.path, file.content);
+      continue;
+    }
+    const exists = await runtimeFileExists(file.path, { fileExists, readFile });
     if (!exists) await writeFile(file.path, file.content);
+  }
+}
+
+function sandboxSnapshotSkillName(path) {
+  const parts = String(path || '').split('/');
+  return parts[0] === 'skills' && parts.length >= 3 ? parts[1] : null;
+}
+
+async function runtimeFileExists(path, { fileExists, readFile }) {
+  if (fileExists) return fileExists(path);
+  try {
+    await readFile(path);
+    return true;
+  } catch {
+    return false;
   }
 }
 

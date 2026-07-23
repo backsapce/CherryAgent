@@ -1154,7 +1154,9 @@ const MessagePanel = forwardRef(({
       updateSkill('skillLoading', true);
       updateSkill('skillError', '');
       try {
-        const skills = await searchSkills(skillQuery, agentId);
+        const skills = await searchSkills(skillQuery, agentId, {
+          agentUrl: activeSandboxUrl,
+        });
         if (!cancelled) updateSkill('skillOptions', skills.slice(0, 12));
       } catch (err) {
         if (!cancelled) {
@@ -1171,7 +1173,7 @@ const MessagePanel = forwardRef(({
     return () => {
       cancelled = true;
     };
-  }, [skillOpen, skillQuery, agentId, draftKey, t]);
+  }, [skillOpen, skillQuery, agentId, activeSandboxUrl, draftKey, t]);
 
   const filteredMentionFiles = useMemo(() => {
     const query = mentionQuery.trim().toLowerCase();
@@ -1501,6 +1503,8 @@ const MessagePanel = forwardRef(({
             avatar={avatar}
             onAvatarChange={onAvatarChange}
             agentList={agentList}
+            activeAgentId={agentId}
+            selectedAgentUrl={activeSandboxUrl}
             onAgentListChange={onAgentListChange}
             onStorageRestored={onStorageRestored}
             onBeforeStorageSync={onBeforeStorageSync}

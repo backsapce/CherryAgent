@@ -15,13 +15,14 @@ test('sandbox prompt includes transferred identity and skill catalog', async () 
 
   assert.match(result.systemPrompt, /<agent_identity>\n# Agent: Test/);
   assert.match(result.systemPrompt, /<skill_catalog>[\s\S]*review: Review code/);
-  assert.match(result.systemPrompt, /copied into the sandbox only when their destination paths do not already exist/);
+  assert.match(result.systemPrompt, /synchronized into skills\/ without replacing skills that already exist in the sandbox/);
+  assert.match(result.systemPrompt, /skill tool interacts only with the sandbox skills\/ directory/);
   assert.match(result.systemPrompt, /Use execute_command only when there is strong reason to expect completion within 30 seconds/);
   assert.match(result.systemPrompt, /training, a server, watcher/);
   assert.match(result.systemPrompt, /Never add nohup, &, disown, screen, tmux/);
   assert.match(result.systemPrompt, /Schedule a future continuation/);
   assert.match(result.systemPrompt, /message beginning with \/<skill-name> explicitly selects that enabled skill/);
-  assert.match(result.systemPrompt, /Read skills\/<skill-name>\/SKILL\.md before acting/);
+  assert.match(result.systemPrompt, /Read it with the skill tool before acting/);
 });
 
 test('browser runtime prompt tells the model to prefer managed jobs when duration is uncertain', async () => {

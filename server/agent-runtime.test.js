@@ -41,7 +41,38 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-test('sandbox runtime exposes no browser-owned tools', () => {
+function createRuntimeFileApi(initialFiles = []) {
+  const files = new Map(initialFiles);
+  return {
+    files,
+    async listFiles(path = '') {
+      const prefix = path ? `${path}/` : '';
+      const children = new Map();
+      for (const filePath of files.keys()) {
+        if (!filePath.startsWith(prefix)) continue;
+        const remainder = filePath.slice(prefix.length);
+        if (!remainder) continue;
+        const [name, ...tail] = remainder.split('/');
+        children.set(name, {
+          name,
+          type: tail.length ? 'directory' : 'file',
+          path: `${prefix}${name}`,
+        });
+      }
+      if (path && children.size === 0) throw new Error('Directory not found');
+      return Array.from(children.values());
+    },
+    async readFile(path) {
+      if (!files.has(path)) throw new Error('File not found');
+      return files.get(path);
+    },
+    async writeFile(path, content) {
+      files.set(path, content);
+    },
+  };
+}
+
+test('sandbox runtime exposes only sandbox-owned tools', () => {
   assert.deepEqual(
     REMOTE_TOOL_SCHEMAS.map((tool) => tool.name),
     [
@@ -54,6 +85,7 @@ test('sandbox runtime exposes no browser-owned tools', () => {
       'read_sandbox_file',
       'display_sandbox_image',
       'write_sandbox_file',
+      'skill',
       'schedule_wakeup',
     ]
   );
@@ -65,6 +97,63 @@ test('sandbox runtime exposes no browser-owned tools', () => {
     REMOTE_TOOL_SCHEMAS.find((tool) => tool.name === 'start_command').description,
     /unknown duration/
   );
+});
+
+test('sandbox skill tool lists, reads, and creates skills only in sandbox skills', async () => {
+  const fileApi = createRuntimeFileApi();
+  const dispatch = createRuntimeToolDispatcher({
+    execCommand: async () => ({ stdout: '', stderr: '', code: 0 }),
+    listFiles: fileApi.listFiles,
+    readFile: fileApi.readFile,
+    writeFile: fileApi.writeFile,
+  });
+  const skillContent = `---
+name: sandbox-review
+description: Review changes in the sandbox.
+version: 1.0.0
+---
+
+# Sandbox Review
+
+Inspect sandbox files.
+`;
+
+  assert.equal(
+    await dispatch('skill', {
+      action: 'write',
+      name: 'sandbox-review',
+      content: skillContent,
+    }),
+    'Successfully wrote sandbox skill sandbox-review.'
+  );
+  assert.equal(fileApi.files.get('skills/sandbox-review/SKILL.md'), skillContent);
+
+  assert.equal(
+    await dispatch('skill', {
+      action: 'write',
+      name: 'sandbox-review',
+      reference_name: 'checks.md',
+      content: 'Check the runtime output.',
+    }),
+    'Successfully wrote sandbox skill reference sandbox-review/checks.md.'
+  );
+
+  const listed = await dispatch('skill', { action: 'list', query: 'review' });
+  assert.match(listed, /sandbox-review \(sandbox, v1\.0\.0\)/);
+  assert.match(listed, /refs=\[checks\.md\]/);
+
+  const loaded = await dispatch('skill', { action: 'read', name: 'sandbox-review' });
+  assert.match(loaded, /Inspect sandbox files/);
+  assert.match(loaded, /## Available References\n- checks\.md/);
+  assert.doesNotMatch(loaded, /Check the runtime output/);
+
+  const reference = await dispatch('skill', {
+    action: 'read',
+    name: 'sandbox-review',
+    reference_name: 'checks.md',
+  });
+  assert.match(reference, /# Reference: sandbox-review\/checks\.md/);
+  assert.match(reference, /Check the runtime output/);
 });
 
 test('sandbox background command dispatch preserves job ids, cursors, waits, and stops', async () => {
@@ -543,12 +632,17 @@ test('sandbox command dispatch passes cancellation as an exec option', async () 
   });
 });
 
-test('sandbox startup snapshot writes only missing identity and skill files', async () => {
-  const stored = new Map([['AGENTS.md', 'sandbox identity']]);
+test('sandbox startup snapshot preserves complete existing sandbox skills', async () => {
+  const stored = new Map([
+    ['AGENTS.md', 'sandbox identity'],
+    ['skills/local/SKILL.md', '# Local sandbox skill'],
+  ]);
   await materializeRuntimeFiles([
     { path: 'AGENTS.md', content: 'browser identity' },
     { path: 'skills/review/SKILL.md', content: '# Review' },
     { path: 'skills/review/references/checks.md', content: 'Check everything.' },
+    { path: 'skills/local/SKILL.md', content: '# OPFS local skill' },
+    { path: 'skills/local/references/opfs.md', content: 'Do not mix this reference.' },
   ], {
     fileExists: async (path) => stored.has(path),
     readFile: async (path) => stored.get(path),
@@ -558,6 +652,8 @@ test('sandbox startup snapshot writes only missing identity and skill files', as
   assert.equal(stored.get('AGENTS.md'), 'sandbox identity');
   assert.equal(stored.get('skills/review/SKILL.md'), '# Review');
   assert.equal(stored.get('skills/review/references/checks.md'), 'Check everything.');
+  assert.equal(stored.get('skills/local/SKILL.md'), '# Local sandbox skill');
+  assert.equal(stored.has('skills/local/references/opfs.md'), false);
 });
 
 test('sandbox startup snapshot rejects paths outside identity and skills', async () => {

@@ -304,9 +304,9 @@ You can execute commands, read/write files, manage directories, maintain memory 
 
 Your durable state is stored in browser OPFS, but file tools only access your own files area: workspace/${agentId}/files/.
 
-Browser file tools cannot access OPFS root, other agents, AGENTS.md, memory, or skills by path. Use memory and skill tools for those systems.
+Browser file tools cannot access OPFS root, other agents, AGENTS.md, memory, or skills by path. Use memory and skill tools for those systems. Browser-runtime skill writes go to this workspace's skills/ directory.
 
-If a sandbox is selected, it is a separate runtime filesystem used by shell commands. Your browser files area and sandbox files do not automatically sync. Use browser file tools for persistent files in your own files area, and sandbox file tools for files inside the command runtime.
+If a sandbox is selected, it is a separate runtime filesystem used by shell commands. Your browser files area and sandbox files do not automatically sync. Enabled OPFS skills are synchronized into sandbox skills/ when a sandbox runtime starts; its skill tool then reads and writes only that sandbox directory.
 
 ## Memory
 
