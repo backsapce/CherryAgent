@@ -12,6 +12,7 @@
         "deleteSession": "Delete session",
         "exportDebug": "Export chat debug",
         "wakeupScheduled": "Wake-up scheduled",
+        "cancelWakeup": "Cancel scheduled wake-up",
         "noMessages": "No messages yet",
         "noConversations": "No conversations yet",
         "clickToStart": "Click + to start a new session"

@@ -12,6 +12,7 @@
         "deleteSession": "删除会话",
         "exportDebug": "导出聊天调试",
         "wakeupScheduled": "已安排唤醒",
+        "cancelWakeup": "取消已安排的唤醒",
         "noMessages": "暂无消息",
         "noConversations": "暂无会话",
         "clickToStart": "点击 + 开始新会话"

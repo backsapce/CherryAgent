@@ -327,12 +327,45 @@
   animation: session-running-pulse 1.6s ease-out infinite;
 }
 
-.session-wakeup-indicator {
+.session-wakeup-cancel {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
   color: var(--color-accent-strong);
+  cursor: pointer;
+  overflow: visible;
+  transition: color 0.15s, background 0.15s;
+}
+
+.session-wakeup-cancel:hover,
+.session-wakeup-cancel:focus-visible {
+  color: var(--color-error);
+  background: color-mix(in srgb, var(--color-error) 12%, transparent);
+}
+
+.session-wakeup-cancel:focus-visible {
+  outline: 2px solid var(--color-border-focus);
+  outline-offset: 1px;
+}
+
+.session-wakeup-cancel-x {
+  position: absolute;
+  top: 0;
+  right: 0;
+  box-sizing: content-box;
+  padding: 1px;
+  border-radius: 50%;
+  background: var(--color-sidebar);
+  stroke-width: 3;
+  pointer-events: none;
 }
 
 @keyframes session-running-pulse {
