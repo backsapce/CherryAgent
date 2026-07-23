@@ -100,10 +100,10 @@ Filesystem model:
 - VertexAgent state lives in browser OPFS, but browser file tools do NOT expose the OPFS root.
 - Browser file tools can read/write only the active agent's own persistent files area: workspace/<active-agent>/files/.
 - Browser file tools cannot access other agents, OPFS root files, AGENTS.md, memory files, or skill files by path.
-- Use the skill tool for catalog/read operations, and skill file tools for explicit edits under workspace/<active-agent>/skills/.
-- The sandbox filesystem is only the runtime workdir for command tools. It is separate from browser OPFS and does not automatically contain AGENTS.md, memory, skills, or browser workspace files.
+- The skill catalog is merged in order from OPFS global skills, active OPFS workspace skills, then selected agent skills; a later same-named skill overrides an earlier one.
+- Use the skill tool for all skill reads and writes. In browser runtime, skill writes always go to workspace/<active-agent>/skills/ in OPFS.
+- The sandbox filesystem is the selected agent runtime workdir and is separate from browser OPFS. Its skills/ directory is the final browser-runtime skill source, but other OPFS state and browser workspace files are not automatically synchronized in browser runtime.
 - Use browser file tools only for persistent files in the active agent's files area: list_browser_files, read_browser_file, display_browser_image, write_browser_file.
-- Use skill file tools only for active-agent skills: list_skill_files, read_skill_file, write_skill_file.
 - Use sandbox file tools only for files created or needed inside the command runtime: list_sandbox_files, read_sandbox_file, display_sandbox_image, write_sandbox_file.
 - If data must move between the active agent files area and sandbox runtime, explicitly read from one side and write to the other side.
 - To show an image to the user, always call display_browser_image or display_sandbox_image with its real file path. Never emit Markdown/HTML image tags for local paths, and never place image bytes, binary data, base64, or data URLs in a response or tool result.
@@ -116,7 +116,7 @@ Work rules:
 - When start_command is available, use it for long-running CLI work before schedule_wakeup. Never keep execute_command blocked on training, servers, watchers, or other long/uncertain work. Include the job_id and latest log cursor in the future wake-up instruction.
 - When tools fail, use the error output to choose the next useful step.`;
 
-const SANDBOX_AGENT_SYSTEM_PROMPT = `You are running fully inside the selected sandbox. Browser operations, browser OPFS, browser files, browser memory mutation, browser skill mutation, and sub-agent delegation are unavailable. A startup snapshot of the browser agent identity and enabled skills is available as AGENTS.md and skills/ when those paths did not already exist. Images attached to user messages are copied into the sandbox under attachments/; each image message includes its exact local path, which can be passed to curl and other command-line tools. Use command tools, sandbox file tools, and schedule_wakeup. Start long-running CLI work with start_command, then schedule a future continuation containing its job_id and latest log cursor instead of blocking or repeatedly polling; the agent server keeps both the run and managed command alive while the browser is disconnected. To show an image, always call display_sandbox_image with its real sandbox path; never emit Markdown/HTML image tags for local paths and never put image bytes, binary data, base64, or data URLs in the conversation. The browser may disconnect without stopping this run.`;
+const SANDBOX_AGENT_SYSTEM_PROMPT = `You are running fully inside the selected sandbox. Browser operations, browser OPFS, browser files, browser memory mutation, and sub-agent delegation are unavailable. Enabled OPFS global and workspace skills are synchronized into sandbox skills/ without replacing skills that already exist there. The skill tool reads and writes only sandbox skills/, so skills created during this runtime remain in the sandbox and are not written back to OPFS. Images attached to user messages are copied into the sandbox under attachments/; each image message includes its exact local path, which can be passed to curl and other command-line tools. Use command tools, sandbox file tools, the skill tool, and schedule_wakeup. Start long-running CLI work with start_command, then schedule a future continuation containing its job_id and latest log cursor instead of blocking or repeatedly polling; the agent server keeps both the run and managed command alive while the browser is disconnected. To show an image, always call display_sandbox_image with its real sandbox path; never emit Markdown/HTML image tags for local paths and never put image bytes, binary data, base64, or data URLs in the conversation. The browser may disconnect without stopping this run.`;
 
 const FILE_CONTEXT_MARKER = 'Selected file context:';
 const TOOL_HISTORY_MARKER = 'Tool calls performed during this assistant turn:';
@@ -1328,7 +1328,10 @@ function App() {
           // address a run that the server accepted while the response is still
           // in flight.
           run.remoteRun = { id: requestedRunId, url: sandboxUrl };
-          const runtimeContext = await prepareAgentRuntimeContext(sessionAgentId, { runtimeMode: 'sandbox' });
+          const runtimeContext = await prepareAgentRuntimeContext(sessionAgentId, {
+            runtimeMode: 'sandbox',
+            agentUrl: sandboxUrl,
+          });
           assertRunActive();
           try {
             remoteRun = await startRemoteAgentRun(sandboxUrl, {

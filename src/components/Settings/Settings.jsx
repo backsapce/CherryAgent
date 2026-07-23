@@ -127,6 +127,8 @@ const Settings = ({
   avatar,
   onAvatarChange,
   agentList = [],
+  activeAgentId = null,
+  selectedAgentUrl = null,
   onAgentListChange,
   onStorageRestored,
   onBeforeStorageSync,
@@ -264,12 +266,12 @@ const Settings = ({
   useEffect(() => {
     if (settingsTab === 'skills') {
       setSkillsLoading(true);
-      listAllSkills()
+      listAllSkills(true, activeAgentId, { agentUrl: selectedAgentUrl })
         .then((skills) => setSkillsList(skills))
         .catch((err) => console.error('Failed to load skills:', err))
         .finally(() => setSkillsLoading(false));
     }
-  }, [settingsTab]);
+  }, [settingsTab, activeAgentId, selectedAgentUrl]);
 
   const handleSkillToggle = async (skillName, enabled) => {
     await setSkillEnabled(skillName, enabled);
