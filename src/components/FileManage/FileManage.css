@@ -537,6 +537,13 @@
   color: var(--color-error, #d32f2f);
 }
 
+.filemanage-upload-actions {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  flex-wrap: wrap;
+}
 
 .filemanage-upload-btn {
   display: flex;
@@ -561,9 +568,20 @@
   cursor: not-allowed;
 }
 
+.filemanage-upload-btn.folder-upload-btn {
+  color: var(--color-primary, #007bff);
+  background-color: color-mix(in srgb, var(--color-primary, #007bff) 9%, var(--color-surface, #fff));
+  border: 1px solid color-mix(in srgb, var(--color-primary, #007bff) 35%, transparent);
+}
+
+.filemanage-upload-btn.folder-upload-btn:hover:not(:disabled) {
+  background-color: color-mix(in srgb, var(--color-primary, #007bff) 15%, var(--color-surface, #fff));
+}
+
 .filemanage-drop-hint {
   font-size: 12px;
   color: var(--text-secondary, #888);
+  text-align: center;
 }
 
 .drag-over {

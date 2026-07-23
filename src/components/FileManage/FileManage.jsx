@@ -7,6 +7,7 @@ import { enqueueStorageOperation } from '../Settings/storageOperationQueue';
 import { ChevronRight, ChevronDown, Folder, File, FilePlus, FolderPlus, Refresh, X, Upload, Cloud, HardDrive, Trash, Download, FileEdit, Spinner, MultiSelect } from '../Icons/Icons';
 import FileEditor from './FileEditor';
 import { isOrphanedAgentWorkspace, joinFileManagerPath, normalizeFileManagerPath } from './pathUtils';
+import { createUploadBatch, readDroppedUploadBatch, uploadBatchToDestination } from './uploadUtils';
 import './FileManage.css';
 
 // Breakpoint for mobile/tablet
@@ -76,6 +77,7 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandb
   const [draggedItem, setDraggedItem] = useState(null);
   const [dropTargetPath, setDropTargetPath] = useState(null);
   const fileInputRef = useRef(null);
+  const folderInputRef = useRef(null);
   const dropZoneRef = useRef(null);
   const [editorOpen, setEditorOpen] = useState(false);
   const [editingFile, setEditingFile] = useState(null);
@@ -199,11 +201,11 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandb
     setDropTargetPath(null);
   }, [fileSource]);
 
-  // Upload files (local or remote via adapter)
-  const handleFileUpload = useCallback(async (files, targetPath) => {
-    if (!files || files.length === 0) return;
+  // Upload files/directories while preserving every path relative to the
+  // selected folder or drop target.
+  const handleUploadBatch = useCallback(async (batch, targetPath) => {
+    if (!batch || (batch.files.length === 0 && batch.directories.length === 0)) return;
     setUploading(true);
-    const fileArray = Array.from(files);
     let successCount = 0;
     let failCount = 0;
     // A sync hashes OPFS files into in-memory ArrayBuffers. Writing a browser
@@ -216,12 +218,11 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandb
     try {
       const performUploads = async () => {
         if (fileSource === 'local') await waitForSyncIdle();
-        for (const file of fileArray) {
-          try {
-            await fileOps.upload(file.name, file, targetPath);
-            successCount++;
-          } catch { failCount++; }
-        }
+        const result = await uploadBatchToDestination(batch, targetPath, fileOps, (kind, path, err) => {
+          console.warn(`Failed to upload ${kind} ${path}:`, err);
+        });
+        successCount = result.successCount;
+        failCount = result.failCount;
         await refreshTree();
       };
       // Join the same queue used by manual sync/import/reset. Besides waiting
@@ -242,9 +243,24 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandb
   }, [fileOps, refreshTree, fileSource, t]);
 
   const handleFileInputChange = useCallback(async (e) => {
-    await handleFileUpload(e.target.files, selectedPath);
+    await handleUploadBatch(createUploadBatch(e.target.files), selectedPath);
     if (fileInputRef.current) fileInputRef.current.value = '';
-  }, [handleFileUpload, selectedPath]);
+  }, [handleUploadBatch, selectedPath]);
+
+  const handleFolderInputChange = useCallback(async (e) => {
+    await handleUploadBatch(createUploadBatch(e.target.files), selectedPath);
+    if (folderInputRef.current) folderInputRef.current.value = '';
+  }, [handleUploadBatch, selectedPath]);
+
+  const handleDroppedUpload = useCallback(async (dataTransfer, targetPath) => {
+    try {
+      const batch = await readDroppedUploadBatch(dataTransfer);
+      await handleUploadBatch(batch, targetPath);
+    } catch (err) {
+      console.warn('Failed to read dropped files or folders:', err);
+      alert(fileSource === 'local' ? t('filemanage.uploadLocalError') : t('filemanage.uploadRemoteError'));
+    }
+  }, [fileSource, handleUploadBatch, t]);
 
   // Drag and drop
   useEffect(() => {
@@ -261,11 +277,11 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandb
       e.preventDefault();
       dropZone.classList.remove('drag-over');
     };
-    const handleDrop = (e) => {
+    const handleDrop = async (e) => {
       if (isTreeDrag(e)) return;
       e.preventDefault();
       dropZone.classList.remove('drag-over');
-      handleFileUpload(e.dataTransfer.files);
+      await handleDroppedUpload(e.dataTransfer);
     };
     dropZone.addEventListener('dragover', handleDragOver);
     dropZone.addEventListener('dragleave', handleDragLeave);
@@ -275,7 +291,7 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandb
       dropZone.removeEventListener('dragleave', handleDragLeave);
       dropZone.removeEventListener('drop', handleDrop);
     };
-  }, [show, handleFileUpload]);
+  }, [show, handleDroppedUpload]);
 
   // Resize handlers
   const handleMouseDown = useCallback((e) => { e.preventDefault(); setIsResizing(true); }, []);
@@ -473,13 +489,13 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandb
       return;
     }
 
-    if (e.dataTransfer.files?.length) {
+    if (Array.from(e.dataTransfer?.types || []).includes('Files')) {
       e.preventDefault();
       e.stopPropagation();
       setDropTargetPath(null);
-      await handleFileUpload(e.dataTransfer.files, targetDir);
+      await handleDroppedUpload(e.dataTransfer, targetDir);
     }
-  }, [canDropItemOnDirectory, draggedItem, fileOps, handleFileUpload, refreshTree, t]);
+  }, [canDropItemOnDirectory, draggedItem, fileOps, handleDroppedUpload, refreshTree, t]);
 
   const handleSelectItem = useCallback((path, name, type) => {
     const normalized = getTreeItemPath(path, name);
@@ -717,6 +733,15 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandb
 
         <div className="filemanage-upload-zone">
           <input ref={fileInputRef} type="file" multiple style={{ display: 'none' }} onChange={handleFileInputChange} />
+          <input
+            ref={folderInputRef}
+            type="file"
+            multiple
+            webkitdirectory=""
+            directory=""
+            style={{ display: 'none' }}
+            onChange={handleFolderInputChange}
+          />
           {multiSelectMode && (
             <div className="filemanage-batch-actions">
               <button
@@ -730,10 +755,16 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandb
               </button>
             </div>
           )}
-          <button className="filemanage-upload-btn" onClick={() => fileInputRef.current?.click()} disabled={uploading || movingItem}>
-            <Upload width={20} height={20} />
-            {uploading ? t('filemanage.uploading') : movingItem ? t('filemanage.moving') : t('filemanage.upload')}
-          </button>
+          <div className="filemanage-upload-actions">
+            <button className="filemanage-upload-btn" onClick={() => fileInputRef.current?.click()} disabled={uploading || movingItem}>
+              <Upload width={20} height={20} />
+              {uploading ? t('filemanage.uploading') : movingItem ? t('filemanage.moving') : t('filemanage.upload')}
+            </button>
+            <button className="filemanage-upload-btn folder-upload-btn" onClick={() => folderInputRef.current?.click()} disabled={uploading || movingItem}>
+              <Folder width={20} height={20} />
+              {t('filemanage.uploadFolder')}
+            </button>
+          </div>
           <span className="filemanage-drop-hint">{t('filemanage.dropHint')}</span>
         </div>
       </div>
