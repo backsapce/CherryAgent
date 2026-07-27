@@ -316,3 +316,18 @@ test('sandbox file requests honor an explicit session sandbox URL', async () => 
     restore();
   }
 });
+
+test('recursive sandbox file requests use one recursive endpoint call', async () => {
+  let requestedUrl = null;
+  const restore = installBrowserMocks(undefined, async (url) => {
+    requestedUrl = url;
+    return { ok: true, json: async () => ({ recursive: true, children: [] }) };
+  });
+
+  try {
+    await listFiles('', 'https://sandbox.example', { recursive: true });
+    assert.equal(requestedUrl, 'https://sandbox.example/agent/files?recursive=true');
+  } finally {
+    restore();
+  }
+});

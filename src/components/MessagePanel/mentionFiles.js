@@ -16,29 +16,35 @@ function isHiddenDirectory(name) {
 export async function collectAgentWorkspaceFiles(agentId, getAgentDirectory) {
   if (!agentId) return [];
   const root = await getAgentDirectory(agentId);
-  const files = [];
 
   async function walk(dir, prefix = '') {
+    const entries = [];
     for await (const [name, handle] of dir) {
+      entries.push([name, handle]);
+    }
+
+    const batches = await Promise.all(entries.map(async ([name, handle]) => {
       const relativePath = prefix ? `${prefix}/${name}` : name;
       if (handle.kind === 'directory') {
-        if (isHiddenDirectory(name)) continue;
-        await walk(handle, relativePath);
-      } else {
-        const file = await handle.getFile();
-        files.push({
-          source: CONTEXT_SOURCE_BROWSER,
-          name,
-          relativePath,
-          displayPath: relativePath,
-          size: file.size,
-          lastModified: file.lastModified,
-        });
+        if (isHiddenDirectory(name)) return [];
+        return walk(handle, relativePath);
       }
-    }
+
+      const file = await handle.getFile();
+      return [{
+        source: CONTEXT_SOURCE_BROWSER,
+        name,
+        relativePath,
+        displayPath: relativePath,
+        size: file.size,
+        lastModified: file.lastModified,
+      }];
+    }));
+
+    return batches.flat();
   }
 
-  await walk(root);
+  const files = await walk(root);
   return files.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
 }
 
@@ -52,16 +58,23 @@ export async function collectSandboxFiles(sandboxUrl, listDirectory) {
     if (visitedDirs.has(safeDir)) return;
     visitedDirs.add(safeDir);
 
-    const listing = await listDirectory(safeDir, sandboxUrl);
+    // Supported sandboxes can return the complete tree in one request. Older
+    // servers ignore this option and fall back to the parallel directory walk.
+    const listing = await listDirectory(safeDir, sandboxUrl, { recursive: safeDir === '' });
     const entries = Array.isArray(listing) ? listing : listing?.children;
     if (!Array.isArray(entries)) return;
+    const isRecursiveListing = safeDir === '' && listing?.recursive === true;
+    const childDirectories = [];
 
     for (const entry of entries) {
       const entryPath = normalizeMentionPath(entry.path || joinMentionPath(safeDir, entry.name));
       if (!entryPath) continue;
+      const pathParts = entryPath.split('/');
+      const directoryParts = entry.type === 'directory' ? pathParts : pathParts.slice(0, -1);
+      if (directoryParts.some(isHiddenDirectory)) continue;
+
       if (entry.type === 'directory') {
-        if (isHiddenDirectory(entry.name)) continue;
-        await walk(entryPath);
+        if (!isRecursiveListing) childDirectories.push(entryPath);
       } else {
         files.push({
           source: CONTEXT_SOURCE_SANDBOX,
@@ -74,6 +87,8 @@ export async function collectSandboxFiles(sandboxUrl, listDirectory) {
         });
       }
     }
+
+    await Promise.all(childDirectories.map((entryPath) => walk(entryPath)));
   }
 
   await walk('');

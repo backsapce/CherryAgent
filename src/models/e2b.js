@@ -12,6 +12,7 @@ import { Sandbox } from 'e2b';
 const E2B_TEMPLATE = 'base';
 const E2B_META_KEY = 'vertexsandbox';
 const E2B_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+const E2B_RECURSIVE_LIST_DEPTH = 64;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -454,17 +455,22 @@ async function copyE2bDirectory(sandbox, sourcePath, targetPath) {
 /**
  * List files/directories in the E2B sandbox.
  * @param {string} [path] - Directory path (empty for root)
+ * @param {{recursive?: boolean}} [options] - Listing options
  * @returns {Promise<{id: string, name: string, type: string, size: number, path: string, parentDir: string, children: Array}|Array>}
  */
-export async function listE2bFiles(path = '') {
+export async function listE2bFiles(path = '', options = {}) {
   const sandbox = await ensureSandbox();
   const safePath = sandboxRelativePath(path, { allowEmpty: true });
-  const entries = await sandbox.files.list(sandboxApiPath(safePath, { allowEmpty: true }));
+  const entries = await sandbox.files.list(
+    sandboxApiPath(safePath, { allowEmpty: true }),
+    options.recursive ? { depth: E2B_RECURSIVE_LIST_DEPTH } : undefined
+  );
   const parentDir = safePath;
   return {
     id: 'root',
     name: '/',
     type: 'directory',
+    ...(options.recursive ? { recursive: true } : {}),
     children: entries.map((entry) => ({
       id: `${isE2bDirectoryEntry(entry) ? 'dir' : 'file'}-${entry.path}`,
       name: entry.name,
@@ -472,6 +478,7 @@ export async function listE2bFiles(path = '') {
       size: entry.type === 'file' ? (entry.size || 0) : 0,
       path: entry.path,
       parentDir,
+      lastModified: entry.modifiedTime?.getTime?.() || entry.modifiedTime,
     })),
   };
 }

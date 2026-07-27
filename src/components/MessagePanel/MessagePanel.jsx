@@ -808,6 +808,7 @@ const MessagePanel = forwardRef(({
   const lastScrollTopRef = useRef(0);
   const pendingHistoryScrollRestoreRef = useRef(null);
   const copiedTimerRef = useRef(null);
+  const mentionSourceKeysRef = useRef(new Map());
   const textareaRef = useRef(null);
   const fileInputRef = useRef(null);
   const skillListRef = useRef(null);
@@ -1004,13 +1005,17 @@ const MessagePanel = forwardRef(({
     async function loadMentionFiles() {
       if (!mentionOpen) {
         if (!cancelled) {
-          updateMention('mentionFiles', []);
           updateMention('mentionLoading', false);
           updateMention('mentionError', '');
         }
         return;
       }
 
+      const sourceKey = `${agentId || ''}\0${activeSandboxUrl || ''}`;
+      if (mentionSourceKeysRef.current.get(effectDraftKey) !== sourceKey) {
+        mentionSourceKeysRef.current.set(effectDraftKey, sourceKey);
+        updateMention('mentionFiles', []);
+      }
       updateMention('mentionLoading', true);
       updateMention('mentionError', '');
       try {
@@ -1766,7 +1771,7 @@ const MessagePanel = forwardRef(({
                 <span>{mentionScopeLabel}</span>
               </div>
               <div className="file-mention-list">
-                {mentionLoading ? (
+                {mentionLoading && filteredMentionFiles.length === 0 ? (
                   <div className="file-mention-empty">Searching files...</div>
                 ) : mentionError && filteredMentionFiles.length === 0 ? (
                   <div className="file-mention-empty">{mentionError}</div>
