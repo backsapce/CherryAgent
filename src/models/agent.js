@@ -422,7 +422,7 @@ function executeCommandStreaming(cmd, url, opts = {}) {
  * Automatically attaches the saved auth token.
  * @param {string} [path] - Directory path relative to files root (empty for root).
  * @param {string} [url] - agent host URL (optional, defaults to local /agent)
- * @param {{recursive?: boolean}} [options] - Listing options
+ * @param {{recursive?: boolean, includeHidden?: boolean}} [options] - Listing options
  * @returns {Promise<{id: string, name: string, type: string, children: Array}|Array>}
  */
 export async function listRemoteFiles(path = '', url, options = {}) {
@@ -430,6 +430,7 @@ export async function listRemoteFiles(path = '', url, options = {}) {
   const searchParams = new URLSearchParams();
   if (path) searchParams.set('path', path);
   if (options.recursive) searchParams.set('recursive', 'true');
+  if (options.includeHidden) searchParams.set('includeHidden', 'true');
   const query = searchParams.toString();
   const filesUrl = `${base}/files${query ? `?${query}` : ''}`;
   const headers = {};
@@ -583,7 +584,7 @@ function getSelectedAgent() {
  * List files from the active agent (E2B or HTTP server).
  * @param {string} [path] - Directory path relative to files root (empty for root).
  * @param {string} [url] - Agent host URL or E2B identifier
- * @param {{recursive?: boolean}} [options] - Listing options
+ * @param {{recursive?: boolean, includeHidden?: boolean}} [options] - Listing options
  * @returns {Promise<{id: string, name: string, type: string, children: Array}|Array>}
  */
 export async function listFiles(path = '', url = getSelectedAgent(), options = {}) {

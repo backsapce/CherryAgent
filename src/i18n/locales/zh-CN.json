@@ -84,6 +84,8 @@
         "avatarHint": "上传图片，将其作为会话中的助手头像。",
         "avatarLoadFailed": "头像图片加载失败。",
         "avatarUploadFailed": "无法使用该图片。",
+        "showHiddenFiles": "显示隐藏文件和文件夹",
+        "showHiddenFilesHint": "在文件管理器和 @ 文件选择器中显示以点开头的项目（如 .env 和 .git）。默认不显示隐藏项目。",
         "autoTitle": "自动为新会话生成标题",
         "autoTitleHint": "首轮回复完成后，AI 会以当前界面语言将会话内容总结为标题，并可合理添加一个相关 emoji；之后切换语言不会修改已有标题。",
         "autoTitleModel": "标题生成模型",
