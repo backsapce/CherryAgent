@@ -71,3 +71,32 @@ test('sandbox file search never lists descendants of hidden directories', async 
   assert.deepEqual(listedPaths, ['', 'src']);
   assert.deepEqual(files.map(({ relativePath }) => relativePath), ['.env', 'src/app.js']);
 });
+
+test('sandbox file search uses a recursive listing without extra directory requests', async () => {
+  const calls = [];
+  const files = await collectSandboxFiles('sandbox-url', async (path, url, options) => {
+    calls.push({ path, url, options });
+    return {
+      recursive: true,
+      children: [
+        { name: '.env', path: '/.env', type: 'file', size: 10 },
+        { name: '.git', path: '/.git', type: 'directory' },
+        { name: 'config', path: '/.git/config', type: 'file', size: 20 },
+        { name: 'src', path: '/src', type: 'directory' },
+        { name: 'app.js', path: '/src/app.js', type: 'file', size: 30 },
+        { name: 'components', path: '/src/components', type: 'directory' },
+        { name: 'Button.jsx', path: '/src/components/Button.jsx', type: 'file', size: 40 },
+      ],
+    };
+  });
+
+  assert.deepEqual(calls, [{
+    path: '',
+    url: 'sandbox-url',
+    options: { recursive: true },
+  }]);
+  assert.deepEqual(
+    files.map(({ relativePath }) => relativePath),
+    ['.env', 'src/app.js', 'src/components/Button.jsx']
+  );
+});

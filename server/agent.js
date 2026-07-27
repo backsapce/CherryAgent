@@ -264,6 +264,47 @@ function runtimePath(inputPath = '') {
   return resolve(join(FILES_ROOT_DIR, normalize(inputPath)));
 }
 
+function listFileEntries(resolvedPath, normalizedPath, recursive = false) {
+  const files = [];
+  const entries = readdirSync(resolvedPath, { withFileTypes: true });
+
+  for (const entry of entries) {
+    // File search does not traverse hidden directories (for example .git and
+    // dependency caches), matching the browser workspace search behavior.
+    if (recursive && entry.isDirectory() && entry.name.startsWith('.')) continue;
+
+    const entryPath = join(resolvedPath, entry.name);
+    let size = 0;
+    let lastModified = null;
+    try {
+      const entryStats = statSync(entryPath);
+      size = entryStats.size;
+      lastModified = entryStats.mtimeMs;
+    } catch { /* ignore */ }
+
+    const relativePath = join(normalizedPath, entry.name);
+    files.push({
+      id: `${entry.isDirectory() ? 'dir' : 'file'}-${normalizedPath}-${entry.name}`,
+      name: entry.name,
+      type: entry.isDirectory() ? 'directory' : 'file',
+      size,
+      lastModified,
+      path: relativePath,
+      parentDir: normalizedPath === '.' ? '' : normalizedPath,
+    });
+
+    if (recursive && entry.isDirectory()) {
+      try {
+        files.push(...listFileEntries(entryPath, relativePath, true));
+      } catch {
+        // One unreadable directory should not make the entire search fail.
+      }
+    }
+  }
+
+  return files;
+}
+
 const agentRunManager = createAgentRunManager({
   runsDir: RUNS_DIR,
   execCommand,
@@ -632,6 +673,7 @@ const server = createServer(async (req, res) => {
 
     const searchParams = new URLSearchParams(url.search);
     const dirPath = searchParams.get('path') || '';
+    const recursive = searchParams.get('recursive') === 'true';
 
     if (!isSafePath(dirPath)) {
       return json(res, 403, { error: 'Access denied: Path outside agent files root' }, req);
@@ -650,29 +692,16 @@ const server = createServer(async (req, res) => {
         return json(res, 400, { error: 'Not a directory' }, req);
       }
 
-      const entries = readdirSync(resolvedPath, { withFileTypes: true });
-      const files = entries.map((entry) => {
-        const entryPath = join(resolvedPath, entry.name);
-        let size = 0;
-        let lastModified = null;
-        try {
-          const entryStats = statSync(entryPath);
-          size = entryStats.size;
-          lastModified = entryStats.mtimeMs;
-        } catch { /* ignore */ }
-        return {
-          id: `${entry.isDirectory() ? 'dir' : 'file'}-${normalizedPath}-${entry.name}`,
-          name: entry.name,
-          type: entry.isDirectory() ? 'directory' : 'file',
-          size,
-          lastModified,
-          path: join(normalizedPath, entry.name),
-          parentDir: normalizedPath === '.' ? '' : normalizedPath,
-        };
-      });
+      const files = listFileEntries(resolvedPath, normalizedPath, recursive);
 
-      const result = normalizedPath === '.' || normalizedPath === ''
-        ? { id: 'root', name: '/', type: 'directory', children: files }
+      const result = recursive || normalizedPath === '.' || normalizedPath === ''
+        ? {
+          id: 'root',
+          name: '/',
+          type: 'directory',
+          ...(recursive ? { recursive: true } : {}),
+          children: files,
+        }
         : files;
 
       return json(res, 200, result, req);
