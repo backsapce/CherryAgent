@@ -332,6 +332,7 @@
         "confirmDeleteDir": "确定要删除文件夹 '{name}' 及其所有内容吗？",
         "confirmDeleteSelected": "删除 {count} 个已选项？",
         "localFiles": "本地文件",
+        "currentWorkspace": "当前",
         "remoteFiles": "远程文件",
         "loading": "加载文件中...",
         "moving": "移动中...",

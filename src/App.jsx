@@ -2827,6 +2827,7 @@ function App() {
             onWidthChange={setFileManageWidth}
             sandboxUrl={activeSandboxUrl}
             agents={agentListReady ? agentList : null}
+            activeAgentId={selectedAgentId}
           />
         </Suspense>
       )}

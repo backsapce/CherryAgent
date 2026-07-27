@@ -332,6 +332,7 @@
         "confirmDeleteDir": "フォルダー '{name}' とその内容をすべて削除してもよろしいですか？",
         "confirmDeleteSelected": "{count} 個の選択項目を削除しますか？",
         "localFiles": "ローカルファイル",
+        "currentWorkspace": "現在",
         "remoteFiles": "リモートファイル",
         "loading": "ファイルを読み込み中...",
         "moving": "移動中...",

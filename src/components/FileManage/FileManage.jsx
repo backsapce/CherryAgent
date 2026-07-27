@@ -6,7 +6,7 @@ import { suspendAutoSync, waitForSyncIdle } from '../../sync/syncManager';
 import { enqueueStorageOperation } from '../Settings/storageOperationQueue';
 import { ChevronRight, ChevronDown, Folder, File, FilePlus, FolderPlus, Refresh, X, Upload, Cloud, HardDrive, Trash, Download, FileEdit, Spinner, MultiSelect } from '../Icons/Icons';
 import FileEditor from './FileEditor';
-import { isOrphanedAgentWorkspace, joinFileManagerPath, normalizeFileManagerPath } from './pathUtils';
+import { isCurrentAgentWorkspace, isOrphanedAgentWorkspace, joinFileManagerPath, normalizeFileManagerPath } from './pathUtils';
 import { createUploadBatch, readDroppedUploadBatch, uploadBatchToDestination } from './uploadUtils';
 import './FileManage.css';
 
@@ -45,11 +45,12 @@ function readDraggedTreeItem(dataTransfer) {
   }
 }
 
-const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandboxUrl, agents }) => {
+const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandboxUrl, agents, activeAgentId }) => {
   const { t } = useI18n();
   const [fileSource, setFileSource] = useState('local');
   const [isMobile, setIsMobile] = useState(false);
   const panelRef = useRef(null);
+  const revealedWorkspaceAgentRef = useRef(null);
 
   // Check screen size
   useEffect(() => {
@@ -170,6 +171,17 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandb
       const rootDir = await fileOps.list();
       const expandedIds = new Set(expandedDirsRef.current);
       expandedIds.add(ROOT_ID);
+      if (fileSource !== 'local') {
+        revealedWorkspaceAgentRef.current = null;
+      } else if (activeAgentId && revealedWorkspaceAgentRef.current !== activeAgentId) {
+        const workspaceNode = rootDir.children?.find(
+          (node) => node.type === 'directory' && node.name === 'workspace'
+        );
+        if (workspaceNode) {
+          expandedIds.add(workspaceNode.id);
+          revealedWorkspaceAgentRef.current = activeAgentId;
+        }
+      }
       const { tree, expanded } = await hydrateExpandedDirs(rootDir, expandedIds);
       setFileTree(tree);
       setExpandedDirs(expanded);
@@ -183,12 +195,12 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandb
     } finally {
       setLoading(false);
     }
-  }, [fileOps, fileSource, hydrateExpandedDirs, t]);
+  }, [activeAgentId, fileOps, fileSource, hydrateExpandedDirs, t]);
 
   // Initial load when shown or source/trigger changes
   useEffect(() => {
     if (show) refreshTree();
-  }, [show, refreshTrigger, fileSource]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [show, refreshTrigger, fileSource, activeAgentId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Keep ref in sync with state
   useEffect(() => { expandedDirsRef.current = expandedDirs; }, [expandedDirs]);
@@ -583,7 +595,10 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandb
       const isMultiSelected = isMultiSelectable && multiSelectedItems.has(itemKey);
       const isDropTarget = dropTargetPath === dirPath;
       const isDragging = draggedItem?.key === itemKey;
+      const isCurrentWorkspace = fileSource === 'local'
+        && isCurrentAgentWorkspace(nodeParentDir, node.name, activeAgentId);
       const isOrphanedWorkspace = fileSource === 'local'
+        && !isCurrentWorkspace
         && isOrphanedAgentWorkspace(nodeParentDir, node.name, agentIds);
       const selectableItem = {
         key: itemKey,
@@ -594,9 +609,10 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandb
       };
 
       return (
-        <div key={node.id} className={`tree-node directory-node ${isSelected ? 'selected' : ''} ${isMultiSelectable ? 'multi-selectable' : ''} ${isMultiSelected ? 'multi-selected' : ''} ${isDropTarget ? 'drop-target' : ''} ${isDragging ? 'dragging' : ''} ${isOrphanedWorkspace ? 'orphaned-agent-workspace' : ''}`} style={{ paddingLeft: depth * 8 }}>
+        <div key={node.id} className={`tree-node directory-node ${isSelected ? 'selected' : ''} ${isMultiSelectable ? 'multi-selectable' : ''} ${isMultiSelected ? 'multi-selected' : ''} ${isDropTarget ? 'drop-target' : ''} ${isDragging ? 'dragging' : ''} ${isOrphanedWorkspace ? 'orphaned-agent-workspace' : ''} ${isCurrentWorkspace ? 'current-agent-workspace' : ''}`} style={{ paddingLeft: depth * 8 }}>
           <div
             className="tree-item"
+            aria-current={isCurrentWorkspace ? 'location' : undefined}
             draggable={!multiSelectMode && !movingItem && node.id !== ROOT_ID}
             onDragStart={(e) => handleTreeDragStart(e, selectableItem)}
             onDragEnd={handleTreeDragEnd}
@@ -628,6 +644,7 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandb
             {loadingDirs.has(node.id) && <Spinner className="tree-icon tree-spinner" width={18} height={18} />}
             <span className="tree-label">{node.name}</span>
             {isExpanded && node.children?.length > 0 && <span className="tree-count">({node.children.length})</span>}
+            {isCurrentWorkspace && <span className="tree-current-workspace-badge">{t('filemanage.currentWorkspace')}</span>}
             {(isSelected || isMultiSelected) && <span className="tree-selected-badge">✓</span>}
             {node.id !== 'root' && (
               <div className={`file-actions ${multiSelectMode ? 'multi-hidden' : ''}`} aria-hidden={multiSelectMode}>

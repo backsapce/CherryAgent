@@ -21,3 +21,9 @@ export function isOrphanedAgentWorkspace(parentDir, directoryName, agentIds) {
   return normalizeFileManagerPath(parentDir) === 'workspace'
     && !agentIds.has(directoryName);
 }
+
+export function isCurrentAgentWorkspace(parentDir, directoryName, activeAgentId) {
+  if (!activeAgentId) return false;
+  return normalizeFileManagerPath(parentDir) === 'workspace'
+    && directoryName === activeAgentId;
+}

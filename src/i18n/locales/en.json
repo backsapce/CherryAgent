@@ -332,6 +332,7 @@
         "confirmDeleteDir": "Are you sure you want to delete folder '{name}' and all its contents?",
         "confirmDeleteSelected": "Delete {count} selected item(s)?",
         "localFiles": "Local Files",
+        "currentWorkspace": "Current",
         "remoteFiles": "Remote Files",
         "loading": "Loading files...",
         "moving": "Moving...",
