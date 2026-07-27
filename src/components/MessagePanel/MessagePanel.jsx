@@ -8,6 +8,12 @@ import { splitTaggedReasoningContent } from '../../agent/reasoningTags';
 import { searchSkills } from '../../agent/skills';
 import { ChevronRight, Settings as SettingsIcon, Folder, File, FileEdit, Copy, MessageSquare, Plus, X, Send, Stop, Plug, PieChart, Cloud, User, ImageGenerate, Refresh } from '../Icons/Icons';
 import { getSkillCommandRange } from './skillCommand';
+import {
+  collectAgentWorkspaceFiles,
+  collectSandboxFiles,
+  CONTEXT_SOURCE_BROWSER,
+  CONTEXT_SOURCE_SANDBOX,
+} from './mentionFiles';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
@@ -26,8 +32,6 @@ const MOBILE_MESSAGE_HISTORY_PAGE_SIZE = 40;
 const AUTO_SCROLL_BOTTOM_THRESHOLD = 48;
 const LOAD_HISTORY_TOP_THRESHOLD = 24;
 const SCROLL_DIRECTION_EPSILON = 2;
-const CONTEXT_SOURCE_BROWSER = 'browser';
-const CONTEXT_SOURCE_SANDBOX = 'sandbox';
 const EMPTY_COMPOSER_DRAFT = Object.freeze({
   input: '',
   pendingImages: Object.freeze([]),
@@ -79,14 +83,6 @@ function contextSourceLabel(source) {
 
 function contextFileKey(file) {
   return `${file?.source || CONTEXT_SOURCE_BROWSER}:${file?.relativePath || file?.displayPath || ''}`;
-}
-
-function normalizeMentionPath(path) {
-  return String(path || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
-}
-
-function joinMentionPath(...parts) {
-  return normalizeMentionPath(parts.filter(Boolean).join('/'));
 }
 
 function resetEmptyTextareaCaret(textarea) {
@@ -203,71 +199,6 @@ function CodeBlock({ children, node: _node, ...props }) {
       </button>
     </div>
   );
-}
-
-async function collectAgentWorkspaceFiles(agentId) {
-  if (!agentId) return [];
-  const root = await getAgentDir(agentId);
-  const files = [];
-
-  async function walk(dir, prefix = '') {
-    for await (const [name, handle] of dir) {
-      const relativePath = prefix ? `${prefix}/${name}` : name;
-      if (handle.kind === 'directory') {
-        await walk(handle, relativePath);
-      } else {
-        const file = await handle.getFile();
-        files.push({
-          source: CONTEXT_SOURCE_BROWSER,
-          name,
-          relativePath,
-          displayPath: relativePath,
-          size: file.size,
-          lastModified: file.lastModified,
-        });
-      }
-    }
-  }
-
-  await walk(root);
-  return files.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
-}
-
-async function collectSandboxFiles(sandboxUrl) {
-  if (!sandboxUrl) return [];
-  const files = [];
-  const visitedDirs = new Set();
-
-  async function walk(dir = '') {
-    const safeDir = normalizeMentionPath(dir);
-    if (visitedDirs.has(safeDir)) return;
-    visitedDirs.add(safeDir);
-
-    const listing = await listFiles(safeDir, sandboxUrl);
-    const entries = Array.isArray(listing) ? listing : listing?.children;
-    if (!Array.isArray(entries)) return;
-
-    for (const entry of entries) {
-      const entryPath = normalizeMentionPath(entry.path || joinMentionPath(safeDir, entry.name));
-      if (!entryPath) continue;
-      if (entry.type === 'directory') {
-        await walk(entryPath);
-      } else {
-        files.push({
-          source: CONTEXT_SOURCE_SANDBOX,
-          sandboxUrl,
-          name: entry.name,
-          relativePath: entryPath,
-          displayPath: `sandbox/${entryPath}`,
-          size: entry.size || 0,
-          lastModified: entry.lastModified,
-        });
-      }
-    }
-  }
-
-  await walk('');
-  return files.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
 }
 
 async function readAgentWorkspaceFile(agentId, relativePath) {
@@ -1084,8 +1015,8 @@ const MessagePanel = forwardRef(({
       updateMention('mentionError', '');
       try {
         const sources = [];
-        if (agentId) sources.push(collectAgentWorkspaceFiles(agentId));
-        if (activeSandboxUrl) sources.push(collectSandboxFiles(activeSandboxUrl));
+        if (agentId) sources.push(collectAgentWorkspaceFiles(agentId, getAgentDir));
+        if (activeSandboxUrl) sources.push(collectSandboxFiles(activeSandboxUrl, listFiles));
 
         if (sources.length === 0) {
           if (!cancelled) {
