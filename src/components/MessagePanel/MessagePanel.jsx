@@ -8,6 +8,7 @@ import { splitTaggedReasoningContent } from '../../agent/reasoningTags';
 import { searchSkills } from '../../agent/skills';
 import { ChevronRight, Settings as SettingsIcon, Folder, File, FileEdit, Copy, MessageSquare, Plus, X, Send, Stop, Plug, PieChart, Cloud, User, ImageGenerate, Refresh } from '../Icons/Icons';
 import { getSkillCommandRange } from './skillCommand';
+import { stripLegacyContextFileSummary } from '../../contextFiles';
 import {
   collectAgentWorkspaceFiles,
   collectSandboxFiles,
@@ -113,10 +114,6 @@ function formatBytes(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function estimateTokensFromText(text) {
-  return Math.ceil((text?.length || 0) / 4);
-}
-
 function isImageGenerationToolName(name) {
   return /(^|[_-])(image|img|picture|photo|draw|vision)([_-]|$)|generate.*image|image.*generate/i.test(name || '');
 }
@@ -211,13 +208,58 @@ async function readAgentWorkspaceFile(agentId, relativePath) {
   return file.text();
 }
 
-function buildDisplayMessageWithFileRefs(text, files) {
-  if (!files.length) return text;
-  const totalTokens = files.reduce((sum, file) => sum + estimateTokensFromText(file.content), 0);
-  const refs = files
-    .map((file) => `- [${contextSourceLabel(file.source)}] ${file.relativePath || file.displayPath} (${formatBytes(file.size)}, ~${estimateTokensFromText(file.content)} tokens)`)
-    .join('\n');
-  return `${text}\n\nReferenced files: ${files.length} (~${totalTokens} tokens)\n${refs}`.trim();
+function contextFileName(file) {
+  const path = String(file?.relativePath || file?.displayPath || 'File');
+  return path.split('/').filter(Boolean).pop() || path;
+}
+
+function contextFileType(file) {
+  const name = contextFileName(file);
+  const extension = name.includes('.') ? name.split('.').pop().toUpperCase() : '';
+  return extension.slice(0, 5) || 'FILE';
+}
+
+function contextFileKind(file) {
+  const type = contextFileType(file).toLowerCase();
+  if (type === 'pdf') return 'pdf';
+  if (['csv', 'xls', 'xlsx'].includes(type)) return 'spreadsheet';
+  if (['doc', 'docx', 'md', 'rtf', 'txt'].includes(type)) return 'document';
+  if (['zip', 'gz', 'rar', 'tar', '7z'].includes(type)) return 'archive';
+  return 'generic';
+}
+
+function FileAttachmentCard({ file, onRemove, removeLabel = 'Remove file' }) {
+  const name = contextFileName(file);
+  const type = contextFileType(file);
+  const size = formatBytes(file?.size);
+  const path = file?.relativePath || file?.displayPath || name;
+
+  return (
+    <div
+      className={`file-attachment-card file-kind-${contextFileKind(file)}${onRemove ? ' removable' : ''}`}
+      title={`${contextSourceLabel(file?.source)}: ${path}`}
+    >
+      <span className="file-attachment-icon" aria-hidden="true">
+        <File width={22} height={22} />
+        <span>{type}</span>
+      </span>
+      <span className="file-attachment-details">
+        <span className="file-attachment-name">{name}</span>
+        <span className="file-attachment-meta">{[type, size].filter(Boolean).join(' · ')}</span>
+      </span>
+      {onRemove && (
+        <button
+          type="button"
+          className="file-attachment-remove"
+          onClick={onRemove}
+          title={removeLabel}
+          aria-label={`${removeLabel}: ${name}`}
+        >
+          <X width={12} height={12} />
+        </button>
+      )}
+    </div>
+  );
 }
 
 /**
@@ -1134,7 +1176,7 @@ const MessagePanel = forwardRef(({
     const text = input.trim();
     if (!text && pendingImages.length === 0 && pendingContextFiles.length === 0) return;
     const accepted = onSendMessage(
-      buildDisplayMessageWithFileRefs(text, pendingContextFiles),
+      text,
       pendingImages.length > 0 ? pendingImages : undefined,
       pendingContextFiles.length > 0 ? pendingContextFiles : undefined
     );
@@ -1155,7 +1197,7 @@ const MessagePanel = forwardRef(({
   const startEditMessage = (msg) => {
     if (streaming || msg.role !== 'user') return;
     setEditingMessageId(msg.id);
-    setEditingText(msg.content || '');
+    setEditingText(stripLegacyContextFileSummary(msg.content, msg.contextFiles));
   };
 
   const cancelEditMessage = () => {
@@ -1171,7 +1213,7 @@ const MessagePanel = forwardRef(({
   };
 
   const handleCopyMessage = async (msg) => {
-    const text = msg.content || '';
+    const text = stripLegacyContextFileSummary(msg.content, msg.contextFiles);
     if (!text) return;
 
     try {
@@ -1545,6 +1587,7 @@ const MessagePanel = forwardRef(({
                 || isImageGenerationPrompt(previousMessage?.role === 'user' ? previousMessage.content : '')
               );
             const hasTranscript = msg.role === 'assistant' && Array.isArray(msg.transcript) && msg.transcript.length > 0;
+            const displayContent = stripLegacyContextFileSummary(msg.content, msg.contextFiles);
 
             return (
             <div key={msg.id} className={`message ${msg.role}`}>
@@ -1563,6 +1606,13 @@ const MessagePanel = forwardRef(({
                   <ThinkingBlock thinking={msg.thinking} isThinking={streaming && msg === messages[messages.length - 1]} />
                 )}
                 {showImageGenerationStatus && <ImageGenerationStatus />}
+                {msg.contextFiles?.length > 0 && (
+                  <div className="message-file-attachments">
+                    {msg.contextFiles.map((file) => (
+                      <FileAttachmentCard key={contextFileKey(file)} file={file} />
+                    ))}
+                  </div>
+                )}
                 {msg.images && msg.images.length > 0 && (
                   <div className="message-images">
                     {msg.images.map((img, i) => (
@@ -1623,15 +1673,15 @@ const MessagePanel = forwardRef(({
                         rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
                         components={MARKDOWN_COMPONENTS}
                       >
-                        {msg.content}
+                        {displayContent}
                       </ReactMarkdown>
-                      {msg.role === 'assistant' && msg.content?.startsWith('Error:') && !streaming && onRetry && (
+                      {msg.role === 'assistant' && displayContent.startsWith('Error:') && !streaming && onRetry && (
                         <button className="retry-btn" onClick={() => onRetry()} title={t('message.retry')}>Retry</button>
                       )}
                     </>
                   )}
                 </div>
-                {(msg.role === 'user' || (msg.role === 'assistant' && msg.content)) && editingMessageId !== msg.id && (
+                {displayContent && editingMessageId !== msg.id && (
                   <div className="message-actions">
                     {msg.role === 'user' && (
                       <button
@@ -1649,7 +1699,7 @@ const MessagePanel = forwardRef(({
                       type="button"
                       className={`message-action-btn message-copy-btn${copiedMessageId === msg.id ? ' copied' : ''}`}
                       onClick={() => handleCopyMessage(msg)}
-                      disabled={!msg.content}
+                      disabled={!displayContent}
                       title={copiedMessageId === msg.id ? t('message.copied') : t('message.copy')}
                       aria-label={copiedMessageId === msg.id ? t('message.copied') : t('message.copy')}
                     >
@@ -1666,46 +1716,14 @@ const MessagePanel = forwardRef(({
       </div>
 
       <div className="message-input-area">
-        {pendingImages.length > 0 && (
-          <div className="image-preview-strip">
-            {pendingImages.map((img, i) => (
-              <div key={i} className="image-preview-item">
-                <img src={img.dataUrl} alt={img.name} />
-                <button className="image-preview-remove" onClick={() => removeImage(i)} title={t('message.remove')}>
-                  <X width={12} height={12} />
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-        {pendingContextFiles.length > 0 && (
-          <div className="file-context-strip">
-            {pendingContextFiles.map((file) => {
-              const key = contextFileKey(file);
-              const isSandboxFile = file.source === CONTEXT_SOURCE_SANDBOX;
-              return (
-                <div key={key} className="file-context-chip" title={`${contextSourceLabel(file.source)}: ${file.relativePath || file.displayPath}`}>
-                  {isSandboxFile ? <Cloud width={14} height={14} /> : <File width={14} height={14} />}
-                  <span>{contextSourceLabel(file.source)}:{file.relativePath}</span>
-                  <button
-                    type="button"
-                    className="file-context-remove"
-                    onClick={() => removeContextFile(key)}
-                    title="Remove file context"
-                  >
-                    <X width={12} height={12} />
-                  </button>
-                </div>
-              );
-            })}
-          </div>
-        )}
         {queuedMessages.length > 0 && (
           <div className="message-queue-list" aria-label="Queued messages">
             {queuedMessages.map((item, index) => (
               <div key={item.id} className="message-queue-item">
                 <span className="message-queue-index">{index + 1}</span>
-                <span className="message-queue-text">{item.text || (item.images?.length ? t('app.image') : '')}</span>
+                <span className="message-queue-text">
+                  {item.text || (item.contextFiles?.length ? contextFileName(item.contextFiles[0]) : item.images?.length ? t('app.image') : '')}
+                </span>
                 <button
                   type="button"
                   className="message-queue-remove"
@@ -1719,7 +1737,36 @@ const MessagePanel = forwardRef(({
             ))}
           </div>
         )}
-        <div className="message-input-wrapper">
+        <div className={`message-input-wrapper${pendingImages.length > 0 || pendingContextFiles.length > 0 ? ' has-attachments' : ''}`}>
+          {(pendingImages.length > 0 || pendingContextFiles.length > 0) && (
+            <div className="composer-attachment-strip">
+              {pendingImages.map((img, i) => (
+                <div key={`image:${i}`} className="image-preview-item">
+                  <img src={img.dataUrl} alt={img.name} />
+                  <button
+                    type="button"
+                    className="image-preview-remove"
+                    onClick={() => removeImage(i)}
+                    title={t('message.remove')}
+                    aria-label={`${t('message.remove')}: ${img.name || t('message.uploaded')}`}
+                  >
+                    <X width={12} height={12} />
+                  </button>
+                </div>
+              ))}
+              {pendingContextFiles.map((file) => {
+                const key = contextFileKey(file);
+                return (
+                  <FileAttachmentCard
+                    key={key}
+                    file={file}
+                    onRemove={() => removeContextFile(key)}
+                    removeLabel={t('message.remove')}
+                  />
+                );
+              })}
+            </div>
+          )}
           {skillOpen && (
             <div className="skill-command-popover" role="listbox" id="skill-command-listbox" aria-label={t('message.skillMenuTitle')}>
               <div className="skill-command-header">

@@ -45,6 +45,7 @@ import { createSessionSaveCoordinator } from './sessionPersistence';
 import { createSessionRunRegistry } from './sessionRuns';
 import { buildWakeupMessage, createOrReplaceTurnWakeup, findNextWakeup } from './agent/wakeup';
 import { WifiOff, ChevronRight } from './components/Icons/Icons';
+import { stripLegacyContextFileSummary } from './contextFiles';
 import './App.css';
 
 const FileManage = lazy(() => import('./components/FileManage/FileManage'));
@@ -170,6 +171,13 @@ function contextFilePromptSource(file) {
   return file?.source === 'sandbox' ? 'sandbox' : 'browser';
 }
 
+function messagePreviewText(text, images, contextFiles) {
+  if (text) return text;
+  if (contextFiles?.length) return contextFilePromptPath(contextFiles[0]) || '[File]';
+  if (images?.length) return '[Image]';
+  return '';
+}
+
 function truncateForPrompt(text, maxChars) {
   const value = String(text || '');
   if (value.length <= maxChars) return value;
@@ -204,7 +212,7 @@ function formatToolCallsForLlm(toolCalls) {
 function expandMessagesForLlm(messages) {
   return messages.map((message) => {
     const { contextFiles, toolCalls, transcript: _transcript, usage: _usage, ...rest } = message;
-    let content = message.content || '';
+    let content = stripLegacyContextFileSummary(message.content, contextFiles);
 
     if (contextFiles?.length) {
       const fileBlocks = contextFiles
@@ -2082,12 +2090,13 @@ function App() {
       if (!targetSessionId) {
         // Auto-create a session if none selected
         const userMsg = { id: generateId(), role: 'user', content: text, ...(images && { images }), ...(contextFiles && { contextFiles }) };
+        const previewText = messagePreviewText(text, images, contextFiles);
         const agentId = lastAgentId ?? (agentList.length > 0 ? agentList[0].id : null);
         const llmProfileId = currentLlmProfileId || getAgentDefaultLlmId(agentId) || llm.getActiveProfileId();
         const newSession = {
           id: generateId(),
-          title: text.slice(0, 30) + (text.length > 30 ? '...' : ''),
-          lastMessage: text || (images ? '[Image]' : ''),
+          title: previewText.slice(0, 30) + (previewText.length > 30 ? '...' : ''),
+          lastMessage: previewText,
           ...sessionTimeFields(),
           messages: [userMsg],
           ...(llmProfileId && { llmProfileId }),
@@ -2106,6 +2115,7 @@ function App() {
       }
 
       const userMsg = { id: generateId(), role: 'user', content: text, ...(images && { images }), ...(contextFiles && { contextFiles }) };
+      const previewText = messagePreviewText(text, images, contextFiles);
       const sessionId = targetSessionId;
       const currentSession = sessionsRef.current.find((session) => session.id === sessionId);
       if (!currentSession?.messages) return false;
@@ -2115,8 +2125,10 @@ function App() {
         if (session.id !== sessionId) return session;
         const next = {
           ...session,
-          title: (session.messages || []).length === 0 ? text.slice(0, 30) + (text.length > 30 ? '...' : '') : session.title,
-          lastMessage: text || (images ? '[Image]' : ''),
+          title: (session.messages || []).length === 0
+            ? previewText.slice(0, 30) + (previewText.length > 30 ? '...' : '')
+            : session.title,
+          lastMessage: previewText,
           ...sessionTimeFields(),
           messages: [...(session.messages || currentSession.messages), userMsg],
         };
