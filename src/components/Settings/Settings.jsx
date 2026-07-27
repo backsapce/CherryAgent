@@ -30,6 +30,10 @@ import { listAllSkills, setSkillEnabled } from '../../agent/skills';
 import { listAllTools, setToolEnabled } from '../../agent/tools';
 import { createAgent, deleteAgent, updateAgentName, updateAgentConfig, listAgents } from '../../agents/agents';
 import { normalizeAutoTitleConfig } from '../../models/sessionTitle';
+import {
+  normalizeShowHiddenFiles,
+  SHOW_HIDDEN_FILES_CONFIG_PATH,
+} from '../../config/fileVisibility';
 import { enqueueStorageOperation } from './storageOperationQueue';
 import { manifestModeChangeLocked } from './syncDestination';
 import './Settings.css';
@@ -174,6 +178,7 @@ const Settings = ({
   const [localAvatar, setLocalAvatar] = useState(avatar || '');
   const [avatarError, setAvatarError] = useState(null);
   const [autoTitleForm, setAutoTitleForm] = useState({ enabled: true, llmProfileId: null });
+  const [showHiddenFilesForm, setShowHiddenFilesForm] = useState(false);
   const avatarInputRef = useRef(null);
   const [agentAddMode, setAgentAddMode] = useState('server'); // 'server' | 'e2b'
   const [e2bApiKeyInput, setE2bApiKeyInput] = useState('');
@@ -340,6 +345,7 @@ const Settings = ({
     setLocalAvatar(avatar || '');
     setAvatarError(null);
     setAutoTitleForm(normalizeAutoTitleConfig(config.get('general.autoTitle')));
+    setShowHiddenFilesForm(normalizeShowHiddenFiles(config.get(SHOW_HIDDEN_FILES_CONFIG_PATH)));
     const savedSync = config.get('sync') || {};
     const providerPreset = providerPresetOrDefault(savedSync.providerPreset);
     setSyncForm({
@@ -472,9 +478,12 @@ const Settings = ({
     : null;
 
   const handleSaveGeneral = async () => {
-    await config.set('general.autoTitle', {
-      enabled: autoTitleForm.enabled,
-      llmProfileId: effectiveAutoTitleProfileId,
+    await config.merge('general', {
+      autoTitle: {
+        enabled: autoTitleForm.enabled,
+        llmProfileId: effectiveAutoTitleProfileId,
+      },
+      showHiddenFiles: showHiddenFilesForm,
     });
     await onUserNicknameChange?.(localNickname);
     await onAvatarChange?.(localAvatar);
@@ -1107,6 +1116,16 @@ const Settings = ({
               </div>
               <p className="settings-hint">{t('generalSettings.avatarHint')}</p>
               {avatarError && <p className="settings-error">{avatarError}</p>}
+
+              <label className="settings-checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={showHiddenFilesForm}
+                  onChange={(e) => setShowHiddenFilesForm(e.target.checked)}
+                />
+                <span>{t('generalSettings.showHiddenFiles')}</span>
+              </label>
+              <p className="settings-hint">{t('generalSettings.showHiddenFilesHint')}</p>
 
               <label className="settings-checkbox-row">
                 <input

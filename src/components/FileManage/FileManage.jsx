@@ -2,6 +2,12 @@ import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { useI18n } from '../../i18n/context';
 import { loadFiles, saveFile, createFile, createDirectory, deleteFile as deleteLocalFile, moveFile as moveLocalFile, getFileBlob } from '../../vfs/opfs';
 import { listFiles, createFile as createRemoteFile, deleteFile as deleteRemoteFile, moveFile as moveRemoteFile, uploadFile as uploadRemoteFile, downloadFile as downloadRemoteFile } from '../../models/agent';
+import config from '../../config/config';
+import {
+  filterHiddenFileEntries,
+  normalizeShowHiddenFiles,
+  SHOW_HIDDEN_FILES_CONFIG_PATH,
+} from '../../config/fileVisibility';
 import { suspendAutoSync, waitForSyncIdle } from '../../sync/syncManager';
 import { enqueueStorageOperation } from '../Settings/storageOperationQueue';
 import { ChevronRight, ChevronDown, Folder, File, FilePlus, FolderPlus, Refresh, X, Upload, Cloud, HardDrive, Trash, Download, FileEdit, Spinner, MultiSelect } from '../Icons/Icons';
@@ -49,8 +55,15 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandb
   const { t } = useI18n();
   const [fileSource, setFileSource] = useState('local');
   const [isMobile, setIsMobile] = useState(false);
+  const [showHiddenFiles, setShowHiddenFiles] = useState(
+    () => normalizeShowHiddenFiles(config.get(SHOW_HIDDEN_FILES_CONFIG_PATH))
+  );
   const panelRef = useRef(null);
   const revealedWorkspaceAgentRef = useRef(null);
+
+  useEffect(() => config.subscribe((nextConfig) => {
+    setShowHiddenFiles(normalizeShowHiddenFiles(nextConfig.general?.showHiddenFiles));
+  }), []);
 
   // Check screen size
   useEffect(() => {
@@ -89,7 +102,7 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandb
   // Adapter: local vs remote file operations, eliminates branching in every handler
   const fileOps = useMemo(() => {
     return fileSource === 'local' ? {
-      list: () => loadFiles(),
+      list: async () => filterHiddenFileEntries(await loadFiles(), showHiddenFiles),
       createFile: (name, path) => createFile(name, path),
       createDir: (name, path) => createDirectory(name, path),
       delete: (name, path, isDir) => deleteLocalFile(name, path || null, isDir),
@@ -97,7 +110,10 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandb
       download: (name, path) => getFileBlob(name, path || null),
       upload: (name, blob, path) => saveFile(name, blob, path || null),
     } : {
-      list: () => listFiles('', sandboxUrl),
+      list: async () => filterHiddenFileEntries(
+        await listFiles('', sandboxUrl, { includeHidden: showHiddenFiles }),
+        showHiddenFiles
+      ),
       createFile: (name, path) => createRemoteFile(joinFileManagerPath(path, name), '', false, sandboxUrl),
       createDir: (name, path) => createRemoteFile(joinFileManagerPath(path, name), '', true, sandboxUrl),
       delete: (name, path) => {
@@ -117,16 +133,18 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandb
         return uploadRemoteFile(fullPath, file, sandboxUrl);
       },
     };
-  }, [fileSource, sandboxUrl]);
+  }, [fileSource, sandboxUrl, showHiddenFiles]);
 
   const listDirectoryChildren = useCallback(async (path) => {
     const dirPath = normalizeFileManagerPath(path);
     let children = fileSource === 'local'
       ? await loadFiles(dirPath)
-      : await listFiles(dirPath, sandboxUrl);
+      : await listFiles(dirPath, sandboxUrl, { includeHidden: showHiddenFiles });
     if (!Array.isArray(children) && children?.children) children = children.children;
-    return Array.isArray(children) ? children : [];
-  }, [fileSource, sandboxUrl]);
+    return Array.isArray(children)
+      ? filterHiddenFileEntries(children, showHiddenFiles)
+      : [];
+  }, [fileSource, sandboxUrl, showHiddenFiles]);
 
   const hydrateExpandedDirs = useCallback(async (rootDir, expandedIds) => {
     const existingDirIds = new Set([ROOT_ID]);
@@ -200,7 +218,7 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandb
   // Initial load when shown or source/trigger changes
   useEffect(() => {
     if (show) refreshTree();
-  }, [show, refreshTrigger, fileSource, activeAgentId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [show, refreshTrigger, fileSource, activeAgentId, showHiddenFiles]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Keep ref in sync with state
   useEffect(() => { expandedDirsRef.current = expandedDirs; }, [expandedDirs]);
@@ -211,7 +229,7 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandb
     setMultiSelectedItems(new Map());
     setDraggedItem(null);
     setDropTargetPath(null);
-  }, [fileSource]);
+  }, [fileSource, showHiddenFiles]);
 
   // Upload files/directories while preserving every path relative to the
   // selected folder or drop target.

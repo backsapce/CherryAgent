@@ -264,14 +264,12 @@ function runtimePath(inputPath = '') {
   return resolve(join(FILES_ROOT_DIR, normalize(inputPath)));
 }
 
-function listFileEntries(resolvedPath, normalizedPath, recursive = false) {
+function listFileEntries(resolvedPath, normalizedPath, recursive = false, includeHidden = false) {
   const files = [];
   const entries = readdirSync(resolvedPath, { withFileTypes: true });
 
   for (const entry of entries) {
-    // File search does not traverse hidden directories (for example .git and
-    // dependency caches), matching the browser workspace search behavior.
-    if (recursive && entry.isDirectory() && entry.name.startsWith('.')) continue;
+    if (!includeHidden && entry.name.startsWith('.')) continue;
 
     const entryPath = join(resolvedPath, entry.name);
     let size = 0;
@@ -295,7 +293,7 @@ function listFileEntries(resolvedPath, normalizedPath, recursive = false) {
 
     if (recursive && entry.isDirectory()) {
       try {
-        files.push(...listFileEntries(entryPath, relativePath, true));
+        files.push(...listFileEntries(entryPath, relativePath, true, includeHidden));
       } catch {
         // One unreadable directory should not make the entire search fail.
       }
@@ -674,6 +672,7 @@ const server = createServer(async (req, res) => {
     const searchParams = new URLSearchParams(url.search);
     const dirPath = searchParams.get('path') || '';
     const recursive = searchParams.get('recursive') === 'true';
+    const includeHidden = searchParams.get('includeHidden') === 'true';
 
     if (!isSafePath(dirPath)) {
       return json(res, 403, { error: 'Access denied: Path outside agent files root' }, req);
@@ -692,7 +691,7 @@ const server = createServer(async (req, res) => {
         return json(res, 400, { error: 'Not a directory' }, req);
       }
 
-      const files = listFileEntries(resolvedPath, normalizedPath, recursive);
+      const files = listFileEntries(resolvedPath, normalizedPath, recursive, includeHidden);
 
       const result = recursive || normalizedPath === '.' || normalizedPath === ''
         ? {

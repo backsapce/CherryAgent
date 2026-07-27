@@ -331,3 +331,18 @@ test('recursive sandbox file requests use one recursive endpoint call', async ()
     restore();
   }
 });
+
+test('sandbox file requests can explicitly include hidden entries', async () => {
+  let requestedUrl = null;
+  const restore = installBrowserMocks(undefined, async (url) => {
+    requestedUrl = url;
+    return { ok: true, json: async () => ({ children: [] }) };
+  });
+
+  try {
+    await listFiles('', 'https://sandbox.example', { includeHidden: true });
+    assert.equal(requestedUrl, 'https://sandbox.example/agent/files?includeHidden=true');
+  } finally {
+    restore();
+  }
+});

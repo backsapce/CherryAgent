@@ -32,7 +32,7 @@ function inaccessibleDirectory() {
   };
 }
 
-test('workspace file search prunes hidden directories but keeps hidden files', async () => {
+test('workspace file search excludes hidden files and directories by default', async () => {
   const root = directory([
     ['.vertex-runs', inaccessibleDirectory()],
     ['.env', file(10, 20)],
@@ -44,10 +44,31 @@ test('workspace file search prunes hidden directories but keeps hidden files', a
 
   const files = await collectAgentWorkspaceFiles('agent-1', async () => root);
 
-  assert.deepEqual(files.map(({ relativePath }) => relativePath), ['.env', 'src/app.js']);
+  assert.deepEqual(files.map(({ relativePath }) => relativePath), ['src/app.js']);
 });
 
-test('sandbox file search never lists descendants of hidden directories', async () => {
+test('workspace file search includes hidden files and directories when enabled', async () => {
+  const root = directory([
+    ['.env', file(10, 20)],
+    ['.config', directory([
+      ['settings.json', file(30, 40)],
+    ])],
+    ['app.js', file(50, 60)],
+  ]);
+
+  const files = await collectAgentWorkspaceFiles(
+    'agent-1',
+    async () => root,
+    { showHiddenFiles: true }
+  );
+
+  assert.deepEqual(
+    files.map(({ relativePath }) => relativePath),
+    ['.config/settings.json', '.env', 'app.js']
+  );
+});
+
+test('sandbox file search excludes hidden files and hidden directories by default', async () => {
   const listedPaths = [];
   const listings = {
     '': {
@@ -69,7 +90,7 @@ test('sandbox file search never lists descendants of hidden directories', async 
   });
 
   assert.deepEqual(listedPaths, ['', 'src']);
-  assert.deepEqual(files.map(({ relativePath }) => relativePath), ['.env', 'src/app.js']);
+  assert.deepEqual(files.map(({ relativePath }) => relativePath), ['src/app.js']);
 });
 
 test('sandbox file search uses a recursive listing without extra directory requests', async () => {
@@ -97,6 +118,36 @@ test('sandbox file search uses a recursive listing without extra directory reque
   }]);
   assert.deepEqual(
     files.map(({ relativePath }) => relativePath),
-    ['.env', 'src/app.js', 'src/components/Button.jsx']
+    ['src/app.js', 'src/components/Button.jsx']
+  );
+});
+
+test('sandbox file search requests and includes hidden entries when enabled', async () => {
+  const calls = [];
+  const files = await collectSandboxFiles(
+    'sandbox-url',
+    async (path, url, options) => {
+      calls.push({ path, url, options });
+      return {
+        recursive: true,
+        children: [
+          { name: '.env', path: '/.env', type: 'file', size: 10 },
+          { name: '.git', path: '/.git', type: 'directory' },
+          { name: 'config', path: '/.git/config', type: 'file', size: 20 },
+          { name: 'app.js', path: '/app.js', type: 'file', size: 30 },
+        ],
+      };
+    },
+    { showHiddenFiles: true }
+  );
+
+  assert.deepEqual(calls, [{
+    path: '',
+    url: 'sandbox-url',
+    options: { recursive: true, includeHidden: true },
+  }]);
+  assert.deepEqual(
+    files.map(({ relativePath }) => relativePath),
+    ['.env', '.git/config', 'app.js']
   );
 });

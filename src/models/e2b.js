@@ -455,7 +455,7 @@ async function copyE2bDirectory(sandbox, sourcePath, targetPath) {
 /**
  * List files/directories in the E2B sandbox.
  * @param {string} [path] - Directory path (empty for root)
- * @param {{recursive?: boolean}} [options] - Listing options
+ * @param {{recursive?: boolean, includeHidden?: boolean}} [options] - Listing options
  * @returns {Promise<{id: string, name: string, type: string, size: number, path: string, parentDir: string, children: Array}|Array>}
  */
 export async function listE2bFiles(path = '', options = {}) {

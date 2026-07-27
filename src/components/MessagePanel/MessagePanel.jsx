@@ -2,6 +2,11 @@ import { forwardRef, lazy, Suspense, useImperativeHandle, useState, useRef, useE
 import { useI18n } from '../../i18n/context';
 import { getAgentDir, normalizeWorkspaceRelativePath, readAgentFileBlob } from '../../vfs/opfs';
 import { downloadE2bFile, downloadRemoteFile, E2B_AGENT_ID, listFiles, readFileText } from '../../models/agent';
+import config from '../../config/config';
+import {
+  normalizeShowHiddenFiles,
+  SHOW_HIDDEN_FILES_CONFIG_PATH,
+} from '../../config/fileVisibility';
 import { getSyncStatus, subscribeSyncStatus } from '../../sync/syncManager';
 import { imageDownloadName } from './imageDownload';
 import { splitTaggedReasoningContent } from '../../agent/reasoningTags';
@@ -842,6 +847,9 @@ const MessagePanel = forwardRef(({
   const [composerDrafts, setComposerDrafts] = useState({});
   const [copiedMessageId, setCopiedMessageId] = useState(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [showHiddenFiles, setShowHiddenFiles] = useState(
+    () => normalizeShowHiddenFiles(config.get(SHOW_HIDDEN_FILES_CONFIG_PATH))
+  );
   const [syncStatus, setSyncStatus] = useState(() => getSyncStatus());
   const [visibleMessageCount, setVisibleMessageCount] = useState(messageHistoryPageSize);
   const messageListRef = useRef(null);
@@ -925,6 +933,10 @@ const MessagePanel = forwardRef(({
     return messages.slice(start);
   }, [messages, visibleMessageCount]);
   const hasHiddenMessages = visibleMessages.length < messages.length;
+
+  useEffect(() => config.subscribe((nextConfig) => {
+    setShowHiddenFiles(normalizeShowHiddenFiles(nextConfig.general?.showHiddenFiles));
+  }), []);
 
   useImperativeHandle(ref, () => ({
     focusInput() {
@@ -1053,7 +1065,7 @@ const MessagePanel = forwardRef(({
         return;
       }
 
-      const sourceKey = `${agentId || ''}\0${activeSandboxUrl || ''}`;
+      const sourceKey = `${agentId || ''}\0${activeSandboxUrl || ''}\0${showHiddenFiles}`;
       if (mentionSourceKeysRef.current.get(effectDraftKey) !== sourceKey) {
         mentionSourceKeysRef.current.set(effectDraftKey, sourceKey);
         updateMention('mentionFiles', []);
@@ -1062,8 +1074,9 @@ const MessagePanel = forwardRef(({
       updateMention('mentionError', '');
       try {
         const sources = [];
-        if (agentId) sources.push(collectAgentWorkspaceFiles(agentId, getAgentDir));
-        if (activeSandboxUrl) sources.push(collectSandboxFiles(activeSandboxUrl, listFiles));
+        const visibilityOptions = { showHiddenFiles };
+        if (agentId) sources.push(collectAgentWorkspaceFiles(agentId, getAgentDir, visibilityOptions));
+        if (activeSandboxUrl) sources.push(collectSandboxFiles(activeSandboxUrl, listFiles, visibilityOptions));
 
         if (sources.length === 0) {
           if (!cancelled) {
@@ -1103,7 +1116,7 @@ const MessagePanel = forwardRef(({
     return () => {
       cancelled = true;
     };
-  }, [mentionOpen, agentId, activeSandboxUrl, draftKey]);
+  }, [mentionOpen, agentId, activeSandboxUrl, draftKey, showHiddenFiles]);
 
   useEffect(() => {
     let cancelled = false;
