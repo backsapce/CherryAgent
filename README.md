@@ -61,16 +61,25 @@ npm run preview      # Preview dist/ on port 5173
 
 ## Configure An LLM
 
-Open Settings in the app and choose a provider:
+Open Settings and configure a reusable Provider connection first, then add one
+or more LLMs that reference it. Provider connections own the API key and Base
+URL; LLMs only choose a model and context window. The same model can therefore
+be configured through multiple providers without sharing or duplicating their
+credentials.
+
+Supported provider types:
 
 - OpenAI
 - Anthropic Claude
 - Google Gemini
 - OpenRouter
 - Qwen/DashScope
+- DeepSeek
 - Custom OpenAI-compatible endpoint
 
-API keys are saved locally in browser storage through the app config.
+API keys are saved in browser storage through the app config. Existing LLM
+profiles are migrated automatically while keeping their IDs, so session and
+agent selections continue to work.
 
 ## Sandboxes
 
@@ -186,6 +195,7 @@ Agent Node environment variables:
 | `AGENT_WORKING_DIR` | Server process cwd | Agent workspace root. Commands run here, and file APIs use this same directory by default. |
 | `AGENT_FILES_DIR` | `AGENT_WORKING_DIR` | Optional separate root for file APIs. Set this only when you intentionally want managed files isolated from the command cwd. |
 | `AGENT_RUNS_DIR` | `<workspace>/.vertex-runs` | Persistent metadata, event logs, and results for background sandbox Agent runs. |
+| `AGENT_RUN_IDLE_TIMEOUT_MS` | `120000` | Fail a sandbox Agent run that emits no model or tool progress for this many milliseconds (clamped to 30 seconds–30 minutes). |
 | `AGENT_JOBS_DIR` | `<workspace>/.vertex-jobs` | Persistent metadata and bounded logs for managed background commands. |
 | `AGENT_TOKEN_FILE` | `.vertex-token` | File used to persist long-lived auth tokens; the sandbox Docker image sets this to `/home/vertex/.vertex-token`. |
 | `AGENT_DISABLE_AUTH` | unset | Set to `true` only when the sandbox is already protected by another trusted boundary. When enabled, `/agent` returns `needsAuth: false` and command/file APIs do not require a token. |

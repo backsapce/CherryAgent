@@ -28,6 +28,7 @@ import config from '../config/config.js';
 
 const MAX_SKILL_CONTENT_CHARS = 60_000;
 const MAX_REFERENCE_CHARS = 80_000;
+const RUNTIME_SKILL_CATALOG_TIMEOUT_MS = 20_000;
 
 const DEFAULT_SKILLS = [
   {
@@ -103,7 +104,7 @@ export async function ensureDefaultSkills() {
  * List all skills in precedence order. OPFS workspace skills override OPFS
  * global skills, and skills in the selected agent runtime override both.
  * @param {string} [agentId]
- * @param {{ agentUrl?: string|null }} [options]
+ * @param {{ agentUrl?: string|null, signal?: AbortSignal|null, runtimeCatalogTimeoutMs?: number }} [options]
  */
 async function listSkills(agentId, options = {}) {
   await ensureDefaultSkills();
@@ -117,7 +118,10 @@ async function listSkills(agentId, options = {}) {
     }
   }
   if (options.agentUrl) {
-    for (const skill of await listSkillsFromRuntimeAgent(options.agentUrl)) {
+    for (const skill of await listSkillsFromRuntimeAgent(options.agentUrl, {
+      signal: options.signal,
+      runtimeCatalogTimeoutMs: options.runtimeCatalogTimeoutMs,
+    })) {
       merged.set(skill.name, skill);
     }
   }
@@ -128,7 +132,7 @@ async function listSkills(agentId, options = {}) {
  * Search skills by query.
  * @param {string} query
  * @param {string} [agentId]
- * @param {{ agentUrl?: string|null }} [options]
+ * @param {{ agentUrl?: string|null, signal?: AbortSignal|null }} [options]
  */
 export async function searchSkills(query, agentId, options = {}) {
   const terms = String(query || '').toLowerCase().split(/\s+/).filter(Boolean);
@@ -145,7 +149,7 @@ export async function searchSkills(query, agentId, options = {}) {
  * Load a skill. References are listed by default and loaded only when requested.
  * @param {string} name
  * @param {string} [agentId]
- * @param {{ referenceName?: string, agentUrl?: string|null }} [options]
+ * @param {{ referenceName?: string, agentUrl?: string|null, signal?: AbortSignal|null }} [options]
  */
 export async function readSkill(name, agentId, options = {}) {
   const resolved = await resolveSkill(name, agentId, options);
@@ -230,7 +234,11 @@ export async function listAllSkills(includeDisabled = true, agentId, options = {
  * @param {string} [agentId]
  */
 export async function buildSkillsSection(agentId, options = {}) {
-  const skills = await listEnabledSkills(agentId, { agentUrl: options.agentUrl });
+  const skills = await listEnabledSkills(agentId, {
+    agentUrl: options.agentUrl,
+    signal: options.signal,
+    runtimeCatalogTimeoutMs: options.runtimeCatalogTimeoutMs,
+  });
   if (!skills.length) return '';
 
   const list = skills
@@ -259,16 +267,22 @@ export async function buildSkillsSection(agentId, options = {}) {
  * retain their normal precedence over global skills. Skills already in the
  * sandbox are intentionally not part of this snapshot.
  * @param {string} [agentId]
+ * @param {{ signal?: AbortSignal|null }} [options]
  * @returns {Promise<Array<{ path: string, content: string }>>}
  */
-export async function buildSandboxSkillFiles(agentId) {
+export async function buildSandboxSkillFiles(agentId, options = {}) {
+  throwIfSkillAborted(options.signal);
   const files = [];
   for (const skill of await listEnabledSkills(agentId)) {
+    throwIfSkillAborted(options.signal);
     const resolved = await resolveSkill(skill.name, agentId);
+    throwIfSkillAborted(options.signal);
     if (!resolved) continue;
     files.push({ path: `skills/${skill.name}/SKILL.md`, content: resolved.content });
     for (const ref of resolved.skill.references) {
+      throwIfSkillAborted(options.signal);
       const content = await readReference(resolved, ref.name);
+      throwIfSkillAborted(options.signal);
       if (content != null) {
         files.push({ path: `skills/${skill.name}/references/${ref.name}`, content });
       }
@@ -320,44 +334,130 @@ async function listSkillsFromWorkspace(agentId) {
   return skills;
 }
 
-async function listSkillsFromRuntimeAgent(agentUrl) {
+async function listSkillsFromRuntimeAgent(agentUrl, options = {}) {
+  const deadline = createRuntimeCatalogDeadline(
+    options.signal,
+    options.runtimeCatalogTimeoutMs
+  );
+  try {
+    return await loadSkillsFromRuntimeAgent(agentUrl, {
+      ...options,
+      signal: deadline.signal,
+    });
+  } catch (error) {
+    // A catalog timeout should not prevent the run from starting with its
+    // browser-owned skills. Explicit caller cancellation must still stop it.
+    rethrowIfAborted(error, options.signal);
+    return [];
+  } finally {
+    deadline.dispose();
+  }
+}
+
+async function loadSkillsFromRuntimeAgent(agentUrl, options = {}) {
+  const requestOptions = options.signal ? { signal: options.signal } : {};
   let dirs;
   try {
-    dirs = directoryEntries(await listFiles('skills', agentUrl))
+    dirs = directoryEntries(await listFiles('skills', agentUrl, requestOptions))
       .filter((entry) => entry.type === 'directory');
-  } catch {
+  } catch (error) {
+    rethrowIfAborted(error, options.signal);
     return [];
   }
 
-  const skills = [];
-  for (const dir of dirs) {
+  // Load runtime skills concurrently so one unreachable skill directory does
+  // not multiply the per-request deadline across the whole catalog.
+  const skills = await Promise.all(dirs.map(async (dir) => {
     const skillName = safeDirectorySkillName(dir.name);
-    if (!skillName) continue;
+    if (!skillName) return null;
     try {
-      const content = await readFileText(`skills/${skillName}/SKILL.md`, agentUrl);
-      if (!content) continue;
-      const refs = await listRuntimeAgentSkillRefs(agentUrl, skillName);
-      skills.push(buildSkillRecord({
+      const [content, skillEntries] = await Promise.all([
+        readFileText(`skills/${skillName}/SKILL.md`, agentUrl, requestOptions),
+        listFiles(`skills/${skillName}`, agentUrl, requestOptions),
+      ]);
+      if (!content) return null;
+      const refs = await listRuntimeAgentSkillRefs(
+        agentUrl,
+        skillName,
+        directoryEntries(skillEntries),
+        options
+      );
+      return buildSkillRecord({
         dirName: skillName,
         source: 'agent',
         meta: parseFrontmatter(content),
         refs,
-      }));
-    } catch {
+      });
+    } catch (error) {
+      rethrowIfAborted(error, options.signal);
       // A partially written or concurrently removed agent skill is skipped.
+      return null;
     }
-  }
-  return skills;
+  }));
+  return skills.filter(Boolean);
 }
 
-async function listRuntimeAgentSkillRefs(agentUrl, skillName) {
+async function listRuntimeAgentSkillRefs(agentUrl, skillName, skillEntries, options = {}) {
+  const requestOptions = options.signal ? { signal: options.signal } : {};
+  let entries = skillEntries;
+  if (!Array.isArray(entries)) {
+    try {
+      entries = directoryEntries(await listFiles(`skills/${skillName}`, agentUrl, requestOptions));
+    } catch (error) {
+      rethrowIfAborted(error, options.signal);
+      return [];
+    }
+  }
+  const hasReferencesDirectory = entries.some((entry) => (
+    entry.type === 'directory' && entry.name === 'references'
+  ));
+  if (!hasReferencesDirectory) return [];
   try {
-    return directoryEntries(await listFiles(`skills/${skillName}/references`, agentUrl))
+    return directoryEntries(await listFiles(
+      `skills/${skillName}/references`,
+      agentUrl,
+      requestOptions
+    ))
       .filter((entry) => entry.type !== 'directory')
       .map((entry) => ({ name: entry.name }));
-  } catch {
+  } catch (error) {
+    rethrowIfAborted(error, options.signal);
     return [];
   }
+}
+
+function rethrowIfAborted(error, signal) {
+  if (signal?.aborted) throw signal.reason || error;
+}
+
+function throwIfSkillAborted(signal) {
+  if (!signal?.aborted) return;
+  throw signal.reason || new DOMException('Aborted', 'AbortError');
+}
+
+function createRuntimeCatalogDeadline(parentSignal, requestedTimeoutMs) {
+  const parsedTimeoutMs = Number(requestedTimeoutMs);
+  const timeoutMs = Number.isFinite(parsedTimeoutMs) && parsedTimeoutMs > 0
+    ? Math.floor(parsedTimeoutMs)
+    : RUNTIME_SKILL_CATALOG_TIMEOUT_MS;
+  const controller = new AbortController();
+  const relayAbort = () => controller.abort(parentSignal?.reason);
+  if (parentSignal?.aborted) relayAbort();
+  else parentSignal?.addEventListener('abort', relayAbort, { once: true });
+  const timerId = setTimeout(() => {
+    const error = new Error(`Runtime skill catalog timed out after ${timeoutMs} ms.`);
+    error.name = 'TimeoutError';
+    error.code = 'RUNTIME_SKILL_CATALOG_TIMEOUT';
+    controller.abort(error);
+  }, timeoutMs);
+
+  return {
+    signal: controller.signal,
+    dispose() {
+      clearTimeout(timerId);
+      parentSignal?.removeEventListener('abort', relayAbort);
+    },
+  };
 }
 
 function directoryEntries(listing) {
@@ -377,14 +477,25 @@ function safeDirectorySkillName(name) {
 async function resolveSkill(name, agentId, options = {}) {
   const skillName = normalizeSkillName(name);
   if (options.agentUrl) {
+    const requestOptions = options.signal ? { signal: options.signal } : {};
     try {
-      const agentContent = await readFileText(`skills/${skillName}/SKILL.md`, options.agentUrl);
+      const agentContent = await readFileText(
+        `skills/${skillName}/SKILL.md`,
+        options.agentUrl,
+        requestOptions
+      );
       if (agentContent) {
-        const refs = await listRuntimeAgentSkillRefs(options.agentUrl, skillName);
+        const refs = await listRuntimeAgentSkillRefs(
+          options.agentUrl,
+          skillName,
+          undefined,
+          options
+        );
         return {
           content: agentContent,
           source: 'agent',
           agentUrl: options.agentUrl,
+          signal: options.signal,
           skill: buildSkillRecord({
             dirName: skillName,
             source: 'agent',
@@ -393,7 +504,8 @@ async function resolveSkill(name, agentId, options = {}) {
           }),
         };
       }
-    } catch {
+    } catch (error) {
+      rethrowIfAborted(error, options.signal);
       // Fall through to the OPFS workspace/global sources.
     }
   }
@@ -437,9 +549,11 @@ async function readReference(resolved, referenceName) {
     try {
       return await readFileText(
         `skills/${resolved.skill.name}/references/${safeName}`,
-        resolved.agentUrl
+        resolved.agentUrl,
+        resolved.signal ? { signal: resolved.signal } : {}
       );
-    } catch {
+    } catch (error) {
+      rethrowIfAborted(error, resolved.signal);
       return null;
     }
   }

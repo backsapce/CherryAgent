@@ -39,10 +39,14 @@ const STATIC_DIR = join(__dirname, '..', 'dist');
 const PORT = process.env.AGENT_PORT || 3099;
 const MAX_TIMEOUT = 30_000;
 const MAX_OUTPUT_BYTES = 10 * 1024 * 1024;
+const MAX_AGENT_RUN_REQUEST_BYTES = 128 * 1024 * 1024;
 const DEFAULT_TOKEN_FILE = join(process.cwd(), '.vertex-token');
 const TOKEN_FILE = process.env.AGENT_TOKEN_FILE
   || DEFAULT_TOKEN_FILE;
-const ALLOWED_ORIGINS = (process.env.AGENT_ALLOWED_ORIGINS || 'https://127.0.0.1:5173,https://localhost:5173,http://127.0.0.1:5173,http://localhost:5173').split(',');
+const ALLOWED_ORIGINS = (process.env.AGENT_ALLOWED_ORIGINS || 'https://127.0.0.1:5173,https://localhost:5173,http://127.0.0.1:5173,http://localhost:5173')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
 const COMMAND_SHELL = process.env.AGENT_SHELL || (process.platform === 'win32' ? (process.env.ComSpec || 'cmd.exe') : undefined);
 const WORKSPACE_DIR = resolve(process.env.AGENT_WORKING_DIR || process.cwd());
 const FILES_ROOT_DIR = resolve(process.env.AGENT_FILES_DIR || WORKSPACE_DIR);
@@ -50,6 +54,10 @@ const PUBLIC_WORKSPACE_LABEL = 'workspace';
 const AUTH_DISABLED = /^(1|true|yes)$/i.test(process.env.AGENT_DISABLE_AUTH || '');
 const RUNS_DIR = resolve(process.env.AGENT_RUNS_DIR || join(WORKSPACE_DIR, '.vertex-runs'));
 const JOBS_DIR = resolve(process.env.AGENT_JOBS_DIR || join(WORKSPACE_DIR, '.vertex-jobs'));
+const RUN_IDLE_TIMEOUT_MS = Math.min(
+  30 * 60_000,
+  Math.max(30_000, Number(process.env.AGENT_RUN_IDLE_TIMEOUT_MS) || 120_000)
+);
 
 function printBootConfig() {
   const agentEnv = Object.fromEntries(
@@ -73,6 +81,7 @@ function printBootConfig() {
       publicWorkspaceLabel: PUBLIC_WORKSPACE_LABEL,
       authDisabled: AUTH_DISABLED,
       jobsDir: JOBS_DIR,
+      runIdleTimeoutMs: RUN_IDLE_TIMEOUT_MS,
       staticDir: STATIC_DIR,
     },
   }, null, 2));
@@ -119,7 +128,6 @@ function resolveStaticPath(pathname) {
 
 function corsHeaders(req) {
   const origin = req.headers['origin'] || '';
-  console.log(`[agent] Request from origin: ${origin}`,ALLOWED_ORIGINS);
   const allowed = ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
   return {
     'Access-Control-Allow-Origin': allowed,
@@ -305,6 +313,7 @@ function listFileEntries(resolvedPath, normalizedPath, recursive = false, includ
 
 const agentRunManager = createAgentRunManager({
   runsDir: RUNS_DIR,
+  idleTimeoutMs: RUN_IDLE_TIMEOUT_MS,
   execCommand,
   startCommand: (command) => commandJobManager.start(command),
   getCommand: (id, cursor) => commandJobManager.get(id, cursor),
@@ -349,9 +358,24 @@ function json(res, status, data, req) {
   res.end(JSON.stringify(data));
 }
 
-async function readBody(req) {
+async function readBody(req, maxBytes = Number.POSITIVE_INFINITY) {
+  const declaredBytes = Number(req.headers['content-length']);
+  if (Number.isFinite(declaredBytes) && declaredBytes > maxBytes) {
+    const error = new Error(`Request body exceeds ${maxBytes} bytes.`);
+    error.statusCode = 413;
+    throw error;
+  }
   let body = '';
-  for await (const chunk of req) body += chunk;
+  let receivedBytes = 0;
+  for await (const chunk of req) {
+    receivedBytes += Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(chunk);
+    if (receivedBytes > maxBytes) {
+      const error = new Error(`Request body exceeds ${maxBytes} bytes.`);
+      error.statusCode = 413;
+      throw error;
+    }
+    body += chunk;
+  }
   return body;
 }
 
@@ -474,9 +498,9 @@ const server = createServer(async (req, res) => {
       filesRoot: PUBLIC_WORKSPACE_LABEL,
       capabilities: {
         backgroundAgentRuns: true,
-        // Protocol 2 guarantees that a successful schedule_wakeup call ends
-        // the current model turn before the durable run enters waiting.
-        agentRunProtocol: 2,
+        // Protocol 3 additionally guarantees bounded no-progress runs and an
+        // immutable terminal state after forced cancellation.
+        agentRunProtocol: 3,
         backgroundCommands: true,
         backgroundCommandProtocol: 1,
       },
@@ -637,7 +661,7 @@ const server = createServer(async (req, res) => {
   if (url.pathname === '/agent/runs' && req.method === 'POST') {
     if (!isAuthorized(req)) return json(res, 401, { error: 'Unauthorized.' }, req);
     try {
-      const input = JSON.parse(await readBody(req));
+      const input = JSON.parse(await readBody(req, MAX_AGENT_RUN_REQUEST_BYTES));
       const run = agentRunManager.start(input);
       return json(res, 202, run, req);
     } catch (error) {

@@ -270,9 +270,13 @@ function splitParentPath(path) {
 
 async function findSandboxListedFile(path, ctx) {
   const { parent, name } = splitParentPath(path);
-  const listing = await listFiles(parent, ctx?.agentUrl);
+  const listing = await listFiles(parent, ctx?.agentUrl, { signal: ctx?.signal });
   const entries = Array.isArray(listing) ? listing : listing?.children;
   return entries?.find((entry) => entry.name === name) || null;
+}
+
+function rethrowIfToolAborted(error, signal) {
+  if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
 }
 
 async function assertBrowserReadableFileSize(path, maxBytes, ctx) {
@@ -632,9 +636,10 @@ registry.register({
   checkAvailable: (ctx) => !!ctx?.agentUrl,
   async handler({ path = '' }, ctx) {
     try {
-      const result = await listFiles(path, ctx.agentUrl);
+      const result = await listFiles(path, ctx.agentUrl, { signal: ctx.signal });
       return formatFileTree(result, 0);
     } catch (err) {
+      rethrowIfToolAborted(err, ctx.signal);
       return `Error listing sandbox files: ${err.message}`;
     }
   },
@@ -670,13 +675,14 @@ registry.register({
       const maxBytes = clampReadLimit(maxBytesArg);
       const sizeError = await assertSandboxReadableFileSize(path, maxBytes, ctx);
       if (sizeError) return sizeError;
-      const content = await readFileText(path, ctx.agentUrl);
+      const content = await readFileText(path, ctx.agentUrl, { signal: ctx.signal });
       const contentSize = new Blob([content]).size;
       if (contentSize > maxBytes) {
         return oversizedFileMessage(path, contentSize, maxBytes, 'read_sandbox_file', 'list_sandbox_files');
       }
       return content;
     } catch (err) {
+      rethrowIfToolAborted(err, ctx.signal);
       return `Error reading sandbox file ${path}: ${err.message}`;
     }
   },
@@ -718,6 +724,7 @@ registry.register({
       }
       return imageReferenceResult('sandbox', path, { name: entry.name, mimeType, size: entry.size });
     } catch (err) {
+      rethrowIfToolAborted(err, ctx.signal);
       return `Error displaying sandbox image ${path}: ${err.message}`;
     }
   },
@@ -903,6 +910,7 @@ registry.register({
       if (args.action === 'list') {
         const skills = await searchSkills(args.query || '', agentId, {
           agentUrl: ctx?.agentUrl,
+          signal: ctx?.signal,
         });
         return formatSkills(skills);
       }
@@ -914,6 +922,7 @@ registry.register({
         const content = await readSkill(args.name, agentId, {
           referenceName: args.reference_name,
           agentUrl: ctx?.agentUrl,
+          signal: ctx?.signal,
         });
         return content ?? `Skill or reference not found: ${args.name}${args.reference_name ? `/${args.reference_name}` : ''}`;
       }
@@ -935,6 +944,7 @@ registry.register({
       }
       return `Unknown skill action: ${args.action}`;
     } catch (err) {
+      rethrowIfToolAborted(err, ctx?.signal);
       return `Skill error: ${err.message}`;
     }
   },

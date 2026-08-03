@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { beforeEach, test } from 'node:test';
 import config from '../config/config.js';
-import { setSkillEnabled } from './skills.js';
+import { buildSkillsSection, setSkillEnabled } from './skills.js';
 import { registry } from './tools.js';
 import { readAgentSkillFile, writeSkillFile } from '../vfs/opfs.js';
 
@@ -145,6 +145,156 @@ test('browser skill loading merges global, workspace, then selected agent skills
   );
 });
 
+test('runtime skill discovery does not request an absent references directory', async () => {
+  const requestedPaths = [];
+  installAgentFileApi(new Map([
+    ['skills/skill-creator/SKILL.md', skillDocument(
+      'skill-creator',
+      'Create reusable skills.',
+      'Keep the workflow focused.'
+    )],
+  ]), { requestedPaths, missingDirectoriesReturn404: true });
+
+  const result = await registry.dispatch('skill', {
+    action: 'list',
+    query: 'reusable',
+  }, { agentId: 'agent-test', agentUrl: 'https://runtime.test' });
+
+  assert.match(result, /skill-creator \(agent, v1\.0\.0\)/);
+  assert.ok(requestedPaths.includes('skills/skill-creator'));
+  assert.ok(!requestedPaths.includes('skills/skill-creator/references'));
+});
+
+test('runtime skill discovery loads skill directories concurrently', { timeout: 2_000 }, async () => {
+  const files = new Map([
+    ['skills/alpha/SKILL.md', skillDocument('alpha', 'Alpha skill.', 'Alpha instructions.')],
+    ['skills/beta/SKILL.md', skillDocument('beta', 'Beta skill.', 'Beta instructions.')],
+  ]);
+  const started = [];
+  const releases = new Map();
+  let markAllStarted;
+  const allStarted = new Promise((resolve) => { markAllStarted = resolve; });
+  installAgentFileApi(files, {
+    onRequest({ url, path }) {
+      if (!url.pathname.endsWith('/files/download')) return undefined;
+      return new Promise((resolve) => {
+        started.push(path);
+        releases.set(path, () => resolve(new Response(files.get(path), { status: 200 })));
+        if (started.length === files.size) markAllStarted();
+      });
+    },
+  });
+
+  const controller = new AbortController();
+  const pending = buildSkillsSection('agent-test', {
+    runtimeMode: 'sandbox',
+    agentUrl: 'https://runtime.test',
+    signal: controller.signal,
+  });
+  let concurrencyTimer;
+  const concurrent = await Promise.race([
+    allStarted.then(() => true),
+    new Promise((resolve) => {
+      concurrencyTimer = setTimeout(() => resolve(false), 250);
+    }),
+  ]);
+  clearTimeout(concurrencyTimer);
+  if (!concurrent) {
+    controller.abort();
+    await pending.catch(() => {});
+    assert.fail(`Expected concurrent skill requests, started: ${started.join(', ')}`);
+  }
+
+  for (const release of releases.values()) release();
+  const catalog = await pending;
+  assert.match(catalog, /alpha/);
+  assert.match(catalog, /beta/);
+});
+
+test('runtime skill catalog has one overall startup deadline', { timeout: 2_000 }, async () => {
+  const files = new Map([
+    ['skills/stalled/SKILL.md', skillDocument('stalled', 'Stalled skill.', 'Never returned.')],
+  ]);
+  let observedSignal = null;
+  installAgentFileApi(files, {
+    onRequest({ url, requestOptions }) {
+      if (!url.pathname.endsWith('/files/download')) return undefined;
+      observedSignal = requestOptions.signal;
+      return new Promise(() => {});
+    },
+  });
+
+  const startedAt = Date.now();
+  const catalog = await buildSkillsSection('agent-test', {
+    runtimeMode: 'sandbox',
+    agentUrl: 'https://runtime.test',
+    runtimeCatalogTimeoutMs: 25,
+  });
+
+  assert.ok(Date.now() - startedAt < 500);
+  assert.equal(observedSignal?.aborted, true);
+  assert.match(catalog, /skill-creator/);
+  assert.doesNotMatch(catalog, /stalled/);
+});
+
+test('runtime skill transport AbortError is skipped when the run signal is live', async () => {
+  installAgentFileApi(new Map(), {
+    onRequest({ path }) {
+      if (path !== 'skills') return undefined;
+      return Promise.reject(new DOMException('proxy closed request', 'AbortError'));
+    },
+  });
+
+  const catalog = await buildSkillsSection('agent-test', {
+    runtimeMode: 'sandbox',
+    agentUrl: 'https://runtime.test',
+  });
+
+  assert.match(catalog, /skill-creator/);
+});
+
+test('runtime skill discovery forwards and honors the run abort signal', { timeout: 2_000 }, async () => {
+  const controller = new AbortController();
+  let observedSignal = null;
+  let markRequestStarted;
+  const requestStarted = new Promise((resolve) => { markRequestStarted = resolve; });
+
+  installAgentFileApi(new Map(), {
+    onRequest({ path, requestOptions }) {
+      if (path !== 'skills') return undefined;
+      observedSignal = requestOptions.signal;
+      markRequestStarted();
+      return new Promise((_resolve, reject) => {
+        const fallbackTimer = setTimeout(() => {
+          reject(new Error('Remote skill request did not observe cancellation.'));
+        }, 500);
+        const rejectAbort = () => {
+          clearTimeout(fallbackTimer);
+          reject(requestOptions.signal?.reason || new DOMException('Aborted', 'AbortError'));
+        };
+        if (requestOptions.signal?.aborted) {
+          rejectAbort();
+          return;
+        }
+        requestOptions.signal?.addEventListener('abort', rejectAbort, { once: true });
+      });
+    },
+  });
+
+  const pending = buildSkillsSection('agent-test', {
+    runtimeMode: 'sandbox',
+    agentUrl: 'https://runtime.test',
+    signal: controller.signal,
+  });
+
+  await requestStarted;
+  controller.abort();
+  const error = await pending.then(() => null, (reason) => reason);
+  assert.ok(observedSignal, 'remote file request should receive an abort signal');
+  assert.equal(observedSignal.aborted, true);
+  assert.equal(error?.name, 'AbortError');
+});
+
 test('skill tool validates writes and refuses to read disabled skills', async () => {
   const invalidResult = await registry.dispatch('skill', {
     action: 'write',
@@ -236,7 +386,7 @@ ${body}
 `;
 }
 
-function installAgentFileApi(files) {
+function installAgentFileApi(files, options = {}) {
   Object.defineProperty(globalThis, 'window', {
     configurable: true,
     value: {
@@ -248,9 +398,12 @@ function installAgentFileApi(files) {
   });
   Object.defineProperty(globalThis, 'fetch', {
     configurable: true,
-    value: async (input) => {
+    value: async (input, requestOptions = {}) => {
       const url = new URL(String(input));
       const path = url.searchParams.get('path') || '';
+      options.requestedPaths?.push(path);
+      const overridden = options.onRequest?.({ input, url, path, requestOptions });
+      if (overridden !== undefined) return overridden;
       if (url.pathname.endsWith('/files/download')) {
         const content = files.get(path);
         return content == null
@@ -269,6 +422,9 @@ function installAgentFileApi(files) {
             name,
             type: tail.length ? 'directory' : 'file',
           });
+        }
+        if (path && children.size === 0 && options.missingDirectoriesReturn404) {
+          return new Response(JSON.stringify({ error: 'Directory not found' }), { status: 404 });
         }
         if (!path && children.size === 0) {
           return new Response(JSON.stringify({ id: 'root', children: [] }), { status: 200 });

@@ -367,6 +367,61 @@
   margin: 14px 0;
 }
 
+.llm-settings-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  padding: 4px;
+  margin-bottom: 18px;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--color-bg) 60%, transparent);
+}
+
+.llm-settings-tabs button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  font: inherit;
+}
+
+.llm-settings-tabs button.active {
+  background: var(--color-nav-active);
+  color: var(--color-text-heading);
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--color-overlay) 18%, transparent);
+}
+
+.llm-settings-tabs span {
+  min-width: 18px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-primary) 14%, transparent);
+  color: var(--color-primary);
+  font-size: 10px;
+  line-height: 16px;
+}
+
+.llm-empty-state {
+  margin: 18px 0;
+  padding: 16px;
+  border: 1px dashed var(--color-border-subtle);
+  border-radius: 10px;
+  text-align: center;
+  color: var(--color-text-secondary);
+}
+
+.llm-empty-state p {
+  margin: 0 0 12px;
+  font-size: 13px;
+}
+
 .settings-success {
   margin: 4px 0 8px;
   font-size: 12px;

@@ -18,7 +18,7 @@ import {
 } from './vfs/storagePersistence';
 import config from './config/config';
 import llm from './models/llm';
-import { executeCommand, initAgents, enableE2b, E2B_AGENT_ID, getSandboxStatus, stopE2bSandbox, startRemoteAgentRun, getRemoteAgentRun, listRemoteAgentRuns, abortRemoteAgentRun } from './models/agent';
+import { executeCommand, initAgents, enableE2b, E2B_AGENT_ID, getSandboxStatus, stopE2bSandbox, assertRemoteAgentRunProtocol, startRemoteAgentRun, getRemoteAgentRun, listRemoteAgentRuns, abortRemoteAgentRun } from './models/agent';
 import { prepareAgentRuntimeContext, runAgentLoop } from './agent/loop';
 import { applyAgentEvent, createAgentEventState } from './agent/events';
 import { buildChatDebugExport, createChatDebugFilename } from './agent/debug';
@@ -45,7 +45,8 @@ import { createSessionSaveCoordinator } from './sessionPersistence';
 import { createSessionRunRegistry } from './sessionRuns';
 import { buildWakeupMessage, createOrReplaceTurnWakeup, findNextWakeup } from './agent/wakeup';
 import { WifiOff, ChevronRight } from './components/Icons/Icons';
-import { stripLegacyContextFileSummary } from './contextFiles';
+import { boundContextFilesForPrompt, stripLegacyContextFileSummary } from './contextFiles';
+import { canSupersedeRemoteRun, formatRunFailureContent } from './remoteRunPresentation';
 import './App.css';
 
 const FileManage = lazy(() => import('./components/FileManage/FileManage'));
@@ -234,7 +235,7 @@ function expandMessagesForLlm(messages) {
 }
 
 function expandMessagesForSandboxRuntime(messages) {
-  return messages.map(({ contextFiles: _contextFiles, toolCalls: _toolCalls, transcript: _transcript, usage: _usage, ...message }) => message);
+  return expandMessagesForLlm(boundContextFilesForPrompt(messages));
 }
 
 function OfflineBanner() {
@@ -1338,11 +1339,14 @@ function App() {
     // Helper: update message in state
     const updateMessage = (fields, { touch = false } = {}) => {
       updateSessionsForRun((prev) => {
+        const preview = String(fields.content ?? run.streamingContent ?? '');
         const next = prev.map((c) =>
           c.id === sessionId
             ? {
                 ...c,
-                lastMessage: (fields.content ?? run.streamingContent).slice(0, 60),
+                // Lifecycle/text-start events legitimately flush before any
+                // text exists. Keep the last meaningful preview in that gap.
+                lastMessage: preview.trim() ? preview.slice(0, 60) : c.lastMessage,
                 ...(touch ? sessionTimeFields() : {}),
                 messages: (c.messages || []).map((m) =>
                   m.id === replyId ? { ...m, ...fields } : m
@@ -1387,6 +1391,10 @@ function App() {
         if (!sandboxUrl || sandboxUrl === E2B_AGENT_ID) {
           throw new Error('Sandbox runtime requires a connected VertexAgent agent server; direct E2B sandboxes currently provide command execution only.');
         }
+        if (opts.resumeRunId) {
+          await assertRemoteAgentRunProtocol(sandboxUrl, run.controller.signal);
+          assertRunActive();
+        }
         let remoteRun;
         if (opts.resumeRunId) {
           remoteRun = { id: opts.resumeRunId, status: 'running' };
@@ -1399,6 +1407,7 @@ function App() {
           const runtimeContext = await prepareAgentRuntimeContext(sessionAgentId, {
             runtimeMode: 'sandbox',
             agentUrl: sandboxUrl,
+            signal: run.controller.signal,
           });
           assertRunActive();
           try {
@@ -1565,6 +1574,19 @@ function App() {
 
       const finalContent = result?.content || run.streamingContent;
       const finalThinking = result?.thinking || run.streamingThinking;
+      if (
+        responseCompleted
+        && !String(finalContent || '').trim()
+        && !String(finalThinking || '').trim()
+        && toolCalls.length === 0
+      ) {
+        const error = new Error(
+          'The model completed without returning text, reasoning, or a tool call. Retry the request or check whether this model supports streaming responses.'
+        );
+        error.name = 'EmptyModelResponseError';
+        error.code = 'EMPTY_MODEL_RESPONSE';
+        throw error;
+      }
       updateMessage({ content: finalContent, thinking: finalThinking, toolCalls: [...toolCalls], transcript: agentEventState.transcript, usage: result?.usage }, { touch: true });
       if (responseCompleted) {
         automaticTitleInput = { sessionId, sessionMessages, replyId, finalContent };
@@ -1575,7 +1597,10 @@ function App() {
         setAgentList(nextAgentList);
       }
     } catch (err) {
-      if (err.name === 'AbortError') {
+      // Only the run owner's signal makes this a silent user cancellation.
+      // Providers and proxies also use AbortError for transport failures; if
+      // our signal is still live those errors must be visible in the message.
+      if (run.controller.signal.aborted || !isRunCurrent()) {
         runOutcome = { status: 'aborted', error: err };
         toolCalls.splice(0, toolCalls.length, ...toolCalls.map((tc) => (
           ['pending', 'running', 'writing'].includes(tc.status)
@@ -1585,13 +1610,35 @@ function App() {
         updateMessage({ content: run.streamingContent, thinking: run.streamingThinking, toolCalls: [...toolCalls], transcript: agentEventState.transcript }, { touch: true });
       } else {
         runOutcome = { status: 'error', error: err };
+        if (run.remoteRun?.id) {
+          updateSessionsForRun((prev) => prev.map((session) => {
+            if (session.id !== sessionId || session.remoteRun?.id !== run.remoteRun.id) return session;
+            return {
+              ...session,
+              remoteRun: {
+                ...session.remoteRun,
+                status: 'error',
+                error: String(err?.message || err || 'Unknown sandbox run error'),
+              },
+              ...sessionTimeFields(),
+            };
+          }));
+        }
         toolCalls.splice(0, toolCalls.length, ...toolCalls.map((tc) => (
           ['pending', 'running', 'writing'].includes(tc.status)
             ? { ...tc, status: 'error', result: tc.result || `Error: ${err.message}` }
             : tc
         )));
-        const errorContent = run.streamingContent || `Error: ${err.message}`;
-        updateMessage({ content: errorContent, toolCalls: [...toolCalls], transcript: agentEventState.transcript }, { touch: true });
+        const errorContent = formatRunFailureContent(run.streamingContent, err);
+        updateMessage({
+          content: errorContent,
+          thinking: run.streamingThinking,
+          toolCalls: [...toolCalls],
+          // A visible transcript replaces fallback content entirely. Clear it
+          // on failure so the error and Retry action cannot be hidden behind a
+          // partial or empty text segment.
+          transcript: [],
+        }, { touch: true });
       }
     } finally {
       if (run.rafId) {
@@ -1991,35 +2038,64 @@ function App() {
           || (sessionIncarnationsRef.current.get(session.id) || 0) !== sessionIncarnation
         ) return;
         const latest = runs?.[0];
-        if (!latest || latest.status === 'aborted' || latest.status === 'error' || latest.status === 'interrupted') return;
+        if (!latest || latest.status === 'aborted') return;
         const storedMessages = session.messages || await loadSessionMessages(session.id);
         if (
           factoryResetInProgressRef.current
           || deletedSessionIdsRef.current.has(session.id)
           || (sessionIncarnationsRef.current.get(session.id) || 0) !== sessionIncarnation
         ) return;
+        const terminalFailure = latest.status === 'error' || latest.status === 'interrupted';
+        const replyId = latest.replyId || generateId();
+        const terminalDetail = String(latest.error || '').trim()
+          || (latest.status === 'interrupted'
+            ? 'Sandbox run was interrupted before it could finish.'
+            : 'Sandbox run failed before it could return a response.');
+        const terminalContent = formatRunFailureContent('', terminalDetail);
         setSessions((prev) => prev.map((item) => {
           if (item.id !== session.id || item.remoteRun) return item;
           const currentMessages = item.messages || storedMessages;
-          const hasReply = currentMessages.some((message) => message.id === latest.replyId);
+          const hasReply = currentMessages.some((message) => message.id === replyId);
+          const messages = terminalFailure
+            ? (hasReply
+                ? currentMessages.map((message) => message.id === replyId
+                    ? {
+                        ...message,
+                        content: formatRunFailureContent(message.content, terminalDetail),
+                        transcript: [],
+                      }
+                    : message)
+                : [...currentMessages, {
+                    id: replyId,
+                    role: 'assistant',
+                    content: terminalContent,
+                    thinking: '',
+                    toolCalls: [],
+                    transcript: [],
+                  }])
+            : (hasReply ? currentMessages : [...currentMessages, {
+                id: replyId,
+                role: 'assistant',
+                content: '',
+                thinking: '',
+                toolCalls: [],
+                transcript: [],
+              }]);
           return {
             ...item,
-            messages: hasReply ? currentMessages : [...currentMessages, {
-              id: latest.replyId || generateId(),
-              role: 'assistant',
-              content: '',
-              thinking: '',
-              toolCalls: [],
-              transcript: [],
-            }],
+            messages,
+            ...(terminalFailure ? { lastMessage: terminalContent.slice(0, 60), ...sessionTimeFields() } : {}),
             remoteRun: {
               id: latest.id,
               url: agent.sandboxUrl,
-              replyId: latest.replyId,
+              replyId,
               sequence: Number(latest.sequence) || 0,
               // Mark completed discoveries as pending once so streamResponse
               // fetches their event log and durable result.
-              status: latest.status === 'waiting' ? 'waiting' : 'running',
+              status: terminalFailure
+                ? latest.status
+                : (latest.status === 'waiting' ? 'waiting' : 'running'),
+              ...(terminalFailure ? { error: terminalDetail } : {}),
               ...(latest.wakeup ? { wakeup: latest.wakeup } : {}),
             },
           };
@@ -2076,15 +2152,15 @@ function App() {
       // A new user turn in the same conversation supersedes its sleeping
       // continuation. This prevents the server from later resuming with a
       // stale message snapshot while the new turn is already in progress.
-      const waitingRemote = sessionsRef.current.find((item) => item.id === targetSessionId)?.remoteRun;
+      const supersededRemote = sessionsRef.current.find((item) => item.id === targetSessionId)?.remoteRun;
       let startAfter;
-      if (waitingRemote?.status === 'waiting') {
-        startAfter = abortRemoteAgentRunBestEffort(waitingRemote.url, waitingRemote.id);
-        resumedRemoteRunsRef.current.add(waitingRemote.id);
-        resumingWaitingRunsRef.current.delete(waitingRemote.id);
-        const waitingTimer = waitingRemoteTimersRef.current.get(waitingRemote.id);
+      if (canSupersedeRemoteRun(supersededRemote)) {
+        startAfter = abortRemoteAgentRunBestEffort(supersededRemote.url, supersededRemote.id);
+        resumedRemoteRunsRef.current.add(supersededRemote.id);
+        resumingWaitingRunsRef.current.delete(supersededRemote.id);
+        const waitingTimer = waitingRemoteTimersRef.current.get(supersededRemote.id);
         if (waitingTimer) clearTimeout(waitingTimer);
-        waitingRemoteTimersRef.current.delete(waitingRemote.id);
+        waitingRemoteTimersRef.current.delete(supersededRemote.id);
       }
 
       if (!targetSessionId) {
@@ -2132,7 +2208,7 @@ function App() {
           ...sessionTimeFields(),
           messages: [...(session.messages || currentSession.messages), userMsg],
         };
-        if (session.remoteRun?.status === 'waiting') delete next.remoteRun;
+        if (canSupersedeRemoteRun(session.remoteRun)) delete next.remoteRun;
         return next;
       })));
       scheduleStreamResponse(sessionId, nextMessages, {
@@ -2613,8 +2689,19 @@ function App() {
           const lastUserIdx = session.messages.reduce((acc, m, i) => m.role === 'user' ? i : acc, -1);
           if (lastUserIdx === -1) return;
           const trimmed = session.messages.slice(0, lastUserIdx + 1);
-          setSessions((prev) => prev.map((c) => c.id === sessionId ? { ...c, messages: trimmed } : c));
-          scheduleStreamResponse(sessionId, trimmed);
+          const failedRemote = ['error', 'interrupted'].includes(session.remoteRun?.status)
+            ? session.remoteRun
+            : null;
+          const startAfter = failedRemote
+            ? abortRemoteAgentRunBestEffort(failedRemote.url, failedRemote.id)
+            : null;
+          setSessions((prev) => prev.map((c) => {
+            if (c.id !== sessionId) return c;
+            const next = { ...c, messages: trimmed };
+            if (failedRemote && c.remoteRun?.id === failedRemote.id) delete next.remoteRun;
+            return next;
+          }));
+          scheduleStreamResponse(sessionId, trimmed, startAfter ? { startAfter } : {});
         }}
         streaming={activeSessionStreaming}
         inputDisabled={activeSessionLoading || activeSessionAgentLoading}
@@ -2623,9 +2710,21 @@ function App() {
         llmProfiles={llm.getProfiles()}
         activeLlmProfileId={activeLlmProfileId}
         onSelectLLM={handleSelectLLM}
-        providers={llm.getProviders()}
+        providers={llm.getProviderTypes?.() || llm.getProviders()}
+        providerConfigs={llm.getProviderConfigs?.() || []}
+        onConfigureProvider={async (providerConfig) => {
+          if (!llm.configureProvider) throw new Error('Provider management is not ready.');
+          const saved = await llm.configureProvider(providerConfig);
+          setLlmReady((prev) => !prev);
+          return saved;
+        }}
+        onDeleteProvider={async (providerId) => {
+          if (!llm.deleteProvider) throw new Error('Provider management is not ready.');
+          await llm.deleteProvider(providerId);
+          setLlmReady((prev) => !prev);
+        }}
         onConfigureLLM={async (cfg) => {
-          const saved = await llm.configure(cfg);
+          const saved = await (llm.configureLlm ? llm.configureLlm(cfg) : llm.configure(cfg));
           setCurrentLlmProfileId(saved.id);
           if (activeSessionId) {
             setSessionLlmProfiles((prev) => ({ ...prev, [activeSessionId]: saved.id }));
@@ -2635,7 +2734,7 @@ function App() {
           return saved;
         }}
         onDeleteLLM={async (profileId) => {
-          await llm.deleteProfile(profileId);
+          await (llm.deleteLlm ? llm.deleteLlm(profileId) : llm.deleteProfile(profileId));
           const nextId = llm.getActiveProfileId();
           setCurrentLlmProfileId(nextId);
           setSessionLlmProfiles((prev) => {
@@ -2656,7 +2755,11 @@ function App() {
           }
           setLlmReady((prev) => !prev);
         }}
-        onFetchModels={(providerId, config, profileId) => llm.fetchModels(providerId, config, profileId)}
+        onFetchModels={(providerId, config, profileId) => (
+          llm.fetchProviderModels
+            ? llm.fetchProviderModels(providerId)
+            : llm.fetchModels(providerId, config, profileId)
+        )}
         theme={theme}
         onThemeChange={handleThemeChange}
         agents={agents}

@@ -24,6 +24,10 @@ const DEFAULT_MAX_ROUNDS = 40;
 const ABSOLUTE_MAX_ROUNDS = 80;
 const DEFAULT_MODEL_MAX_RETRIES = 2;
 const ABSOLUTE_MODEL_MAX_RETRIES = 5;
+const DEFAULT_SANDBOX_MODEL_TIMEOUT = Object.freeze({
+  stepMs: 5 * 60_000,
+  chunkMs: 90_000,
+});
 const MAX_CONTINUATION_GUARDS = 2;
 const STREAMING_TOOL_OUTPUT_MAX_CHARS = 80_000;
 const WAKEUP_SCHEDULED_CONTROL_CODE = 'VERTEX_WAKEUP_SCHEDULED';
@@ -40,6 +44,9 @@ const CONTINUATION_GUARD_PROMPT =
 
 const FINALIZE_PROMPT =
   'The tool-use round limit has been reached. Stop using tools and provide the best final status now: what is complete, what changed, what was verified, and any remaining blockers.';
+
+const EMPTY_RESPONSE_RETRY_PROMPT =
+  'Your previous response was empty. Answer the user now with a concrete response. Use tools if needed, and do not return an empty message.';
 
 /**
  * Run an autonomous agent turn.
@@ -59,6 +66,7 @@ const FINALIZE_PROMPT =
  * @param {AbortSignal} [opts.signal]
  * @param {number} [opts.maxRounds]
  * @param {number} [opts.modelMaxRetries]
+ * @param {number|{totalMs?: number, stepMs?: number, chunkMs?: number}|null} [opts.modelTimeout]
  * @returns {Promise<{ content: string, thinking: string, toolCalls: Array, usage: Object|null }>}
  */
 export async function runAgentLoop(opts) {
@@ -79,6 +87,7 @@ export async function runAgentLoop(opts) {
   const runtimeContext = opts.runtimeContext || await prepareAgentRuntimeContext(agentId, {
     runtimeMode: opts.runtimeMode,
     agentUrl,
+    signal,
   });
   const workspaceDirName = runtimeContext.workspaceDirName;
   const activeAgent = runtimeContext.activeAgent;
@@ -86,6 +95,9 @@ export async function runAgentLoop(opts) {
   const skillsList = runtimeContext.skillsList;
   const agentIdentity = runtimeContext.agentIdentity;
   const contextWindow = opts.contextWindow || getStaticContextWindow(opts.provider, opts.model);
+  const modelTimeout = opts.modelTimeout === undefined && opts.runtimeMode === 'sandbox'
+    ? DEFAULT_SANDBOX_MODEL_TIMEOUT
+    : opts.modelTimeout;
   const schemas = opts.toolSchemas || getEnabledToolSchemas({
     agentUrl,
     agentId,
@@ -109,7 +121,10 @@ export async function runAgentLoop(opts) {
 
   // Sleeping ends only this model/tool turn. The caller's signal continues to
   // own the durable run so the sandbox can start a fresh turn at the deadline.
-  const turn = createTurnController(signal, typeof opts.scheduleWakeup === 'function');
+  const turn = createTurnController(
+    signal,
+    typeof opts.scheduleWakeup === 'function' || modelTimeout != null
+  );
   const loopControl = {
     wakeupScheduled: false,
     wakeup: null,
@@ -180,6 +195,7 @@ export async function runAgentLoop(opts) {
       tools,
       maxRounds,
       modelMaxRetries,
+      modelTimeout,
       contextWindow,
       signal: turn.signal,
       emit,
@@ -194,6 +210,34 @@ export async function runAgentLoop(opts) {
     let modelCallCount = initial.modelCallCount ?? initial.steps.length;
     let continuationGuardCount = 0;
 
+    // A syntactically successful but empty completion is common with broken
+    // OpenAI-compatible gateways. Retry it once; otherwise the UI used to
+    // accept a completed run and render a permanently blank assistant card.
+    if (!hasMeaningfulAgentOutput(state) && modelCallCount < maxRounds) {
+      const recovery = await consumeAgentStream({
+        model,
+        messages: [
+          ...toModelMessages(packed.apiMessages),
+          { role: 'user', content: EMPTY_RESPONSE_RETRY_PROMPT },
+        ],
+        system: packed.systemPrompt,
+        tools,
+        maxRounds: Math.max(1, maxRounds - modelCallCount),
+        modelMaxRetries,
+        modelTimeout,
+        contextWindow,
+        signal: turn.signal,
+        emit,
+        lifecycle,
+        loopControl,
+      });
+      latestRun = recovery;
+      responseMessages.push(...recovery.responseMessages);
+      latestUsage = recovery.usage || latestUsage;
+      totalUsage = addUsage(totalUsage, recovery.totalUsage);
+      modelCallCount += recovery.modelCallCount ?? recovery.steps.length;
+    }
+
     while (modelCallCount < maxRounds && shouldContinueWithoutToolCall(latestRun, schemas, continuationGuardCount)) {
       continuationGuardCount += 1;
       const continuation = await consumeAgentStream({
@@ -207,6 +251,7 @@ export async function runAgentLoop(opts) {
         tools,
         maxRounds: Math.max(1, maxRounds - modelCallCount),
         modelMaxRetries,
+        modelTimeout,
         contextWindow,
         signal: turn.signal,
         emit,
@@ -234,6 +279,7 @@ export async function runAgentLoop(opts) {
         tools: {},
         maxRounds: 1,
         modelMaxRetries,
+        modelTimeout,
         contextWindow,
         signal: turn.signal,
         emit,
@@ -247,6 +293,14 @@ export async function runAgentLoop(opts) {
     }
 
     throwIfAborted(signal);
+    if (!hasMeaningfulAgentOutput(state)) {
+      const error = new Error(
+        `Model returned an empty response after retrying. Verify that ${opts.model || 'the selected model'} supports chat-completion streaming, or select another model.`
+      );
+      error.name = 'EmptyModelResponseError';
+      error.code = 'EMPTY_MODEL_RESPONSE';
+      throw error;
+    }
     const usage = buildUsageReport(latestUsage, totalUsage, contextWindow, modelCallCount);
     emit({
       type: 'run-finish',
@@ -258,6 +312,11 @@ export async function runAgentLoop(opts) {
     return buildAgentLoopResult({ state, runId, usage });
   } catch (caughtError) {
     const err = enrichEmptyCauseMessage(asError(caughtError));
+    if (err?.code === 'MODEL_TIMEOUT') {
+      // Reader cancellation is best effort. Abort the turn as well so the AI
+      // SDK, provider request, and any in-flight tool all receive the timeout.
+      turn.abort(err);
+    }
     if (loopControl.wakeupScheduled && !signal?.aborted) {
       loopControl.abortTurn();
       if (lifecycle.currentStepId) {
@@ -277,7 +336,7 @@ export async function runAgentLoop(opts) {
       });
       return buildAgentLoopResult({ state, runId, usage });
     }
-    if (isAbortError(err) || signal?.aborted) {
+    if (signal?.aborted) {
       emit({ type: 'run-abort', reason: err?.message || 'aborted' });
     } else {
       emit({ type: 'run-error', error: err });
@@ -303,8 +362,11 @@ export async function prepareAgentRuntimeContext(agentId, options = {}) {
   const skillsList = await buildSkillsSection(agentId, {
     runtimeMode,
     agentUrl: options.agentUrl,
+    signal: options.signal,
   });
-  const skillFiles = runtimeMode === 'sandbox' ? await buildSandboxSkillFiles(agentId) : [];
+  const skillFiles = runtimeMode === 'sandbox'
+    ? await buildSandboxSkillFiles(agentId, { signal: options.signal })
+    : [];
   const sandboxFiles = runtimeMode === 'sandbox'
     ? [
       ...(agentIdentity ? [{ path: 'AGENTS.md', content: agentIdentity }] : []),
@@ -329,6 +391,14 @@ function shouldContinueWithoutToolCall(run, schemas, continuationGuardCount) {
   const text = `${finalStep.text || ''}\n${finalStep.reasoningText || ''}`;
   const toolCallsSoFar = run.steps.reduce((count, step) => count + step.toolCalls.length, 0);
   return (toolCallsSoFar > 0 && CONTINUATION_INTENT_RE.test(text)) || PROMISED_TOOL_WORK_RE.test(text);
+}
+
+function hasMeaningfulAgentOutput(state) {
+  return Boolean(
+    String(state?.content || '').trim()
+    || String(state?.thinking || '').trim()
+    || state?.toolCalls?.length
+  );
 }
 
 function createAgentTools(schemas, toolContext, emit) {
@@ -438,7 +508,7 @@ async function executeAgentTool({ toolCallId, toolName, input, signal, toolConte
     });
   } catch (err) {
     if (isWakeupScheduledControl(err)) throw err;
-    if (err?.name === 'AbortError') {
+    if (signal?.aborted) {
       emit({
         type: 'tool-status',
         ...baseEvent,
@@ -468,6 +538,7 @@ async function consumeAgentStream({
   tools,
   maxRounds,
   modelMaxRetries,
+  modelTimeout,
   contextWindow,
   signal,
   emit,
@@ -507,7 +578,11 @@ async function consumeAgentStream({
   let currentStepHasText = false;
   let currentStepHasReasoning = false;
 
-  for await (const part of result.fullStream) {
+  const fullStream = modelTimeout == null && !signal
+    ? result.fullStream
+    : modelStreamWithTimeout(result.fullStream, modelTimeout, signal);
+
+  for await (const part of fullStream) {
     throwIfAborted(signal);
     switch (part.type) {
       case 'start-step':
@@ -629,6 +704,126 @@ async function consumeAgentStream({
     responseMessages: steps.flatMap((step) => step.response.messages),
     modelCallCount: steps.length,
   };
+}
+
+async function* modelStreamWithTimeout(stream, timeout, signal) {
+  const limits = normalizeModelTimeout(timeout);
+  if (!limits.totalMs && !limits.stepMs && !limits.chunkMs && !signal) {
+    yield* stream;
+    return;
+  }
+
+  const reader = stream.getReader();
+  const totalStartedAt = Date.now();
+  let stepStartedAt = totalStartedAt;
+  let lastChunkAt = null;
+  let completed = false;
+  let cancellationReason = null;
+
+  try {
+    while (true) {
+      if (stepStartedAt == null) stepStartedAt = Date.now();
+      const deadlines = [
+        modelDeadline('total', totalStartedAt, limits.totalMs),
+        modelDeadline('step', stepStartedAt, limits.stepMs),
+        modelDeadline('chunk', lastChunkAt, limits.chunkMs),
+      ].filter(Boolean);
+      const nearest = deadlines.sort((left, right) => left.at - right.at)[0] || null;
+
+      let next;
+      try {
+        next = await readModelStreamPart(reader, nearest, signal);
+      } catch (error) {
+        cancellationReason = error;
+        throw error;
+      }
+
+      if (next.done) {
+        completed = true;
+        return;
+      }
+
+      yield next.value;
+      if (next.value?.type === 'finish-step') {
+        // AI SDK starts a fresh per-step timeout for the next model request and
+        // clears its inter-chunk timer while tools/stop conditions are handled.
+        stepStartedAt = null;
+        lastChunkAt = null;
+      } else {
+        lastChunkAt = Date.now();
+      }
+    }
+  } finally {
+    if (!completed) {
+      Promise.resolve(reader.cancel(cancellationReason || createAbortError()))
+        .catch(() => {});
+    }
+    try {
+      reader.releaseLock();
+    } catch {
+      // A provider that ignores cancellation may keep its read request pending.
+      // Cancelling above is best effort; the timed caller has already detached.
+    }
+  }
+}
+
+function normalizeModelTimeout(timeout) {
+  if (typeof timeout === 'number') {
+    return { totalMs: positiveTimeout(timeout), stepMs: null, chunkMs: null };
+  }
+  return {
+    totalMs: positiveTimeout(timeout?.totalMs),
+    stepMs: positiveTimeout(timeout?.stepMs),
+    chunkMs: positiveTimeout(timeout?.chunkMs),
+  };
+}
+
+function positiveTimeout(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : null;
+}
+
+function modelDeadline(kind, startedAt, timeoutMs) {
+  return startedAt != null && timeoutMs
+    ? { kind, timeoutMs, at: startedAt + timeoutMs }
+    : null;
+}
+
+async function readModelStreamPart(reader, deadline, signal) {
+  if (signal?.aborted) throw modelAbortError(signal);
+  let timerId;
+  let onAbort;
+  try {
+    const racers = [reader.read()];
+    if (deadline) {
+      racers.push(new Promise((_resolve, reject) => {
+        timerId = setTimeout(() => {
+          const error = new Error(
+            `Model stream ${deadline.kind} timed out after ${deadline.timeoutMs} ms. Verify that the configured LLM endpoint is reachable from this runtime.`
+          );
+          error.name = 'ModelTimeoutError';
+          error.code = 'MODEL_TIMEOUT';
+          reject(error);
+        }, Math.max(0, deadline.at - Date.now()));
+      }));
+    }
+    if (signal) {
+      racers.push(new Promise((_resolve, reject) => {
+        onAbort = () => reject(modelAbortError(signal));
+        signal.addEventListener('abort', onAbort, { once: true });
+      }));
+    }
+    return await Promise.race(racers);
+  } finally {
+    clearTimeout(timerId);
+    signal?.removeEventListener('abort', onAbort);
+  }
+}
+
+function modelAbortError(signal) {
+  return signal?.reason instanceof Error
+    ? signal.reason
+    : createAbortError(signal?.reason);
 }
 
 function finishStreamForWakeup({ loopControl, lifecycle, emit }) {
@@ -846,10 +1041,6 @@ function createAbortError(reason = 'aborted') {
 
 function asError(value) {
   return value instanceof Error ? value : new Error(String(value || 'Agent stream failed'));
-}
-
-function isAbortError(error) {
-  return error?.name === 'AbortError';
 }
 
 function normalizeMaxRounds(value) {

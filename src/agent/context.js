@@ -194,7 +194,7 @@ export async function summarizeMiddle(middleMessages, existingSummary = '', opts
     );
     return summary.trim();
   } catch (err) {
-    if (err.name === 'AbortError') throw err;
+    if (opts.signal?.aborted) throw err;
     console.warn('Context summary failed:', err.message);
     const fallback = `[${middleMessages.length} earlier turns were compressed; summary generation failed: ${err.message}]`;
     return existingSummary ? `${existingSummary}\n${fallback}` : fallback;

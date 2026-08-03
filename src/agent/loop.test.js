@@ -144,6 +144,8 @@ test('a successful wake-up does not wait for the provider stream to finish', asy
     const result = await Promise.race([
       runAgentLoop({
         ...createConcurrentRunOptions('stalled-wakeup'),
+        runtimeMode: 'sandbox',
+        modelTimeout: { stepMs: 100, chunkMs: 20 },
         toolSchemas: [WAKEUP_TOOL_SCHEMA],
         languageModel: model,
         signal: controller.signal,
@@ -168,6 +170,103 @@ test('a successful wake-up does not wait for the provider stream to finish', asy
     clearTimeout(timeoutId);
     controller.abort();
   }
+});
+
+test('sandbox model stream times out when the provider never emits a first chunk', async () => {
+  const events = [];
+  let providerAbortSignal = null;
+  const model = new MockLanguageModelV3({
+    doStream: async (options) => {
+      providerAbortSignal = options.abortSignal;
+      return {
+      stream: new ReadableStream({
+        // Intentionally never enqueue or close. The model timeout must cover
+        // both the provider call and its wait for the first chunk.
+        start() {},
+      }),
+      };
+    },
+  });
+
+  await assert.rejects(
+    withTestDeadline(runAgentLoop({
+      ...createConcurrentRunOptions('no-first-chunk'),
+      runtimeMode: 'sandbox',
+      modelTimeout: { stepMs: 40 },
+      modelMaxRetries: 0,
+      toolSchemas: [],
+      languageModel: model,
+      onEvent: (event) => events.push(event),
+    })),
+    (error) => error?.name === 'ModelTimeoutError'
+      && error?.code === 'MODEL_TIMEOUT'
+      && error.message.includes('step')
+  );
+
+  assert.equal(events.at(-1)?.type, 'run-error');
+  assert.equal(events.at(-1)?.error?.code, 'MODEL_TIMEOUT');
+  assert.equal(providerAbortSignal?.aborted, true);
+});
+
+test('caller abort releases a model stream even when the provider leaves it open', async () => {
+  const controller = new AbortController();
+  let markProviderStarted;
+  const providerStarted = new Promise((resolve) => { markProviderStarted = resolve; });
+  const model = new MockLanguageModelV3({
+    doStream: async () => {
+      markProviderStarted();
+      return {
+        stream: new ReadableStream({ start() {} }),
+      };
+    },
+  });
+  const pending = runAgentLoop({
+    ...createConcurrentRunOptions('abort-open-stream'),
+    modelTimeout: null,
+    toolSchemas: [],
+    languageModel: model,
+    signal: controller.signal,
+  });
+
+  await providerStarted;
+  controller.abort();
+  await assert.rejects(withTestDeadline(pending), (error) => error?.name === 'AbortError');
+});
+
+test('sandbox model stream times out when the provider stops emitting chunks', async () => {
+  const events = [];
+  const model = new MockLanguageModelV3({
+    doStream: async () => ({
+      stream: new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: 'stream-start', warnings: [] });
+          controller.enqueue({ type: 'text-start', id: 'partial-answer' });
+          controller.enqueue({ type: 'text-delta', id: 'partial-answer', delta: 'partial' });
+          // Intentionally omit text-end, finish, and close(). Once output has
+          // begun, the inter-chunk timeout must release the run.
+        },
+      }),
+    }),
+  });
+
+  await assert.rejects(
+    withTestDeadline(runAgentLoop({
+      ...createConcurrentRunOptions('stalled-chunks'),
+      runtimeMode: 'sandbox',
+      modelTimeout: { stepMs: 500, chunkMs: 40 },
+      modelMaxRetries: 0,
+      toolSchemas: [],
+      languageModel: model,
+      onEvent: (event) => events.push(event),
+    })),
+    (error) => error?.name === 'ModelTimeoutError'
+      && error?.code === 'MODEL_TIMEOUT'
+      && error.message.includes('chunk')
+  );
+
+  assert.ok(events.some((event) => event.type === 'text-delta' && event.text === 'partial'));
+  assert.equal(events.at(-1)?.type, 'run-error');
+  assert.equal(events.at(-1)?.error?.code, 'MODEL_TIMEOUT');
 });
 
 test('a provider error racing a successful wake-up cannot discard the schedule', async () => {
@@ -279,6 +378,87 @@ test('an empty API connection error includes its nested network code', async () 
   );
 });
 
+test('a provider AbortError is reported as an error when the caller did not cancel', async () => {
+  const events = [];
+  const model = new MockLanguageModelV3({
+    doStream: async () => ({
+      stream: new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: 'stream-start', warnings: [] });
+          controller.error(new DOMException('upstream closed the stream', 'AbortError'));
+        },
+      }),
+    }),
+  });
+
+  await assert.rejects(runAgentLoop({
+    ...createConcurrentRunOptions('provider-abort'),
+    toolSchemas: [],
+    languageModel: model,
+    onEvent: (event) => events.push(event),
+  }), (error) => error?.name === 'AbortError');
+
+  assert.equal(events.at(-1)?.type, 'run-error');
+  assert.equal(events.some((event) => event.type === 'run-abort'), false);
+});
+
+test('an empty successful completion is retried once', async () => {
+  let callCount = 0;
+  const model = new MockLanguageModelV3({
+    doStream: async () => {
+      callCount += 1;
+      return {
+        stream: simulateReadableStream({
+          chunks: callCount === 1
+            ? emptyCompletionChunks()
+            : [
+              { type: 'stream-start', warnings: [] },
+              { type: 'text-start', id: 'recovered' },
+              { type: 'text-delta', id: 'recovered', delta: 'recovered answer' },
+              { type: 'text-end', id: 'recovered' },
+              { type: 'finish', finishReason: { unified: 'stop', raw: undefined }, usage: TEST_USAGE },
+            ],
+          initialDelayInMs: null,
+          chunkDelayInMs: null,
+        }),
+      };
+    },
+  });
+
+  const result = await runAgentLoop({
+    ...createConcurrentRunOptions('empty-recovery'),
+    toolSchemas: [],
+    languageModel: model,
+  });
+
+  assert.equal(callCount, 2);
+  assert.equal(result.content, 'recovered answer');
+});
+
+test('repeated empty completions fail instead of creating a blank assistant message', async () => {
+  const events = [];
+  const model = new MockLanguageModelV3({
+    doStream: async () => ({
+      stream: simulateReadableStream({
+        chunks: emptyCompletionChunks(),
+        initialDelayInMs: null,
+        chunkDelayInMs: null,
+      }),
+    }),
+  });
+
+  await assert.rejects(runAgentLoop({
+    ...createConcurrentRunOptions('empty-error'),
+    maxRounds: 2,
+    toolSchemas: [],
+    languageModel: model,
+    onEvent: (event) => events.push(event),
+  }), (error) => error?.code === 'EMPTY_MODEL_RESPONSE');
+
+  assert.equal(events.at(-1)?.type, 'run-error');
+  assert.equal(events.at(-1)?.error?.code, 'EMPTY_MODEL_RESPONSE');
+});
+
 test('concurrent agent loops isolate events, abort signals, and tool contexts', async () => {
   const controllerA = new AbortController();
   const controllerB = new AbortController();
@@ -368,6 +548,15 @@ function createConcurrentRunOptions(run) {
   };
 }
 
+function emptyCompletionChunks() {
+  return [
+    { type: 'stream-start', warnings: [] },
+    { type: 'text-start', id: 'empty' },
+    { type: 'text-end', id: 'empty' },
+    { type: 'finish', finishReason: { unified: 'stop', raw: undefined }, usage: TEST_USAGE },
+  ];
+}
+
 function createToolCallingModel(run) {
   let callCount = 0;
   return new MockLanguageModelV3({
@@ -434,6 +623,14 @@ function deferred() {
     reject = promiseReject;
   });
   return { promise, resolve, reject };
+}
+
+function withTestDeadline(promise, timeoutMs = 1_500) {
+  let timerId;
+  const deadline = new Promise((_resolve, reject) => {
+    timerId = setTimeout(() => reject(new Error('test model stream did not settle')), timeoutMs);
+  });
+  return Promise.race([promise, deadline]).finally(() => clearTimeout(timerId));
 }
 
 function sequenceThrough(length) {
