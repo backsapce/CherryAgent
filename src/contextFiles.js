@@ -19,3 +19,54 @@ export function stripLegacyContextFileSummary(content, contextFiles) {
   return value.slice(0, markerIndex).trimEnd();
 }
 
+export const SANDBOX_CONTEXT_FILE_MAX_CHARS = 120_000;
+export const SANDBOX_CONTEXT_FILES_TOTAL_MAX_CHARS = 300_000;
+
+/**
+ * Clone and bound context-file content before it is serialized to a sandbox
+ * run. Newer messages receive the shared budget first; the stored session and
+ * attachment cards keep their original content.
+ */
+export function boundContextFilesForPrompt(messages, options = {}) {
+  const perFileLimit = positiveLimit(
+    options.perFileChars,
+    SANDBOX_CONTEXT_FILE_MAX_CHARS
+  );
+  let remaining = positiveLimit(
+    options.totalChars,
+    SANDBOX_CONTEXT_FILES_TOTAL_MAX_CHARS
+  );
+  const bounded = (messages || []).map((message) => (
+    message?.contextFiles?.length
+      ? {
+        ...message,
+        contextFiles: message.contextFiles.map((file) => ({ ...file })),
+      }
+      : message
+  ));
+
+  for (let messageIndex = bounded.length - 1; messageIndex >= 0; messageIndex -= 1) {
+    const files = bounded[messageIndex]?.contextFiles || [];
+    for (const file of files) {
+      const content = String(file?.content || '');
+      const limit = Math.min(perFileLimit, remaining);
+      file.content = truncateContextContent(content, limit);
+      remaining -= file.content.length;
+    }
+  }
+
+  return bounded;
+}
+
+function positiveLimit(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : fallback;
+}
+
+function truncateContextContent(content, maxChars) {
+  if (content.length <= maxChars) return content;
+  if (maxChars <= 0) return '';
+  const marker = '\n[context file truncated]\n';
+  if (maxChars <= marker.length) return content.slice(0, maxChars);
+  return `${content.slice(0, maxChars - marker.length)}${marker}`;
+}

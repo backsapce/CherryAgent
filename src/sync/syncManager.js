@@ -502,8 +502,18 @@ function pruneDeletedAgents(data, deletedAgentIds) {
   };
 }
 
-function collectDeletedLlmProfileIds(data) {
-  const ids = data?.llm?.deletedProfileIds;
+function collectDeletedLlmIds(data) {
+  const ids = [
+    ...(Array.isArray(data?.llm?.deletedLlmIds) ? data.llm.deletedLlmIds : []),
+    // Pre-v2 clients called LLM records "profiles". Keep consuming their
+    // tombstones so an upgrade cannot resurrect a deleted model binding.
+    ...(Array.isArray(data?.llm?.deletedProfileIds) ? data.llm.deletedProfileIds : []),
+  ];
+  return new Set(ids.map((id) => String(id)).filter(Boolean));
+}
+
+function collectDeletedLlmProviderIds(data) {
+  const ids = data?.llm?.deletedProviderIds;
   if (!Array.isArray(ids)) return new Set();
   return new Set(ids.map((id) => String(id)).filter(Boolean));
 }
@@ -516,40 +526,72 @@ function mergeSets(...sets) {
   return merged;
 }
 
-function pruneDeletedLlmProfiles(data, deletedLlmProfileIds) {
-  if (deletedLlmProfileIds.size === 0) return data;
+function pruneDeletedLlmRecords(data, deletedLlmIds, deletedProviderIds) {
+  if (deletedLlmIds.size === 0 && deletedProviderIds.size === 0) return data;
   if (!data || typeof data !== 'object' || !data.llm || typeof data.llm !== 'object') return data;
 
+  const llms = data.llm.llms && typeof data.llm.llms === 'object'
+    ? { ...data.llm.llms }
+    : data.llm.llms;
+  if (llms && typeof llms === 'object' && !Array.isArray(llms)) {
+    for (const id of deletedLlmIds) delete llms[id];
+  }
+
+  // Also prune the legacy map when merging with a pre-v2 snapshot.
   const profiles = data.llm.profiles && typeof data.llm.profiles === 'object'
     ? { ...data.llm.profiles }
     : data.llm.profiles;
   if (profiles && typeof profiles === 'object' && !Array.isArray(profiles)) {
-    for (const id of deletedLlmProfileIds) {
-      delete profiles[id];
-    }
+    for (const id of deletedLlmIds) delete profiles[id];
   }
 
-  const remainingIds = profiles && typeof profiles === 'object' && !Array.isArray(profiles)
+  const providers = data.llm.providers && typeof data.llm.providers === 'object'
+    ? { ...data.llm.providers }
+    : data.llm.providers;
+  if (providers && typeof providers === 'object' && !Array.isArray(providers)) {
+    for (const id of deletedProviderIds) delete providers[id];
+  }
+
+  const remainingLlmIds = llms && typeof llms === 'object' && !Array.isArray(llms)
+    ? Object.keys(llms)
+    : [];
+  const remainingProfileIds = profiles && typeof profiles === 'object' && !Array.isArray(profiles)
     ? Object.keys(profiles)
     : [];
-  const activeProfileId = deletedLlmProfileIds.has(String(data.llm.activeProfileId))
-    ? (remainingIds[0] || null)
+  const activeLlmId = deletedLlmIds.has(String(data.llm.activeLlmId))
+    ? (remainingLlmIds[0] || null)
+    : data.llm.activeLlmId;
+  const activeProfileId = deletedLlmIds.has(String(data.llm.activeProfileId))
+    ? (remainingProfileIds[0] || null)
     : data.llm.activeProfileId;
 
   return {
     ...data,
     llm: {
       ...data.llm,
-      activeProfileId,
-      profiles,
-      deletedProfileIds: [...deletedLlmProfileIds],
+      ...(Object.prototype.hasOwnProperty.call(data.llm, 'activeLlmId') ? { activeLlmId } : {}),
+      ...(Object.prototype.hasOwnProperty.call(data.llm, 'activeProfileId') ? { activeProfileId } : {}),
+      ...(Object.prototype.hasOwnProperty.call(data.llm, 'llms') ? { llms } : {}),
+      ...(Object.prototype.hasOwnProperty.call(data.llm, 'profiles') ? { profiles } : {}),
+      ...(Object.prototype.hasOwnProperty.call(data.llm, 'providers') ? { providers } : {}),
+      ...(data.llm.schemaVersion === 2 || Object.prototype.hasOwnProperty.call(data.llm, 'deletedLlmIds')
+        ? { deletedLlmIds: [...deletedLlmIds] }
+        : { deletedProfileIds: [...deletedLlmIds] }),
+      ...(data.llm.schemaVersion === 2 || Object.prototype.hasOwnProperty.call(data.llm, 'deletedProviderIds')
+        ? { deletedProviderIds: [...deletedProviderIds] }
+        : {}),
     },
   };
 }
 
 function collectDeletedRecordIds(path, ...records) {
-  if (!(path === 'config.yaml' || path === 'config.yml' || path === 'config.json')) return new Set();
-  return mergeSets(...records.map((record) => collectDeletedLlmProfileIds(record)));
+  if (!(path === 'config.yaml' || path === 'config.yml' || path === 'config.json')) {
+    return { llmIds: new Set(), providerIds: new Set() };
+  }
+  return {
+    llmIds: mergeSets(...records.map((record) => collectDeletedLlmIds(record))),
+    providerIds: mergeSets(...records.map((record) => collectDeletedLlmProviderIds(record))),
+  };
 }
 
 function isConfigPath(path) {
@@ -610,12 +652,24 @@ function preserveLocalOnlyConfig(path, mergedData, localData = {}) {
   return next;
 }
 
-function pruneDeletedRecords(path, data, deletedSessionIds, deletedAgentIds, deletedLlmProfileIds = new Set()) {
+function pruneDeletedRecords(path, data, deletedSessionIds, deletedAgentIds, deletedLlmRecords = {}) {
   let next = data;
   if (path === 'session.json') next = pruneDeletedSessions(next, deletedSessionIds);
   if (isConfigPath(path)) {
     next = pruneDeletedAgents(next, deletedAgentIds);
-    next = pruneDeletedLlmProfiles(next, mergeSets(deletedLlmProfileIds, collectDeletedLlmProfileIds(next)));
+    // Accept the old Set-shaped internal argument for test/backward
+    // compatibility while using independent v2 tombstones going forward.
+    const suppliedLlmIds = deletedLlmRecords instanceof Set
+      ? deletedLlmRecords
+      : deletedLlmRecords.llmIds;
+    const suppliedProviderIds = deletedLlmRecords instanceof Set
+      ? new Set()
+      : deletedLlmRecords.providerIds;
+    next = pruneDeletedLlmRecords(
+      next,
+      mergeSets(suppliedLlmIds, collectDeletedLlmIds(next)),
+      mergeSets(suppliedProviderIds, collectDeletedLlmProviderIds(next))
+    );
   }
   return next;
 }
@@ -3169,13 +3223,13 @@ async function applyRemoteFile(
 
     const localRawData = localEntry ? parseStructuredContent(path, await localEntry.blob.text()) : undefined;
     const remoteRawData = remoteSnapshot.data;
-    const deletedLlmProfileIds = collectDeletedRecordIds(path, localRawData, remoteRawData);
+    const deletedLlmRecords = collectDeletedRecordIds(path, localRawData, remoteRawData);
     const remoteData = pruneDeletedRecords(
       path,
       remoteRawData,
       deletedSessionIds,
       deletedAgentIds,
-      deletedLlmProfileIds
+      deletedLlmRecords
     );
     const remoteSyncData = isConfigPath(path) ? stripLocalOnlyConfig(remoteData) : remoteData;
     const remoteContent = formatStructuredContent(path, remoteSyncData);
@@ -3188,7 +3242,7 @@ async function applyRemoteFile(
         localRawData,
         deletedSessionIds,
         deletedAgentIds,
-        deletedLlmProfileIds
+        deletedLlmRecords
       );
       const localSyncData = isConfigPath(path) ? stripLocalOnlyConfig(localData) : localData;
       const baseData = await readStructuredBase(path, syncConfig);
@@ -4151,13 +4205,13 @@ async function pushInternal(syncConfig, runtime = {}) {
         );
         if (remoteSnapshot) {
           const remoteRawData = remoteSnapshot.data;
-          const deletedLlmProfileIds = collectDeletedRecordIds(path, localRawData, remoteRawData);
+          const deletedLlmRecords = collectDeletedRecordIds(path, localRawData, remoteRawData);
           localData = pruneDeletedRecords(
             path,
             localRawData,
             deletedSessionIds,
             deletedAgentIds,
-            deletedLlmProfileIds
+            deletedLlmRecords
           );
           const localSyncData = isConfigPath(path) ? stripLocalOnlyConfig(localData) : localData;
           const remoteData = pruneDeletedRecords(
@@ -4165,7 +4219,7 @@ async function pushInternal(syncConfig, runtime = {}) {
             remoteRawData,
             deletedSessionIds,
             deletedAgentIds,
-            deletedLlmProfileIds
+            deletedLlmRecords
           );
           const remoteSyncData = isConfigPath(path) ? stripLocalOnlyConfig(remoteData) : remoteData;
           const baseData = await readStructuredBase(path, syncConfig);

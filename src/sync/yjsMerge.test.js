@@ -173,15 +173,25 @@ test('agent config merge keeps newer sandbox selection', () => {
   assert.equal(merged.data.agentsList[0].updatedAtMs, 2000);
 });
 
-test('llm profile merge keeps newer cleared context window', () => {
+test('v2 LLM and provider merge keeps newer records', () => {
   const oldConfig = {
     llm: {
-      activeProfileId: 'llm-a',
-      profiles: {
+      schemaVersion: 2,
+      activeLlmId: 'llm-a',
+      providers: {
+        'provider-a': {
+          id: 'provider-a',
+          name: 'Primary',
+          type: 'custom-openai',
+          baseUrl: 'https://old.example/v1',
+          updatedAtMs: 1000,
+        },
+      },
+      llms: {
         'llm-a': {
           id: 'llm-a',
           name: 'Qwen',
-          provider: 'custom-openai',
+          providerId: 'provider-a',
           model: 'qwen3.7-max',
           contextWindow: 128000,
           updatedAtMs: 1000,
@@ -191,10 +201,18 @@ test('llm profile merge keeps newer cleared context window', () => {
   };
   const newConfig = {
     llm: {
-      activeProfileId: 'llm-a',
-      profiles: {
+      schemaVersion: 2,
+      activeLlmId: 'llm-a',
+      providers: {
+        'provider-a': {
+          ...oldConfig.llm.providers['provider-a'],
+          baseUrl: 'https://new.example/v1',
+          updatedAtMs: 2000,
+        },
+      },
+      llms: {
         'llm-a': {
-          ...oldConfig.llm.profiles['llm-a'],
+          ...oldConfig.llm.llms['llm-a'],
           contextWindow: null,
           updatedAtMs: 2000,
         },
@@ -207,8 +225,9 @@ test('llm profile merge keeps newer cleared context window', () => {
     createStructuredUpdate(newConfig),
   ]);
 
-  assert.equal(merged.data.llm.profiles['llm-a'].contextWindow, null);
-  assert.equal(merged.data.llm.profiles['llm-a'].updatedAtMs, 2000);
+  assert.equal(merged.data.llm.llms['llm-a'].contextWindow, null);
+  assert.equal(merged.data.llm.llms['llm-a'].updatedAtMs, 2000);
+  assert.equal(merged.data.llm.providers['provider-a'].baseUrl, 'https://new.example/v1');
 });
 
 test('scalar conflicts resolve to one deterministic Yjs value', () => {

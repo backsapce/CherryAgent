@@ -14,6 +14,7 @@ import { searchSkills } from '../../agent/skills';
 import { ChevronRight, Settings as SettingsIcon, Folder, File, FileEdit, Copy, MessageSquare, Plus, X, Send, Stop, Plug, PieChart, Cloud, User, ImageGenerate, Refresh } from '../Icons/Icons';
 import { getSkillCommandRange } from './skillCommand';
 import { stripLegacyContextFileSummary } from '../../contextFiles';
+import { hasRenderableTranscript } from './transcriptVisibility';
 import {
   collectAgentWorkspaceFiles,
   collectSandboxFiles,
@@ -817,6 +818,9 @@ const MessagePanel = forwardRef(({
   activeLlmProfileId,
   onSelectLLM,
   providers,
+  providerConfigs,
+  onConfigureProvider,
+  onDeleteProvider,
   onConfigureLLM,
   onDeleteLLM,
   onFetchModels,
@@ -918,7 +922,10 @@ const MessagePanel = forwardRef(({
   const assistantInitial = Array.from(assistantName)[0]?.toUpperCase() || 'V';
   const selectedLlmProfile = llmProfiles?.find((profile) => profile.id === activeLlmProfileId) || llmProfiles?.[0];
   const selectedProvider = providers?.find((provider) => provider.id === selectedLlmProfile?.provider);
-  const selectedLlmProviderLabel = selectedProvider?.name || selectedLlmProfile?.provider || t('message.noProviderConfigured');
+  const selectedLlmProviderLabel = selectedLlmProfile?.providerName
+    || selectedProvider?.name
+    || selectedLlmProfile?.provider
+    || t('message.noProviderConfigured');
   const selectedLlmModelLabel = selectedLlmProfile?.model || selectedLlmProfile?.name || '';
   const showCenteredInput = !activeSessionId || messages.length === 0;
   const showSyncIndicator = syncStatus.syncing || syncStatus.queued;
@@ -1480,6 +1487,9 @@ const MessagePanel = forwardRef(({
             llmProfiles={llmProfiles}
             activeLlmProfileId={activeLlmProfileId}
             providers={providers}
+            providerConfigs={providerConfigs}
+            onConfigureProvider={onConfigureProvider}
+            onDeleteProvider={onDeleteProvider}
             onConfigureLLM={onConfigureLLM}
             onDeleteLLM={onDeleteLLM}
             onFetchModels={onFetchModels}
@@ -1552,7 +1562,7 @@ const MessagePanel = forwardRef(({
                 {llmProfiles?.length ? (
                   llmProfiles.map((profile) => (
                     <option key={profile.id} value={profile.id}>
-                      {profile.name || `${profile.provider} / ${profile.model}`}
+                      {profile.name || `${profile.providerName || profile.provider} / ${profile.model}`}
                     </option>
                   ))
                 ) : (
@@ -1599,7 +1609,11 @@ const MessagePanel = forwardRef(({
                 msg.toolCalls?.some((tc) => isImageGenerationToolName(tc.name))
                 || isImageGenerationPrompt(previousMessage?.role === 'user' ? previousMessage.content : '')
               );
-            const hasTranscript = msg.role === 'assistant' && Array.isArray(msg.transcript) && msg.transcript.length > 0;
+            const hasTranscript = msg.role === 'assistant' && hasRenderableTranscript(
+              msg.transcript,
+              msg.toolCalls,
+              streaming && msg === messages[messages.length - 1]
+            );
             const displayContent = stripLegacyContextFileSummary(msg.content, msg.contextFiles);
 
             return (

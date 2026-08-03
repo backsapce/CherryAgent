@@ -7,17 +7,19 @@
  *
  * YAML structure:
  *   llm:
- *     provider: openai
- *     apiKey: sk-...
- *     baseUrl: null
- *     model: gpt-4o
+ *     schemaVersion: 2
+ *     activeLlmId: llm-main
+ *     providers:
+ *       provider-main: { type: openai, apiKey: sk-..., baseUrl: null }
+ *     llms:
+ *       llm-main: { providerId: provider-main, model: gpt-4o }
  *
  * Usage:
  *   import config from './config/config';
  *
  *   await config.init();                       // load from OPFS
- *   const val = config.get('llm.provider');     // read a value
- *   await config.set('llm.provider', 'openai'); // write + persist + notify
+ *   const val = config.get('llm.providers');     // read a value
+ *   await config.set('llm.activeLlmId', 'llm-main'); // write + persist + notify
  *
  *   config.subscribe((cfg) => { ... });         // listen for any change
  */
@@ -215,7 +217,7 @@ const config = {
 
   /**
    * Get the entire config or a value by dot path.
-   * @param {string} [path] - e.g. 'llm.provider' or 'llm'
+   * @param {string} [path] - e.g. 'llm.activeLlmId' or 'llm'
    * @returns {*}
    */
   get(path) {
@@ -226,7 +228,7 @@ const config = {
 
   /**
    * Set a value by dot path, persist to OPFS, and notify subscribers.
-   * @param {string} path  - e.g. 'llm.provider'
+   * @param {string} path  - e.g. 'llm.activeLlmId'
    * @param {*}      value
    */
   async set(path, value) {
@@ -244,7 +246,7 @@ const config = {
   /**
    * Merge an object at the given path (shallow merge).
    * Useful for updating multiple fields at once:
-   *   config.merge('llm', { provider: 'openai', apiKey: 'sk-...' })
+   *   config.merge('llm', { activeLlmId: 'llm-main' })
    */
   async merge(path, obj) {
     assertMutable();

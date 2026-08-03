@@ -666,6 +666,26 @@ test('sandbox startup snapshot rejects paths outside identity and skills', async
   );
 });
 
+test('sandbox run rejects oversized message content before it is persisted', () => {
+  const runsDir = mkdtempSync(join(tmpdir(), 'vertex-runs-'));
+  try {
+    const manager = createManager(runsDir, {
+      runAgent: async () => ({ content: 'unreachable' }),
+      createModel: () => ({}),
+    });
+    assert.throws(() => manager.start({
+      runId: 'run-oversized-message',
+      sessionId: 'session-oversized-message',
+      replyId: 'reply-oversized-message',
+      messages: [{ role: 'user', content: 'x'.repeat(2 * 1024 * 1024 + 1) }],
+      modelConfig: { provider: 'openai', model: 'test', apiKey: 'test' },
+    }), /messages\[0\]\.content exceeds/i);
+    assert.equal(manager.list().length, 0);
+  } finally {
+    rmSync(runsDir, { recursive: true, force: true });
+  }
+});
+
 test('message images are materialized as binary sandbox attachments with model-visible paths', async () => {
   const stored = new Map();
   const messages = [{
@@ -833,7 +853,7 @@ test('sandbox runs execute concurrently with isolated events, cancellation, and 
   }
 });
 
-test('sandbox abort returns within a bound when a provider ignores cancellation', async () => {
+test('sandbox abort force-terminates and unlocks a session when a provider ignores cancellation', async () => {
   const runsDir = mkdtempSync(join(tmpdir(), 'vertex-runs-'));
   try {
     let receivedSignal;
@@ -857,17 +877,86 @@ test('sandbox abort returns within a bound when a provider ignores cancellation'
     const aborted = await manager.abort(started.id);
 
     assert.equal(receivedSignal.aborted, true);
-    assert.equal(aborted.status, 'running');
-    assert.throws(
-      () => manager.start({
-        runId: 'run-unresponsive-replacement',
-        sessionId: 'session-unresponsive',
-        replyId: 'reply-replacement',
-        messages: [{ role: 'user', content: 'replace' }],
-        modelConfig: { provider: 'openai', model: 'test', apiKey: 'test' },
-      }),
-      /already has an active agent run/
-    );
+    assert.equal(aborted.status, 'aborted');
+    assert.match(aborted.error, /cancellation grace period/i);
+
+    const replacement = manager.start({
+      runId: 'run-unresponsive-replacement',
+      sessionId: 'session-unresponsive',
+      replyId: 'reply-replacement',
+      messages: [{ role: 'user', content: 'replace' }],
+      modelConfig: { provider: 'openai', model: 'test', apiKey: 'test' },
+    });
+    assert.equal(replacement.status, 'running');
+    await manager.abort(replacement.id);
+  } finally {
+    rmSync(runsDir, { recursive: true, force: true });
+  }
+});
+
+test('sandbox run fails and unlocks a session when the provider makes no progress', async () => {
+  const runsDir = mkdtempSync(join(tmpdir(), 'vertex-runs-'));
+  try {
+    let receivedSignal;
+    const manager = createManager(runsDir, {
+      idleTimeoutMs: 10,
+      runAgent({ signal }) {
+        receivedSignal = signal;
+        return new Promise((_resolve, reject) => {
+          signal.addEventListener('abort', () => {
+            // Real providers commonly translate cancellation into a generic
+            // AbortError. The watchdog's actionable timeout must win that race.
+            reject(new DOMException('provider aborted', 'AbortError'));
+          }, { once: true });
+        });
+      },
+      createModel: () => ({}),
+    });
+    const started = manager.start({
+      runId: 'run-idle-provider',
+      sessionId: 'session-idle-provider',
+      replyId: 'reply-idle-provider',
+      messages: [{ role: 'user', content: 'start' }],
+      modelConfig: { provider: 'openai', model: 'test', apiKey: 'test' },
+    });
+
+    const failed = await waitForRunStatus(manager, started.id, 'error');
+
+    assert.equal(receivedSignal.aborted, true);
+    assert.match(failed.error, /made no progress.*LLM base URL/i);
+    const replacement = manager.start({
+      runId: 'run-after-idle-provider',
+      sessionId: 'session-idle-provider',
+      replyId: 'reply-after-idle-provider',
+      messages: [{ role: 'user', content: 'retry' }],
+      modelConfig: { provider: 'openai', model: 'test', apiKey: 'test' },
+    });
+    assert.equal(replacement.status, 'running');
+    await waitForRunStatus(manager, replacement.id, 'error');
+  } finally {
+    rmSync(runsDir, { recursive: true, force: true });
+  }
+});
+
+test('sandbox run reports a provider AbortError as an error without a cancel request', async () => {
+  const runsDir = mkdtempSync(join(tmpdir(), 'vertex-runs-'));
+  try {
+    const manager = createManager(runsDir, {
+      runAgent() {
+        throw new DOMException('upstream closed the stream', 'AbortError');
+      },
+      createModel: () => ({}),
+    });
+    const started = manager.start({
+      runId: 'run-provider-abort-error',
+      sessionId: 'session-provider-abort-error',
+      replyId: 'reply-provider-abort-error',
+      messages: [{ role: 'user', content: 'start' }],
+      modelConfig: { provider: 'openai', model: 'test', apiKey: 'test' },
+    });
+
+    const failed = await waitForRunStatus(manager, started.id, 'error');
+    assert.match(failed.error, /upstream closed/i);
   } finally {
     rmSync(runsDir, { recursive: true, force: true });
   }
@@ -894,7 +983,7 @@ test('a cancelled sandbox run drops detached late events and cannot become compl
       modelConfig: { provider: 'openai', model: 'test', apiKey: 'test' },
     });
     await new Promise((resolve) => setImmediate(resolve));
-    await manager.abort(started.id);
+    const forced = await manager.abort(started.id);
 
     await new Promise((resolve) => {
       setTimeout(() => {
@@ -903,9 +992,11 @@ test('a cancelled sandbox run drops detached late events and cannot become compl
       }, 0);
     });
     activeRun.resolve({ content: 'must not complete' });
-    const aborted = await waitForRunStatus(manager, started.id, 'aborted');
+    await new Promise((resolve) => setImmediate(resolve));
+    const aborted = manager.get(started.id);
 
     assert.match(aborted.error, /aborted/i);
+    assert.equal(aborted.error, forced.error);
     assert.equal(aborted.result, null);
     assert.deepEqual(manager.get(started.id).events, []);
   } finally {

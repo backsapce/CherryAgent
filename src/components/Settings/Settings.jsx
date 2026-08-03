@@ -116,7 +116,10 @@ const Settings = ({
   llmConfig,
   llmProfiles = [],
   activeLlmProfileId,
-  providers,
+  providers = [],
+  providerConfigs = [],
+  onConfigureProvider,
+  onDeleteProvider,
   onConfigureLLM,
   onDeleteLLM,
   onFetchModels,
@@ -140,14 +143,20 @@ const Settings = ({
 }) => {
   const { t, localePref, changeLocale } = useI18n();
   const [settingsTab, setSettingsTab] = useState('llm');
+  const [llmSettingsTab, setLlmSettingsTab] = useState('llms');
   const [settingsForm, setSettingsForm] = useState({
     id: null,
     name: '',
-    provider: '',
-    apiKey: '',
-    baseUrl: '',
+    providerId: '',
     model: '',
     contextWindow: '',
+  });
+  const [providerForm, setProviderForm] = useState({
+    id: null,
+    name: '',
+    type: '',
+    apiKey: '',
+    baseUrl: '',
   });
   const [modelList, setModelList] = useState([]);
   const [modelsLoading, setModelsLoading] = useState(false);
@@ -155,7 +164,10 @@ const Settings = ({
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
   const [selectedModels, setSelectedModels] = useState([]);
   const [editingLlmId, setEditingLlmId] = useState(null);
+  const [editingProviderId, setEditingProviderId] = useState(null);
+  const [llmSettingsError, setLlmSettingsError] = useState(null);
   const modelComboRef = useRef(null);
+  const modelRequestIdRef = useRef(0);
   const [newAgentUrl, setNewAgentUrl] = useState('');
   const [newAgentChecking, setNewAgentChecking] = useState(false);
   const [newAgentError, setNewAgentError] = useState(null);
@@ -408,20 +420,27 @@ const Settings = ({
       setSettingsForm({
         id: selected.id || null,
         name: selected.name || '',
-        provider: selected.provider || '',
-        apiKey: '',
-        baseUrl: selected.baseUrl || '',
+        providerId: selected.providerId || '',
         model: selected.model || '',
         contextWindow: selected.contextWindow ? String(selected.contextWindow) : '',
       });
       setSelectedModels(selected.model ? [selected.model] : []);
     }
+    const selectedProviderConfig = providerConfigs.find((item) => item.id === selected?.providerId)
+      || providerConfigs[0]
+      || null;
+    setEditingProviderId(selectedProviderConfig?.id || null);
+    setProviderForm({
+      id: selectedProviderConfig?.id || null,
+      name: selectedProviderConfig?.name || '',
+      type: selectedProviderConfig?.type || '',
+      apiKey: '',
+      baseUrl: selectedProviderConfig?.baseUrl || '',
+    });
     setModelList([]);
     setModelsError(null);
-    // Auto-fetch models if provider is configured with a saved key
-    if (selected?.provider && selected?.hasApiKey) {
-      fetchModels(selected.provider, '', selected.baseUrl || '', selected.id);
-    }
+    setLlmSettingsError(null);
+    if (selected?.providerId) fetchModels(selected.providerId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [show]);
 
@@ -447,31 +466,34 @@ const Settings = ({
     return () => document.removeEventListener('mousedown', handleClick);
   }, [modelDropdownOpen]);
 
-  const fetchModels = async (providerId, apiKey, baseUrl, profileId = editingLlmId) => {
+  const fetchModels = async (providerId) => {
+    const requestId = ++modelRequestIdRef.current;
     if (!providerId) {
-      setModelList([]);
-      return;
-    }
-    const selected = llmProfiles.find((p) => p.id === profileId) || llmConfig;
-    if (!apiKey && !selected?.hasApiKey) {
       setModelList([]);
       return;
     }
     setModelsLoading(true);
     setModelsError(null);
     try {
-      const models = await onFetchModels(providerId, { apiKey, baseUrl: baseUrl || null }, profileId);
+      const models = await onFetchModels(providerId);
+      if (requestId !== modelRequestIdRef.current) return;
       setModelList(models || []);
     } catch (err) {
+      if (requestId !== modelRequestIdRef.current) return;
       setModelsError(err.message);
       setModelList([]);
     } finally {
-      setModelsLoading(false);
+      if (requestId === modelRequestIdRef.current) setModelsLoading(false);
     }
   };
 
-  const selectedProvider = providers?.find((p) => p.id === settingsForm.provider);
+  const selectedProviderConfig = providerConfigs.find((item) => item.id === settingsForm.providerId) || null;
+  const selectedProvider = providers.find((item) => item.id === selectedProviderConfig?.type) || null;
+  const editingProvider = providerConfigs.find((item) => item.id === editingProviderId) || null;
+  const editingProviderType = providers.find((item) => item.id === providerForm.type) || null;
+  const editingProviderKeySaved = Boolean(editingProvider?.hasApiKey && editingProvider.type === providerForm.type);
   const selectedLlmProfile = llmProfiles.find((p) => p.id === editingLlmId) || null;
+  const editingProviderUsageCount = llmProfiles.filter((profile) => profile.providerId === editingProviderId).length;
   const autoTitleProfiles = llmProfiles.filter((profile) => profile.configured);
   const effectiveAutoTitleProfileId = autoTitleProfiles.some((profile) => profile.id === autoTitleForm.llmProfileId)
     ? autoTitleForm.llmProfileId
@@ -565,68 +587,119 @@ const Settings = ({
     }
   };
 
-  const handleProviderChange = (e) => {
-    const newProvider = e.target.value;
-    setSettingsForm((f) => ({ ...f, provider: newProvider, model: '', baseUrl: '' }));
+  const handleLlmProviderChange = (e) => {
+    const providerId = e.target.value;
+    setSettingsForm((form) => ({ ...form, providerId, model: '' }));
     setSelectedModels([]);
     setModelList([]);
     setModelsError(null);
-    const key = settingsForm.apiKey;
-    if (newProvider && (key || llmConfig?.hasApiKey)) {
-      fetchModels(newProvider, key, '');
+    if (providerId) fetchModels(providerId);
+  };
+
+  const handleEditProvider = (providerId) => {
+    const providerConfig = providerConfigs.find((item) => item.id === providerId);
+    if (!providerConfig) return;
+    setEditingProviderId(providerConfig.id);
+    setProviderForm({
+      id: providerConfig.id,
+      name: providerConfig.name || '',
+      type: providerConfig.type || '',
+      apiKey: '',
+      baseUrl: providerConfig.baseUrl || '',
+    });
+    setLlmSettingsError(null);
+  };
+
+  const handleNewProvider = () => {
+    setEditingProviderId(null);
+    setProviderForm({ id: null, name: '', type: '', apiKey: '', baseUrl: '' });
+    setLlmSettingsError(null);
+  };
+
+  const handleSaveProvider = async () => {
+    if (!providerForm.type) return;
+    setLlmSettingsError(null);
+    try {
+      const saved = await onConfigureProvider({
+        id: editingProviderId || null,
+        name: providerForm.name.trim() || undefined,
+        type: providerForm.type,
+        ...(providerForm.apiKey && { apiKey: providerForm.apiKey }),
+        baseUrl: providerForm.baseUrl.trim() || null,
+      });
+      setEditingProviderId(saved.id);
+      setProviderForm({
+        id: saved.id,
+        name: saved.name || '',
+        type: saved.type || providerForm.type,
+        apiKey: '',
+        baseUrl: saved.baseUrl || '',
+      });
+    } catch (err) {
+      setLlmSettingsError(err.message);
     }
   };
 
-  const handleApiKeyBlur = () => {
-    if (settingsForm.provider && settingsForm.apiKey) {
-      fetchModels(settingsForm.provider, settingsForm.apiKey, settingsForm.baseUrl);
-    }
-  };
-
-  const handleBaseUrlBlur = () => {
-    if (settingsForm.provider && (settingsForm.apiKey || llmConfig?.hasApiKey)) {
-      fetchModels(settingsForm.provider, settingsForm.apiKey, settingsForm.baseUrl);
+  const handleDeleteProvider = async () => {
+    if (!editingProviderId || editingProviderUsageCount > 0) return;
+    setLlmSettingsError(null);
+    try {
+      await onDeleteProvider?.(editingProviderId);
+      const next = providerConfigs.find((item) => item.id !== editingProviderId);
+      if (next) handleEditProvider(next.id);
+      else handleNewProvider();
+    } catch (err) {
+      setLlmSettingsError(err.message);
     }
   };
 
   const handleSaveSettings = async () => {
-    if (!settingsForm.provider) return;
+    if (!settingsForm.providerId) return;
     const manualModel = settingsForm.model.trim();
     const modelIds = selectedModels.length > 0
       ? selectedModels
-      : (manualModel ? [manualModel] : [null]);
+      : (manualModel ? [manualModel] : []);
+    if (modelIds.length === 0) return;
     const createMultiple = modelIds.length > 1;
     const trimmedName = settingsForm.name.trim();
     const contextWindowValue = Number(settingsForm.contextWindow);
     const contextWindow = Number.isFinite(contextWindowValue) && contextWindowValue > 0
       ? Math.floor(contextWindowValue)
       : undefined;
-    const selectedProviderName = selectedProvider?.name || settingsForm.provider;
+    const selectedProviderName = selectedProviderConfig?.name || '';
+    const currentProviderName = selectedLlmProfile?.providerName || selectedProviderName;
     const currentAutoName = selectedLlmProfile?.model
-      ? `${selectedProviderName} / ${selectedLlmProfile.model}`
-      : selectedProviderName;
+      ? `${currentProviderName} / ${selectedLlmProfile.model}`
+      : currentProviderName;
     const baseName = trimmedName && trimmedName !== currentAutoName ? trimmedName : '';
 
-    for (const [index, modelId] of modelIds.entries()) {
-      await onConfigureLLM({
-        id: createMultiple
-          ? (index === 0 && editingLlmId ? editingLlmId : null)
-          : (editingLlmId || null),
-        name: baseName
-          ? (createMultiple && modelId ? `${baseName} / ${modelId}` : baseName)
-          : undefined,
-        provider: settingsForm.provider,
-        ...(settingsForm.apiKey && { apiKey: settingsForm.apiKey }),
-        ...(createMultiple && editingLlmId && !settingsForm.apiKey && { cloneApiKeyFrom: editingLlmId }),
-        baseUrl: settingsForm.baseUrl || null,
-        model: modelId,
-        contextWindow: contextWindow || null,
-      });
+    setLlmSettingsError(null);
+    try {
+      for (const [index, modelId] of modelIds.entries()) {
+        await onConfigureLLM({
+          id: createMultiple
+            ? (index === 0 && editingLlmId ? editingLlmId : null)
+            : (editingLlmId || null),
+          name: baseName
+            ? (createMultiple ? `${baseName} / ${modelId}` : baseName)
+            : undefined,
+          providerId: settingsForm.providerId,
+          model: modelId,
+          contextWindow: contextWindow || null,
+        });
+      }
+      onClose();
+    } catch (err) {
+      setLlmSettingsError(err.message);
     }
-    onClose();
   };
 
   const toggleSelectedModel = (modelId) => {
+    if (editingLlmId) {
+      setSelectedModels([modelId]);
+      setSettingsForm((form) => ({ ...form, model: modelId }));
+      return;
+    }
     setSelectedModels((prev) => {
       const next = prev.includes(modelId)
         ? prev.filter((id) => id !== modelId)
@@ -643,41 +716,46 @@ const Settings = ({
     setSettingsForm({
       id: profile.id,
       name: profile.name || '',
-      provider: profile.provider || '',
-      apiKey: '',
-      baseUrl: profile.baseUrl || '',
+      providerId: profile.providerId || '',
       model: profile.model || '',
       contextWindow: profile.contextWindow ? String(profile.contextWindow) : '',
     });
     setSelectedModels(profile.model ? [profile.model] : []);
     setModelList([]);
     setModelsError(null);
-    if (profile.provider && profile.hasApiKey) {
-      fetchModels(profile.provider, '', profile.baseUrl || '', profile.id);
-    }
+    setLlmSettingsError(null);
+    if (profile.providerId) fetchModels(profile.providerId);
   };
 
-  const handleNewLlmProfile = () => {
+  const handleNewLlmProfile = (preferredProviderId = null) => {
+    const requestedProviderId = typeof preferredProviderId === 'string' ? preferredProviderId : null;
+    const providerId = requestedProviderId || settingsForm.providerId || editingProviderId || providerConfigs[0]?.id || '';
     setEditingLlmId(null);
     setSettingsForm({
       id: null,
       name: '',
-      provider: '',
-      apiKey: '',
-      baseUrl: '',
+      providerId,
       model: '',
       contextWindow: '',
     });
     setSelectedModels([]);
     setModelList([]);
     setModelsError(null);
+    setLlmSettingsError(null);
+    if (providerId) fetchModels(providerId);
   };
 
   const handleDeleteLlmProfile = async () => {
-    if (!editingLlmId || llmProfiles.length <= 1) return;
-    await onDeleteLLM?.(editingLlmId);
-    const next = llmProfiles.find((p) => p.id !== editingLlmId);
-    if (next) handleEditLlmProfile(next.id);
+    if (!editingLlmId) return;
+    setLlmSettingsError(null);
+    try {
+      await onDeleteLLM?.(editingLlmId);
+      const next = llmProfiles.find((p) => p.id !== editingLlmId);
+      if (next) handleEditLlmProfile(next.id);
+      else handleNewLlmProfile();
+    } catch (err) {
+      setLlmSettingsError(err.message);
+    }
   };
 
   const manifestModeChangeLockedFor = (candidate) => {
@@ -895,171 +973,231 @@ const Settings = ({
             <div className="settings-section">
               <h3>{t('llmSettings.title')}</h3>
               <p className="settings-desc">{t('llmSettings.desc')}</p>
-
-              {llmProfiles.length > 0 && (
-                <>
-                  <label>{t('llmSettings.profile')}</label>
-                  <select
-                    value={editingLlmId || ''}
-                    onChange={(e) => handleEditLlmProfile(e.target.value)}
-                  >
-                    {llmProfiles.map((profile) => (
-                      <option key={profile.id} value={profile.id}>
-                        {profile.name || `${profile.provider} / ${profile.model}`}
-                      </option>
-                    ))}
-                  </select>
-                </>
-              )}
-
-              <div className="settings-inline-actions">
-                <button type="button" className="settings-secondary" onClick={handleNewLlmProfile}>
-                  {t('llmSettings.addProfile')}
+              <div className="llm-settings-tabs">
+                <button
+                  type="button"
+                  className={llmSettingsTab === 'llms' ? 'active' : ''}
+                  onClick={() => { setLlmSettingsTab('llms'); setLlmSettingsError(null); }}
+                >
+                  {t('llmSettings.llmTab')}
+                  <span>{llmProfiles.length}</span>
                 </button>
-                {editingLlmId && llmProfiles.length > 1 && (
-                  <button type="button" className="settings-secondary danger" onClick={handleDeleteLlmProfile}>
-                    {t('llmSettings.deleteProfile')}
-                  </button>
-                )}
+                <button
+                  type="button"
+                  className={llmSettingsTab === 'providers' ? 'active' : ''}
+                  onClick={() => { setLlmSettingsTab('providers'); setLlmSettingsError(null); }}
+                >
+                  {t('llmSettings.providersTab')}
+                  <span>{providerConfigs.length}</span>
+                </button>
               </div>
 
-              <label>{t('llmSettings.profileName')}</label>
-              <input
-                type="text"
-                placeholder={t('llmSettings.profileNamePlaceholder')}
-                value={settingsForm.name}
-                onChange={(e) => setSettingsForm((f) => ({ ...f, name: e.target.value }))}
-              />
+              {llmSettingsError && <p className="settings-error">{llmSettingsError}</p>}
 
-              <label>{t('llmSettings.provider')}</label>
-              <select
-                value={settingsForm.provider}
-                onChange={handleProviderChange}
-              >
-                <option value="">{t('llmSettings.selectProvider')}</option>
-                {providers?.map((p) => (
-                  <option key={p.id} value={p.id}>{p.name}</option>
-                ))}
-              </select>
-
-              <label>{t('llmSettings.apiKey')}</label>
-              <input
-                type="password"
-                placeholder={selectedLlmProfile?.hasApiKey ? t('llmSettings.apiKeyMask') : t('llmSettings.enterApiKey')}
-                value={settingsForm.apiKey}
-                onChange={(e) => setSettingsForm((f) => ({ ...f, apiKey: e.target.value }))}
-                onBlur={handleApiKeyBlur}
-              />
-              {selectedLlmProfile?.hasApiKey && !settingsForm.apiKey && (
-                <p className="settings-hint">{t('llmSettings.apiKeySaved')}</p>
-              )}
-
-              {selectedProvider && (
+              {llmSettingsTab === 'llms' && (
                 <>
-                  {selectedProvider.requiresBaseUrl && (
+                  {llmProfiles.length > 0 && (
                     <>
-                      <label>{t('llmSettings.baseUrl')} <span className="required-tag">*</span></label>
-                      <input
-                        type="text"
-                        placeholder={t('llmSettings.customEndpoint')}
-                        value={settingsForm.baseUrl}
-                        onChange={(e) => setSettingsForm((f) => ({ ...f, baseUrl: e.target.value }))}
-                        onBlur={handleBaseUrlBlur}
-                      />
-                      <p className="settings-hint">{t('llmSettings.baseUrlRequiredHint')}</p>
+                      <label>{t('llmSettings.llmList')}</label>
+                      <select value={editingLlmId || ''} onChange={(e) => handleEditLlmProfile(e.target.value)}>
+                        {llmProfiles.map((profile) => (
+                          <option key={profile.id} value={profile.id}>
+                            {profile.name || `${profile.providerName || profile.provider} / ${profile.model}`}
+                          </option>
+                        ))}
+                      </select>
                     </>
                   )}
 
-                  <label>
-                    {t('llmSettings.model')}
-                    {modelsLoading && <span className="models-loading-tag">{t('llmSettings.modelsLoading')}</span>}
-                  </label>
-                  {modelsError && (
-                    <p className="settings-error">{t('llmSettings.modelsError', { error: modelsError })}</p>
-                  )}
-                  <div className="model-select-row">
-                    <div className="model-combo" ref={modelComboRef}>
+                  <div className="settings-inline-actions">
+                    <button type="button" className="settings-secondary" onClick={handleNewLlmProfile} disabled={providerConfigs.length === 0}>
+                      {t('llmSettings.addLlm')}
+                    </button>
+                    {editingLlmId && (
+                      <button type="button" className="settings-secondary danger" onClick={handleDeleteLlmProfile}>
+                        {t('llmSettings.deleteLlm')}
+                      </button>
+                    )}
+                  </div>
+
+                  {providerConfigs.length === 0 ? (
+                    <div className="llm-empty-state">
+                      <p>{t('llmSettings.providerFirst')}</p>
+                      <button type="button" className="settings-secondary" onClick={() => { setLlmSettingsTab('providers'); handleNewProvider(); }}>
+                        {t('llmSettings.addProvider')}
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      <label>{t('llmSettings.llmName')}</label>
                       <input
                         type="text"
-                        className="model-combo-input"
-                        value={settingsForm.model}
-                        placeholder={selectedProvider.defaultModel || t('llmSettings.modelPlaceholder', { fallback: 'Type or select a model' })}
-                        onChange={(e) => {
-                          setSettingsForm((f) => ({ ...f, model: e.target.value }));
-                          setSelectedModels([]);
-                          setModelDropdownOpen(true);
-                        }}
-                        onFocus={() => setModelDropdownOpen(true)}
-                        disabled={modelsLoading}
+                        placeholder={t('llmSettings.llmNamePlaceholder')}
+                        value={settingsForm.name}
+                        onChange={(e) => setSettingsForm((form) => ({ ...form, name: e.target.value }))}
                       />
+
+                      <label>{t('llmSettings.provider')}</label>
+                      <select value={settingsForm.providerId} onChange={handleLlmProviderChange}>
+                        <option value="">{t('llmSettings.selectConfiguredProvider')}</option>
+                        {providerConfigs.map((providerConfig) => (
+                          <option key={providerConfig.id} value={providerConfig.id}>
+                            {providerConfig.name} · {providers.find((item) => item.id === providerConfig.type)?.name || providerConfig.type}
+                          </option>
+                        ))}
+                      </select>
+
+                      <label>
+                        {t('llmSettings.model')}
+                        {modelsLoading && <span className="models-loading-tag">{t('llmSettings.modelsLoading')}</span>}
+                      </label>
+                      {modelsError && <p className="settings-error">{t('llmSettings.modelsError', { error: modelsError })}</p>}
+                      <div className="model-select-row">
+                        <div className="model-combo" ref={modelComboRef}>
+                          <input
+                            type="text"
+                            className="model-combo-input"
+                            value={settingsForm.model}
+                            placeholder={selectedProvider?.defaultModel || t('llmSettings.modelPlaceholder')}
+                            onChange={(e) => {
+                              setSettingsForm((form) => ({ ...form, model: e.target.value }));
+                              setSelectedModels([]);
+                              setModelDropdownOpen(true);
+                            }}
+                            onFocus={() => setModelDropdownOpen(true)}
+                            disabled={!selectedProviderConfig || modelsLoading}
+                          />
+                          <button
+                            type="button"
+                            className="model-combo-toggle"
+                            tabIndex={-1}
+                            onClick={() => setModelDropdownOpen((open) => !open)}
+                            disabled={!selectedProviderConfig || modelsLoading}
+                          >
+                            <ChevronDown width={10} height={10} />
+                          </button>
+                          {modelDropdownOpen && (() => {
+                            const allModels = modelList.length > 0 ? modelList : (selectedProvider?.fallbackModels || []);
+                            const filter = selectedModels.length > 0 ? '' : settingsForm.model.toLowerCase();
+                            const filtered = filter
+                              ? allModels.filter((model) => model.id.toLowerCase().includes(filter) || model.name.toLowerCase().includes(filter))
+                              : allModels;
+                            return filtered.length > 0 ? (
+                              <ul className="model-combo-dropdown">
+                                {filtered.map((model) => (
+                                  <li
+                                    key={model.id}
+                                    className={`model-combo-option${selectedModels.includes(model.id) || model.id === settingsForm.model ? ' selected' : ''}`}
+                                    onMouseDown={(e) => { e.preventDefault(); toggleSelectedModel(model.id); }}
+                                  >
+                                    <input type="checkbox" tabIndex={-1} readOnly checked={selectedModels.includes(model.id)} />
+                                    <span>{model.name}</span>
+                                  </li>
+                                ))}
+                              </ul>
+                            ) : null;
+                          })()}
+                        </div>
+                      </div>
+                      <p className="settings-hint">{t('llmSettings.modelsHint')}</p>
+
+                      <label>{t('llmSettings.contextWindow')}</label>
+                      <input
+                        type="number"
+                        min="1"
+                        step="1"
+                        inputMode="numeric"
+                        placeholder={t('llmSettings.contextWindowPlaceholder')}
+                        value={settingsForm.contextWindow}
+                        onChange={(e) => setSettingsForm((form) => ({ ...form, contextWindow: e.target.value }))}
+                      />
+                      <p className="settings-hint">{t('llmSettings.contextWindowHint')}</p>
+                    </>
+                  )}
+                </>
+              )}
+
+              {llmSettingsTab === 'providers' && (
+                <>
+                  {providerConfigs.length > 0 && (
+                    <>
+                      <label>{t('llmSettings.providerList')}</label>
+                      <select value={editingProviderId || ''} onChange={(e) => handleEditProvider(e.target.value)}>
+                        {providerConfigs.map((providerConfig) => (
+                          <option key={providerConfig.id} value={providerConfig.id}>{providerConfig.name}</option>
+                        ))}
+                      </select>
+                    </>
+                  )}
+
+                  <div className="settings-inline-actions">
+                    <button type="button" className="settings-secondary" onClick={handleNewProvider}>
+                      {t('llmSettings.addProvider')}
+                    </button>
+                    {editingProviderId && (
                       <button
                         type="button"
-                        className="model-combo-toggle"
-                        tabIndex={-1}
-                        onClick={() => setModelDropdownOpen((v) => !v)}
-                        disabled={modelsLoading}
+                        className="settings-secondary danger"
+                        onClick={handleDeleteProvider}
+                        disabled={editingProviderUsageCount > 0}
+                        title={editingProviderUsageCount > 0 ? t('llmSettings.providerInUse') : undefined}
                       >
-                        <ChevronDown width={10} height={10} />
+                        {t('llmSettings.deleteProvider')}
                       </button>
-                      {modelDropdownOpen && (() => {
-                        const allModels = modelList.length > 0 ? modelList : (selectedProvider.fallbackModels || []);
-                        const filter = selectedModels.length > 0 ? '' : settingsForm.model.toLowerCase();
-                        const filtered = filter
-                          ? allModels.filter((m) => m.id.toLowerCase().includes(filter) || m.name.toLowerCase().includes(filter))
-                          : allModels;
-                        return filtered.length > 0 ? (
-                          <ul className="model-combo-dropdown">
-                            {filtered.map((m) => (
-                              <li
-                                key={m.id}
-                                className={`model-combo-option${selectedModels.includes(m.id) || m.id === settingsForm.model ? ' selected' : ''}`}
-                                onMouseDown={(e) => {
-                                  e.preventDefault();
-                                  toggleSelectedModel(m.id);
-                                }}
-                              >
-                                <input
-                                  type="checkbox"
-                                  tabIndex={-1}
-                                  readOnly
-                                  checked={selectedModels.includes(m.id)}
-                                />
-                                <span>{m.name}</span>
-                              </li>
-                            ))}
-                          </ul>
-                        ) : null;
-                      })()}
-                    </div>
-
+                    )}
+                    {editingProviderId && (
+                      <button type="button" className="settings-secondary" onClick={() => { setLlmSettingsTab('llms'); handleNewLlmProfile(editingProviderId); }}>
+                        {t('llmSettings.addLlm')}
+                      </button>
+                    )}
                   </div>
-                  {modelList.length === 0 && !modelsLoading && settingsForm.apiKey && (
-                    <p className="settings-hint">{t('llmSettings.modelsHint')}</p>
+                  {editingProviderId && (
+                    <p className="settings-hint">{t('llmSettings.providerUsageCount', { count: editingProviderUsageCount })}</p>
                   )}
 
-                  <label>{t('llmSettings.contextWindow')}</label>
+                  <label>{t('llmSettings.providerName')}</label>
                   <input
-                    type="number"
-                    min="1"
-                    step="1"
-                    inputMode="numeric"
-                    placeholder={t('llmSettings.contextWindowPlaceholder')}
-                    value={settingsForm.contextWindow}
-                    onChange={(e) => setSettingsForm((f) => ({ ...f, contextWindow: e.target.value }))}
+                    type="text"
+                    placeholder={t('llmSettings.providerNamePlaceholder')}
+                    value={providerForm.name}
+                    onChange={(e) => setProviderForm((form) => ({ ...form, name: e.target.value }))}
                   />
-                  <p className="settings-hint">{t('llmSettings.contextWindowHint')}</p>
 
-                  {!selectedProvider.requiresBaseUrl && (
+                  <label>{t('llmSettings.providerType')}</label>
+                  <select
+                    value={providerForm.type}
+                    onChange={(e) => setProviderForm((form) => ({ ...form, type: e.target.value, baseUrl: '' }))}
+                  >
+                    <option value="">{t('llmSettings.selectProvider')}</option>
+                    {providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.name}</option>)}
+                  </select>
+
+                  <label>{t('llmSettings.apiKey')}</label>
+                  <input
+                    type="password"
+                    placeholder={editingProviderKeySaved ? t('llmSettings.apiKeyMask') : t('llmSettings.enterApiKey')}
+                    value={providerForm.apiKey}
+                    onChange={(e) => setProviderForm((form) => ({ ...form, apiKey: e.target.value }))}
+                  />
+                  {editingProviderKeySaved && !providerForm.apiKey && <p className="settings-hint">{t('llmSettings.apiKeySaved')}</p>}
+
+                  {providerForm.type && (
                     <>
-                      <label>{t('llmSettings.baseUrl')} <span className="optional-tag">{t('llmSettings.optional')}</span></label>
+                      <label>
+                        {t('llmSettings.baseUrl')}
+                        {editingProviderType?.requiresBaseUrl
+                          ? <span className="required-tag">*</span>
+                          : <span className="optional-tag">{t('llmSettings.optional')}</span>}
+                      </label>
                       <input
                         type="text"
-                        placeholder={selectedProvider.defaultBaseUrl || t('llmSettings.customEndpoint')}
-                        value={settingsForm.baseUrl}
-                        onChange={(e) => setSettingsForm((f) => ({ ...f, baseUrl: e.target.value }))}
-                        onBlur={handleBaseUrlBlur}
+                        placeholder={editingProviderType?.defaultBaseUrl || t('llmSettings.customEndpoint')}
+                        value={providerForm.baseUrl}
+                        onChange={(e) => setProviderForm((form) => ({ ...form, baseUrl: e.target.value }))}
                       />
-                      <p className="settings-hint">{t('llmSettings.baseUrlHint')}</p>
+                      <p className="settings-hint">
+                        {editingProviderType?.requiresBaseUrl ? t('llmSettings.baseUrlRequiredHint') : t('llmSettings.baseUrlHint')}
+                      </p>
                     </>
                   )}
                 </>
@@ -1067,7 +1205,23 @@ const Settings = ({
 
               <div className="settings-actions">
                 <button className="settings-cancel" onClick={onClose}>{t('settings.cancel')}</button>
-                <button className="settings-save" onClick={handleSaveSettings} disabled={!settingsForm.provider || (selectedProvider?.requiresBaseUrl && !settingsForm.baseUrl.trim())}>{t('settings.save')}</button>
+                {llmSettingsTab === 'llms' ? (
+                  <button
+                    className="settings-save"
+                    onClick={handleSaveSettings}
+                    disabled={!settingsForm.providerId || (!settingsForm.model.trim() && selectedModels.length === 0)}
+                  >
+                    {t('llmSettings.saveLlm')}
+                  </button>
+                ) : (
+                  <button
+                    className="settings-save"
+                    onClick={handleSaveProvider}
+                    disabled={!providerForm.type || (editingProviderType?.requiresBaseUrl && !providerForm.baseUrl.trim())}
+                  >
+                    {t('llmSettings.saveProvider')}
+                  </button>
+                )}
               </div>
             </div>
           )}

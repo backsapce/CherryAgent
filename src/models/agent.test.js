@@ -2,11 +2,15 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   abortRemoteAgentRun,
+  assertRemoteAgentRunProtocol,
+  checkAgentAvailable,
+  downloadRemoteFile,
   executeCommand,
   getCommand,
   getRemoteAgentRun,
   listFiles,
   listRemoteFiles,
+  readFileText,
   startRemoteAgentRun,
   startCommand,
   stopCommand,
@@ -114,17 +118,22 @@ test('managed command clients use job endpoints and preserve log cursors', async
 
 test('remote run abort forwards its cancellation signal', async () => {
   let request = null;
-  const restore = installBrowserMocks(undefined, async (url, options) => {
+  const restore = installBrowserMocks(undefined, (url, options) => {
     request = { url, options };
-    return { ok: true, json: async () => ({ status: 'aborted' }) };
+    return new Promise((_resolve, reject) => {
+      options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true });
+    });
   });
   const controller = new AbortController();
 
   try {
-    await abortRemoteAgentRun('https://sandbox.example', 'run one', controller.signal);
+    const pending = abortRemoteAgentRun('https://sandbox.example', 'run one', controller.signal);
+    await Promise.resolve();
+    controller.abort();
+    await assert.rejects(pending, (error) => error?.name === 'AbortError');
     assert.equal(request.url, 'https://sandbox.example/agent/runs/run%20one');
     assert.equal(request.options.method, 'DELETE');
-    assert.equal(request.options.signal, controller.signal);
+    assert.equal(request.options.signal.aborted, true);
   } finally {
     restore();
   }
@@ -190,7 +199,7 @@ test('sandbox runs reject an outdated agent run protocol before starting', async
       ok: true,
       json: async () => ({
         status: 'ok',
-        capabilities: { backgroundAgentRuns: true, agentRunProtocol: 1 },
+        capabilities: { backgroundAgentRuns: true, agentRunProtocol: 2 },
       }),
     };
   });
@@ -198,12 +207,28 @@ test('sandbox runs reject an outdated agent run protocol before starting', async
   try {
     await assert.rejects(
       startRemoteAgentRun('https://sandbox.example', { sessionId: 'one' }),
-      /runtime is outdated.*protocol 1.*2 required/i
+      /runtime is outdated.*protocol 2.*3 required/i
     );
     assert.equal(requests.length, 1);
     assert.equal(requests[0].url, 'https://sandbox.example/agent');
     assert.equal(requests[0].options.method, 'GET');
     assert.equal(requests[0].options.cache, 'no-store');
+  } finally {
+    restore();
+  }
+});
+
+test('sandbox run reattachment also rejects an outdated runtime protocol', async () => {
+  const restore = installBrowserMocks(undefined, async () => ({
+    ok: true,
+    json: async () => ({ capabilities: { agentRunProtocol: 2 } }),
+  }));
+
+  try {
+    await assert.rejects(
+      assertRemoteAgentRunProtocol('https://sandbox.example'),
+      /runtime is outdated.*protocol 2.*3 required/i
+    );
   } finally {
     restore();
   }
@@ -218,7 +243,7 @@ test('sandbox runs start after confirming the current agent run protocol', async
         ok: true,
         json: async () => ({
           status: 'ok',
-          capabilities: { backgroundAgentRuns: true, agentRunProtocol: 2 },
+          capabilities: { backgroundAgentRuns: true, agentRunProtocol: 3 },
         }),
       };
     }
@@ -264,7 +289,7 @@ test('sandbox run start errors distinguish preflight failure from an attempted P
     if (options.method === 'GET') {
       return {
         ok: true,
-        json: async () => ({ capabilities: { agentRunProtocol: 2 } }),
+        json: async () => ({ capabilities: { agentRunProtocol: 3 } }),
       };
     }
     throw new Error('POST response lost');
@@ -285,6 +310,115 @@ test('sandbox run start errors distinguish preflight failure from an attempted P
   }
 });
 
+test('sandbox run network failures include runtime connectivity diagnostics', async () => {
+  const requests = [];
+  const restore = installBrowserMocks(undefined, async (url, options) => {
+    requests.push({ url, options });
+    if (options.method === 'GET') {
+      return {
+        ok: true,
+        json: async () => ({ capabilities: { agentRunProtocol: 3 } }),
+      };
+    }
+    throw new TypeError('Failed to fetch');
+  });
+
+  try {
+    await assert.rejects(
+      startRemoteAgentRun('https://sandbox.example', { sessionId: 'one' }),
+      (error) => {
+        assert.equal(error.name, 'AgentRuntimeNetworkError');
+        assert.equal(error.code, 'AGENT_RUNTIME_NETWORK_ERROR');
+        assert.equal(error.agentRunRequestStarted, true);
+        assert.match(error.message, /vertex-sandbox is running/i);
+        assert.match(error.message, /AGENT_ALLOWED_ORIGINS/);
+        assert.match(error.message, /Local Network Access/);
+        return true;
+      }
+    );
+    assert.deepEqual(requests.map((request) => request.options.method), ['GET', 'POST']);
+  } finally {
+    restore();
+  }
+});
+
+test('agent health checks settle on a deadline when fetch ignores abort', { timeout: 1_000 }, async () => {
+  const restore = installBrowserMocks(undefined, () => new Promise(() => {}));
+
+  try {
+    const result = await checkAgentAvailable('https://sandbox.example', { timeoutMs: 20 });
+    assert.deepEqual(result, { available: false, needsAuth: false });
+  } finally {
+    restore();
+  }
+});
+
+test('remote run POST and GET settle on a deadline when fetch never returns', { timeout: 1_000 }, async () => {
+  const restore = installBrowserMocks(undefined, (url, options) => {
+    if (url === 'https://sandbox.example/agent' && options.method === 'GET') {
+      return Promise.resolve({
+        ok: true,
+        json: async () => ({ capabilities: { agentRunProtocol: 3 } }),
+      });
+    }
+    return new Promise(() => {});
+  });
+
+  try {
+    await assertRequestTimeout(startRemoteAgentRun(
+      'https://sandbox.example',
+      { sessionId: 'one' },
+      { timeoutMs: 20 }
+    ));
+    await assertRequestTimeout(getRemoteAgentRun(
+      'https://sandbox.example',
+      'run-one',
+      0,
+      { timeoutMs: 20 }
+    ));
+  } finally {
+    restore();
+  }
+});
+
+test('sandbox file list, download, and text reads have abort-independent deadlines', { timeout: 1_000 }, async () => {
+  const restore = installBrowserMocks(undefined, () => new Promise(() => {}));
+
+  try {
+    await assertRequestTimeout(listRemoteFiles('skills', 'https://sandbox.example', { timeoutMs: 20 }));
+    await assertRequestTimeout(downloadRemoteFile('skills/one/SKILL.md', 'https://sandbox.example', { timeoutMs: 20 }));
+    await assertRequestTimeout(readFileText('skills/one/SKILL.md', 'https://sandbox.example', { timeoutMs: 20 }));
+  } finally {
+    restore();
+  }
+});
+
+test('sandbox file list, download, and text reads honor caller cancellation', { timeout: 1_000 }, async () => {
+  let requestSignal = null;
+  const restore = installBrowserMocks(undefined, (_url, options) => {
+    requestSignal = options.signal;
+    return new Promise(() => {});
+  });
+  const operations = [
+    (signal) => listFiles('skills', 'https://sandbox.example', { signal, timeoutMs: 500 }),
+    (signal) => downloadRemoteFile('skills/one/SKILL.md', 'https://sandbox.example', { signal, timeoutMs: 500 }),
+    (signal) => readFileText('skills/one/SKILL.md', 'https://sandbox.example', { signal, timeoutMs: 500 }),
+  ];
+
+  try {
+    for (const operation of operations) {
+      const controller = new AbortController();
+      const pending = operation(controller.signal);
+      await Promise.resolve();
+      controller.abort();
+      await assert.rejects(pending, (error) => error?.name === 'AbortError');
+      assert.equal(requestSignal?.aborted, true);
+    }
+  } finally {
+    restore();
+  }
+});
+
 test('sandbox file requests route configured loopback hosts through the page proxy', async () => {
   let requestedUrl = null;
   const restore = installBrowserMocks(undefined, async (url) => {
@@ -297,6 +431,21 @@ test('sandbox file requests route configured loopback hosts through the page pro
   try {
     await listRemoteFiles('', 'http://localhost:3099');
     assert.equal(requestedUrl, '/agent/files');
+  } finally {
+    restore();
+  }
+});
+
+test('sandbox requests preserve an explicit non-default localhost port', async () => {
+  let requestedUrl = null;
+  const restore = installBrowserMocks(undefined, async (url) => {
+    requestedUrl = url;
+    return { ok: true, json: async () => [] };
+  });
+
+  try {
+    await listRemoteFiles('', 'http://localhost:3100/agent');
+    assert.equal(requestedUrl, 'http://localhost:3100/agent/files');
   } finally {
     restore();
   }
@@ -346,3 +495,12 @@ test('sandbox file requests can explicitly include hidden entries', async () => 
     restore();
   }
 });
+
+async function assertRequestTimeout(promise) {
+  await assert.rejects(promise, (error) => {
+    assert.equal(error?.name, 'TimeoutError');
+    assert.equal(error?.code, 'AGENT_REQUEST_TIMEOUT');
+    assert.equal(error?.timeoutMs, 20);
+    return true;
+  });
+}

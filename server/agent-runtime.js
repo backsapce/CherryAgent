@@ -13,8 +13,13 @@ const MAX_RUNTIME_FILE_BYTES = 256 * 1024;
 const MAX_RUNTIME_FILES_BYTES = 10 * 1024 * 1024;
 const MAX_SANDBOX_IMAGE_BYTES = 6 * 1024 * 1024;
 const MAX_SANDBOX_IMAGES_BYTES = 64 * 1024 * 1024;
+const MAX_MESSAGE_CONTENT_BYTES = 2 * 1024 * 1024;
+const MAX_MESSAGES_CONTENT_BYTES = 12 * 1024 * 1024;
 const CANCELLED_RUN_ID_TTL_MS = 10 * 60_000;
-const RUN_ABORT_WAIT_MS = 5_000;
+// Keep the server grace period below the browser's 5 second cancellation
+// deadline. If an upstream provider ignores AbortSignal, the durable run must
+// still become terminal so it cannot lock the conversation forever.
+const RUN_ABORT_WAIT_MS = 3_000;
 const SANDBOX_ATTACHMENTS_MARKER = 'Sandbox attachment files (available to shell commands and sandbox file tools):';
 const MAX_SKILL_CONTENT_CHARS = 60_000;
 const MAX_SKILL_REFERENCE_CHARS = 80_000;
@@ -194,6 +199,7 @@ export function createAgentRunManager({
   createModel = createLanguageModel,
   waitUntilWakeup = waitForWakeup,
   abortWaitMs = RUN_ABORT_WAIT_MS,
+  idleTimeoutMs = 0,
   maxEventBytes = MAX_EVENT_BYTES,
 }) {
   mkdirSync(runsDir, { recursive: true });
@@ -295,7 +301,9 @@ export function createAgentRunManager({
       error: null,
       controller: new AbortController(),
       cancelRequested: false,
+      forceTerminated: false,
       completion,
+      resolveCompletion,
       eventBytes: 0,
     };
     runs.set(id, run);
@@ -324,52 +332,60 @@ export function createAgentRunManager({
           const turnToken = {};
           activeTurnToken = turnToken;
           let scheduledWakeup = null;
+          const activityWatchdog = createActivityWatchdog(idleTimeoutMs, (error) => {
+            run.controller?.abort(error);
+          });
           try {
-            result = await runAgent({
-              messages: runtimeMessages,
-              systemPrompt: input.systemPrompt || '',
-              agentId: input.agentId || null,
-              provider: modelConfig.provider,
-              model: modelConfig.model,
-              contextWindow: modelConfig.contextWindow || undefined,
-              maxRounds: input.maxRounds,
-              signal: run.controller.signal,
-              languageModel: createModel(modelConfig),
-              runtimeContext: normalizeRuntimeContext(input.runtimeContext),
-              toolSchemas: REMOTE_TOOL_SCHEMAS,
-              dispatchTool,
-              scheduleWakeup: async ({ delaySeconds, prompt }) => {
-                if (activeTurnToken !== turnToken) throw createRunAbortError();
-                throwIfRunCancelled(run);
-                scheduledWakeup = createOrReplaceTurnWakeup({
-                  currentWakeup: scheduledWakeup,
-                  id: scheduledWakeup?.id || `wake-${randomUUID()}`,
-                  delaySeconds,
-                  prompt,
-                });
-                return scheduledWakeup;
-              },
-              autoSummarize: false,
-              runtimeMode: 'sandbox',
-              onEvent: (event) => {
-                // A provider or tool may ignore the per-turn abort and report
-                // late output after the scheduled continuation has begun. A
-                // run-level status check alone cannot distinguish those turns.
-                // Drop stale callback output instead of throwing: callbacks
-                // from an EventEmitter/setTimeout may live outside the tool's
-                // promise chain, where a throw would become an uncaughtException
-                // and terminate the entire agent server.
-                if (
-                  activeTurnToken !== turnToken
-                  || run.status !== 'running'
-                  || run.cancelRequested
-                  || !run.controller
-                  || run.controller.signal.aborted
-                ) return;
-                emit(run, event);
-              },
-            });
+            result = await Promise.race([
+              Promise.resolve(runAgent({
+                messages: runtimeMessages,
+                systemPrompt: input.systemPrompt || '',
+                agentId: input.agentId || null,
+                provider: modelConfig.provider,
+                model: modelConfig.model,
+                contextWindow: modelConfig.contextWindow || undefined,
+                maxRounds: input.maxRounds,
+                signal: run.controller.signal,
+                languageModel: createModel(modelConfig),
+                runtimeContext: normalizeRuntimeContext(input.runtimeContext),
+                toolSchemas: REMOTE_TOOL_SCHEMAS,
+                dispatchTool,
+                scheduleWakeup: async ({ delaySeconds, prompt }) => {
+                  if (activeTurnToken !== turnToken) throw createRunAbortError();
+                  throwIfRunCancelled(run);
+                  scheduledWakeup = createOrReplaceTurnWakeup({
+                    currentWakeup: scheduledWakeup,
+                    id: scheduledWakeup?.id || `wake-${randomUUID()}`,
+                    delaySeconds,
+                    prompt,
+                  });
+                  return scheduledWakeup;
+                },
+                autoSummarize: false,
+                runtimeMode: 'sandbox',
+                onEvent: (event) => {
+                  // A provider or tool may ignore the per-turn abort and report
+                  // late output after the scheduled continuation has begun. A
+                  // run-level status check alone cannot distinguish those turns.
+                  // Drop stale callback output instead of throwing: callbacks
+                  // from an EventEmitter/setTimeout may live outside the tool's
+                  // promise chain, where a throw would become an uncaughtException
+                  // and terminate the entire agent server.
+                  if (
+                    activeTurnToken !== turnToken
+                    || run.status !== 'running'
+                    || run.cancelRequested
+                    || !run.controller
+                    || run.controller.signal.aborted
+                  ) return;
+                  activityWatchdog.touch();
+                  emit(run, event);
+                },
+              })),
+              activityWatchdog.promise,
+            ]);
           } finally {
+            activityWatchdog.dispose();
             if (activeTurnToken === turnToken) activeTurnToken = null;
           }
 
@@ -398,18 +414,21 @@ export function createAgentRunManager({
         run.status = 'completed';
         run.result = result;
       } catch (error) {
-        run.status = run.cancelRequested || error?.name === 'AbortError' ? 'aborted' : 'error';
-        run.error = error?.message || String(error);
-      } finally {
-        run.updatedAt = new Date().toISOString();
-        run.controller = null;
-        try {
-          persist(run);
-        } catch (error) {
-          console.error(`Failed to persist terminal agent run ${run.id}:`, error);
-        } finally {
-          resolveCompletion();
+        if (!run.forceTerminated) {
+          run.status = run.cancelRequested ? 'aborted' : 'error';
+          run.error = error?.message || String(error);
         }
+      } finally {
+        if (!run.forceTerminated) {
+          run.updatedAt = new Date().toISOString();
+          run.controller = null;
+          try {
+            persist(run);
+          } catch (error) {
+            console.error(`Failed to persist terminal agent run ${run.id}:`, error);
+          }
+        }
+        resolveCompletion();
       }
     });
 
@@ -452,23 +471,90 @@ export function createAgentRunManager({
       run.cancelRequested = true;
       run.controller?.abort();
       // Providers and external tools are expected to honor AbortSignal, but an
-      // unhealthy implementation must not hold the HTTP DELETE open forever.
-      // The run remains active (and continues blocking another run for this
-      // same session) until its task actually settles, preserving isolation.
-      return waitForSettlement(run.completion, abortWaitMs).then(() => serializeRun(run));
+      // unhealthy implementation must neither hold DELETE open nor keep this
+      // session permanently locked. Late callbacks are already fenced by
+      // cancelRequested/status/controller checks in onEvent, and tool dispatch
+      // checks the aborted signal before starting new work.
+      return waitForSettlement(run.completion, abortWaitMs).then((settled) => {
+        if (!settled && ['running', 'waiting'].includes(run.status)) {
+          // Make the forced terminal snapshot immutable. The detached provider
+          // may eventually settle, but it no longer owns this durable state.
+          run.forceTerminated = true;
+          run.status = 'aborted';
+          run.error = 'Agent run aborted after the cancellation grace period.';
+          run.wakeup = null;
+          run.updatedAt = new Date().toISOString();
+          run.controller = null;
+          try {
+            persist(run);
+          } catch (error) {
+            console.error(`Failed to persist force-aborted agent run ${run.id}:`, error);
+          }
+          run.resolveCompletion?.();
+        }
+        return serializeRun(run);
+      });
     },
   };
 }
 
 async function waitForSettlement(promise, timeoutMs) {
   let timerId;
-  await Promise.race([
-    Promise.resolve(promise).catch(() => {}),
+  const settled = await Promise.race([
+    Promise.resolve(promise).then(() => true, () => true),
     new Promise((resolve) => {
-      timerId = setTimeout(resolve, Math.max(0, Number(timeoutMs) || 0));
+      timerId = setTimeout(() => resolve(false), Math.max(0, Number(timeoutMs) || 0));
     }),
   ]);
   clearTimeout(timerId);
+  return settled;
+}
+
+function createActivityWatchdog(timeoutMs, onTimeout) {
+  const boundedTimeoutMs = Number(timeoutMs);
+  if (!Number.isFinite(boundedTimeoutMs) || boundedTimeoutMs <= 0) {
+    return {
+      promise: new Promise(() => {}),
+      touch() {},
+      dispose() {},
+    };
+  }
+
+  let timerId;
+  let rejectTimeout;
+  let disposed = false;
+  const promise = new Promise((_resolve, reject) => {
+    rejectTimeout = reject;
+  });
+  const touch = () => {
+    if (disposed) return;
+    clearTimeout(timerId);
+    timerId = setTimeout(() => {
+      if (disposed) return;
+      const seconds = Math.max(1, Math.round(boundedTimeoutMs / 1_000));
+      const error = new Error(
+        `Sandbox runtime made no progress for ${seconds} seconds. Verify that the agent server can reach the configured LLM base URL.`
+      );
+      error.name = 'SandboxRuntimeTimeoutError';
+      error.code = 'SANDBOX_RUNTIME_IDLE_TIMEOUT';
+      // Settle the watchdog side of Promise.race first. Aborting the provider
+      // may synchronously surface a generic AbortError; that must not hide the
+      // actionable no-progress timeout from the durable run and browser UI.
+      rejectTimeout(error);
+      onTimeout?.(error);
+    }, boundedTimeoutMs);
+    timerId.unref?.();
+  };
+  touch();
+
+  return {
+    promise,
+    touch,
+    dispose() {
+      disposed = true;
+      clearTimeout(timerId);
+    },
+  };
 }
 
 function throwIfRunCancelled(run) {
@@ -918,6 +1004,20 @@ function validateRunInput(input) {
     throw new Error('runId must be a valid client-generated run id.');
   }
   if (!Array.isArray(input.messages) || input.messages.length > MAX_MESSAGES) throw new Error('messages must be a bounded array.');
+  let totalMessageBytes = 0;
+  for (const [index, message] of input.messages.entries()) {
+    if (typeof message?.content !== 'string') {
+      throw new Error(`messages[${index}].content must be a string.`);
+    }
+    const messageBytes = Buffer.byteLength(message.content);
+    if (messageBytes > MAX_MESSAGE_CONTENT_BYTES) {
+      throw new Error(`messages[${index}].content exceeds ${MAX_MESSAGE_CONTENT_BYTES} bytes.`);
+    }
+    totalMessageBytes += messageBytes;
+  }
+  if (totalMessageBytes > MAX_MESSAGES_CONTENT_BYTES) {
+    throw new Error(`Message content exceeds ${MAX_MESSAGES_CONTENT_BYTES} bytes in total.`);
+  }
   const model = input.modelConfig;
   if (!model?.provider || !model?.model || !model?.apiKey) throw new Error('A complete modelConfig is required.');
   validateRuntimeFiles(input.runtimeContext?.sandboxFiles);

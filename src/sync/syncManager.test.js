@@ -130,6 +130,32 @@ test('session index is pruned by tombstoned session ids', () => {
   );
 });
 
+test('v2 LLM and provider tombstones prevent deleted records from returning', () => {
+  const config = {
+    llm: {
+      schemaVersion: 2,
+      activeLlmId: 'removed-llm',
+      providers: {
+        keep: { id: 'keep', type: 'openai' },
+        removed: { id: 'removed', type: 'openai' },
+      },
+      llms: {
+        keep: { id: 'keep', providerId: 'keep', model: 'gpt-4.1' },
+        'removed-llm': { id: 'removed-llm', providerId: 'keep', model: 'gpt-4o' },
+      },
+      deletedProviderIds: ['removed'],
+      deletedLlmIds: ['removed-llm'],
+    },
+  };
+
+  const pruned = pruneDeletedRecords('config.yaml', config, new Set(), new Set());
+  assert.deepEqual(Object.keys(pruned.llm.providers), ['keep']);
+  assert.deepEqual(Object.keys(pruned.llm.llms), ['keep']);
+  assert.equal(pruned.llm.activeLlmId, 'keep');
+  assert.deepEqual(pruned.llm.deletedProviderIds, ['removed']);
+  assert.deepEqual(pruned.llm.deletedLlmIds, ['removed-llm']);
+});
+
 test('restored file paths include deleted directory ancestors', () => {
   assert.deepEqual(
     restoredPathCandidates('workspace/agent-a/skills/demo/SKILL.md'),
