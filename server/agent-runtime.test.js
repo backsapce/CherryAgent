@@ -326,8 +326,126 @@ test('sandbox run enters waiting and resumes after a real agent-loop wake-up', a
     assert.equal(modelCallCount, 2);
     assert.equal(completed.result.content, 'awake');
     assert.equal(completed.wakeup, null);
+    const events = manager.get(started.id).events;
+    assert.deepEqual(
+      events.map((event) => event.remoteSequence),
+      Array.from({ length: events.length }, (_, index) => index + 1)
+    );
+    assert.equal(
+      events.filter((event) => event.type === 'run-start').every((event) => event.sequence === 1),
+      true
+    );
+    assert.equal(new Set(
+      events.filter((event) => event.type === 'run-start').map((event) => event.runId)
+    ).size, 2);
+    const stepIds = events
+      .filter((event) => event.type === 'step-start')
+      .map((event) => event.stepId);
+    assert.equal(new Set(stepIds).size, stepIds.length);
   } finally {
     releaseWakeup?.();
+    rmSync(runsDir, { recursive: true, force: true });
+  }
+});
+
+test('a second session cannot disturb a waiting run and wake-up keeps compact tool history', async () => {
+  const runsDir = mkdtempSync(join(tmpdir(), 'vertex-runs-'));
+  const wakeupGate = deferred();
+  let firstSessionTurns = 0;
+  let resumedMessages = null;
+
+  try {
+    const manager = createManager(runsDir, {
+      createModel: () => ({}),
+      waitUntilWakeup: () => wakeupGate.promise,
+      async runAgent({ agentId, messages, scheduleWakeup, onEvent }) {
+        onEvent({ type: 'run-start', runId: `${agentId}-logical`, sequence: 1 });
+        if (agentId === 'agent-a') {
+          firstSessionTurns += 1;
+          if (firstSessionTurns === 1) {
+            await scheduleWakeup({ delaySeconds: 60, prompt: 'inspect job-one' });
+            return {
+              content: 'The background command is still running.',
+              toolCalls: [
+                ...Array.from({ length: 8 }, (_, index) => ({
+                  id: `call-old-${index}`,
+                  name: 'read_sandbox_file',
+                  status: 'completed',
+                  parsedArgs: { path: `old-${index}.txt` },
+                  result: `old-result-${index}:${'x'.repeat(3_500)}`,
+                })),
+                {
+                  id: 'call-job',
+                  name: 'get_command',
+                  status: 'completed',
+                  parsedArgs: { job_id: 'job-one', cursor: 17 },
+                  // Match the real command snapshot order: nextCursor follows
+                  // a potentially large log field and must survive truncation.
+                  result: JSON.stringify({
+                    job_id: 'job-one',
+                    status: 'running',
+                    log: 'latest-log:'.repeat(500),
+                    nextCursor: 42,
+                    logCursor: 17,
+                    logSize: 9000,
+                    hasMore: true,
+                  }),
+                },
+                {
+                  id: 'call-newer-file-one',
+                  name: 'read_sandbox_file',
+                  status: 'completed',
+                  parsedArgs: { path: 'artifact-one.txt' },
+                  result: `newer-one:${'y'.repeat(3_500)}`,
+                },
+                {
+                  id: 'call-newer-file-two',
+                  name: 'read_sandbox_file',
+                  status: 'completed',
+                  parsedArgs: { path: 'artifact-two.txt' },
+                  result: `newer-two:${'z'.repeat(3_500)}`,
+                },
+              ],
+            };
+          }
+          resumedMessages = messages;
+          return { content: 'session A finished', toolCalls: [] };
+        }
+        return { content: 'session B lookup finished', toolCalls: [] };
+      },
+    });
+
+    const input = (suffix) => ({
+      runId: `run-waiting-isolation-${suffix}`,
+      sessionId: `session-${suffix}`,
+      replyId: `reply-${suffix}`,
+      agentId: `agent-${suffix}`,
+      messages: [{ role: 'user', content: `start ${suffix}` }],
+      modelConfig: { provider: 'openai', model: 'test', apiKey: 'test' },
+    });
+
+    const first = manager.start(input('a'));
+    const waiting = await waitForRunStatus(manager, first.id, 'waiting');
+    const waitingSnapshot = structuredClone(waiting.wakeup);
+
+    const second = manager.start(input('b'));
+    const secondCompleted = await waitForRunStatus(manager, second.id, 'completed');
+    assert.equal(secondCompleted.result.content, 'session B lookup finished');
+    assert.equal(manager.get(first.id).status, 'waiting');
+    assert.deepEqual(manager.get(first.id).wakeup, waitingSnapshot);
+
+    wakeupGate.resolve();
+    const firstCompleted = await waitForRunStatus(manager, first.id, 'completed');
+    assert.equal(firstCompleted.result.content, 'session A finished');
+    const continuation = resumedMessages.at(-2).content;
+    assert.match(continuation, /Tool history from the turn/);
+    assert.match(continuation, /job-one/);
+    assert.match(continuation, /"nextCursor": 42/);
+    assert.match(continuation, /"logCursor": 17/);
+    assert.doesNotMatch(continuation, /old-result-0/);
+    assert.ok(continuation.length < 5_000);
+  } finally {
+    wakeupGate.resolve();
     rmSync(runsDir, { recursive: true, force: true });
   }
 });

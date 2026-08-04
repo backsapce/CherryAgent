@@ -23,13 +23,31 @@
 
 import { createServer } from 'node:http';
 import { createHash, randomBytes } from 'node:crypto';
-import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, mkdirSync, unlinkSync, rmSync, renameSync } from 'node:fs';
-import { isAbsolute, join, extname, normalize, resolve, sep } from 'node:path';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import {
+  extname,
+  join,
+  normalize,
+  resolve,
+  sep,
+} from 'node:path';
 import { fileURLToPath } from 'node:url';
 import process from 'node:process';
 import { createAgentRunManager } from './agent-runtime.js';
+import { migrateLegacyAgentState, resolveAgentStatePaths } from './agent-state.js';
 import { createCommandExecutor } from './command-executor.js';
 import { createCommandJobManager } from './command-jobs.js';
+import { createFilePathPolicy } from './file-path-policy.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const STATIC_DIR = join(__dirname, '..', 'dist');
@@ -40,9 +58,6 @@ const PORT = process.env.AGENT_PORT || 3099;
 const MAX_TIMEOUT = 30_000;
 const MAX_OUTPUT_BYTES = 10 * 1024 * 1024;
 const MAX_AGENT_RUN_REQUEST_BYTES = 128 * 1024 * 1024;
-const DEFAULT_TOKEN_FILE = join(process.cwd(), '.vertex-token');
-const TOKEN_FILE = process.env.AGENT_TOKEN_FILE
-  || DEFAULT_TOKEN_FILE;
 const ALLOWED_ORIGINS = (process.env.AGENT_ALLOWED_ORIGINS || 'https://127.0.0.1:5173,https://localhost:5173,http://127.0.0.1:5173,http://localhost:5173')
   .split(',')
   .map((origin) => origin.trim())
@@ -50,10 +65,37 @@ const ALLOWED_ORIGINS = (process.env.AGENT_ALLOWED_ORIGINS || 'https://127.0.0.1
 const COMMAND_SHELL = process.env.AGENT_SHELL || (process.platform === 'win32' ? (process.env.ComSpec || 'cmd.exe') : undefined);
 const WORKSPACE_DIR = resolve(process.env.AGENT_WORKING_DIR || process.cwd());
 const FILES_ROOT_DIR = resolve(process.env.AGENT_FILES_DIR || WORKSPACE_DIR);
+const AGENT_STATE_PATHS = resolveAgentStatePaths({
+  env: process.env,
+  workspaceDir: WORKSPACE_DIR,
+});
+const STATE_DIR = AGENT_STATE_PATHS.stateDir;
+const TOKEN_FILE = AGENT_STATE_PATHS.tokenFile;
+const RUNS_DIR = AGENT_STATE_PATHS.runsDir;
+const JOBS_DIR = AGENT_STATE_PATHS.jobsDir;
+
+migrateLegacyAgentState(AGENT_STATE_PATHS);
+
+const PROTECTED_CONTROL_PATHS = [...new Set([
+  STATE_DIR,
+  TOKEN_FILE,
+  RUNS_DIR,
+  JOBS_DIR,
+  ...(AGENT_STATE_PATHS.legacyTokenFiles || [AGENT_STATE_PATHS.legacyTokenFile]),
+  AGENT_STATE_PATHS.legacyRunsDir,
+  AGENT_STATE_PATHS.legacyJobsDir,
+].map((path) => resolve(path)))];
+const {
+  isProtectedPath: isProtectedControlPath,
+  isSafeMutationPath,
+  isSafePath,
+  isSameOrChildPath: isSameOrChildResolvedPath,
+} = createFilePathPolicy({
+  filesRootDir: FILES_ROOT_DIR,
+  protectedPaths: PROTECTED_CONTROL_PATHS,
+});
 const PUBLIC_WORKSPACE_LABEL = 'workspace';
 const AUTH_DISABLED = /^(1|true|yes)$/i.test(process.env.AGENT_DISABLE_AUTH || '');
-const RUNS_DIR = resolve(process.env.AGENT_RUNS_DIR || join(WORKSPACE_DIR, '.vertex-runs'));
-const JOBS_DIR = resolve(process.env.AGENT_JOBS_DIR || join(WORKSPACE_DIR, '.vertex-jobs'));
 const RUN_IDLE_TIMEOUT_MS = Math.min(
   30 * 60_000,
   Math.max(30_000, Number(process.env.AGENT_RUN_IDLE_TIMEOUT_MS) || 120_000)
@@ -73,6 +115,7 @@ function printBootConfig() {
       port: PORT,
       maxTimeout: MAX_TIMEOUT,
       maxOutputBytes: MAX_OUTPUT_BYTES,
+      stateDir: STATE_DIR,
       tokenFile: TOKEN_FILE,
       allowedOrigins: ALLOWED_ORIGINS,
       commandShell: COMMAND_SHELL || null,
@@ -80,6 +123,7 @@ function printBootConfig() {
       filesRootDir: FILES_ROOT_DIR,
       publicWorkspaceLabel: PUBLIC_WORKSPACE_LABEL,
       authDisabled: AUTH_DISABLED,
+      runsDir: RUNS_DIR,
       jobsDir: JOBS_DIR,
       runIdleTimeoutMs: RUN_IDLE_TIMEOUT_MS,
       staticDir: STATIC_DIR,
@@ -215,25 +259,6 @@ function validateCommand(cmd) {
 
 // ─── Path safety ────────────────────────────────────────────────────────────
 
-function isSafePath(inputPath) {
-  if (typeof inputPath !== 'string' || inputPath.includes('\0') || isAbsolute(inputPath)) return false;
-  const normalizedPath = normalize(inputPath);
-  // Reject paths containing .. after normalization (should already be resolved, but double-check)
-  if (normalizedPath.split(/[\\/]+/).includes('..')) return false;
-  const fullPath = join(FILES_ROOT_DIR, normalizedPath);
-  const resolvedPath = resolve(fullPath);
-  // On Windows, compare case-insensitively
-  const compareA = process.platform === 'win32' ? resolvedPath.toLowerCase() : resolvedPath;
-  const compareB = process.platform === 'win32' ? FILES_ROOT_DIR.toLowerCase() : FILES_ROOT_DIR;
-  return compareA.startsWith(compareB + sep) || compareA === compareB;
-}
-
-function isSameOrChildResolvedPath(path, parentPath) {
-  const comparePath = process.platform === 'win32' ? path.toLowerCase() : path;
-  const compareParent = process.platform === 'win32' ? parentPath.toLowerCase() : parentPath;
-  return comparePath === compareParent || comparePath.startsWith(compareParent + sep);
-}
-
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 const commandExecutor = createCommandExecutor({
@@ -280,6 +305,7 @@ function listFileEntries(resolvedPath, normalizedPath, recursive = false, includ
     if (!includeHidden && entry.name.startsWith('.')) continue;
 
     const entryPath = join(resolvedPath, entry.name);
+    if (isProtectedControlPath(entryPath)) continue;
     let size = 0;
     let lastModified = null;
     try {
@@ -322,11 +348,13 @@ const agentRunManager = createAgentRunManager({
   async listFiles(inputPath) {
     const resolvedPath = runtimePath(inputPath);
     if (!existsSync(resolvedPath) || !statSync(resolvedPath).isDirectory()) throw new Error('Directory not found');
-    return readdirSync(resolvedPath, { withFileTypes: true }).map((entry) => ({
-      name: entry.name,
-      type: entry.isDirectory() ? 'directory' : 'file',
-      path: join(normalize(inputPath), entry.name),
-    }));
+    return readdirSync(resolvedPath, { withFileTypes: true })
+      .filter((entry) => !isProtectedControlPath(join(resolvedPath, entry.name)))
+      .map((entry) => ({
+        name: entry.name,
+        type: entry.isDirectory() ? 'directory' : 'file',
+        path: join(normalize(inputPath), entry.name),
+      }));
   },
   async readFile(inputPath) {
     const resolvedPath = runtimePath(inputPath);
@@ -845,7 +873,7 @@ const server = createServer(async (req, res) => {
       return json(res, 400, { error: 'Missing or invalid "sourcePath" or "targetPath" field' }, req);
     }
 
-    if (!isSafePath(sourcePath) || !isSafePath(targetPath)) {
+    if (!isSafeMutationPath(sourcePath) || !isSafePath(targetPath)) {
       return json(res, 403, { error: 'Access denied: Path outside agent files root' }, req);
     }
 
@@ -899,7 +927,7 @@ const server = createServer(async (req, res) => {
       return json(res, 400, { error: 'Missing "path" parameter' }, req);
     }
 
-    if (!isSafePath(filePath)) {
+    if (!isSafeMutationPath(filePath)) {
       return json(res, 403, { error: 'Access denied: Path outside agent files root' }, req);
     }
 

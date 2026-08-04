@@ -120,7 +120,7 @@ vertex-sandbox
 Or run the Docker image:
 
 ```bash
-mkdir -p ./vertex-workspace
+mkdir -p ./vertex-workspace ./vertex-state
 
 docker run -d \
   --name vertex-sandbox \
@@ -128,10 +128,14 @@ docker run -d \
   -p 3099:3099 \
   -e AGENT_ALLOWED_ORIGINS=https://your-frontend-origin \
   -v "$(pwd)/vertex-workspace:/home/vertex" \
+  -v "$(pwd)/vertex-state:/var/lib/vertex-sandbox" \
   backsapce/vertex-sandbox:latest
 ```
 
-The sandbox container uses `/home/vertex` as its Docker `WORKDIR` and `AGENT_WORKING_DIR`. Mount your host workspace directory there so `docker exec`, shell commands, file operations, and the saved `.vertex-token` all use the same persistent home directory:
+The sandbox container uses `/home/vertex` as its Docker `WORKDIR` and
+`AGENT_WORKING_DIR`. Runtime control state is kept separately under
+`/var/lib/vertex-sandbox`, so workspace cleanup commands cannot delete another
+session's run, job log, or auth token. Persist both directories:
 
 ```bash
 docker run -d \
@@ -140,8 +144,15 @@ docker run -d \
   -p 3099:3099 \
   -e AGENT_ALLOWED_ORIGINS=https://your-frontend-origin \
   -v "/absolute/path/to/workspace:/home/vertex" \
+  -v "/absolute/path/to/vertex-state:/var/lib/vertex-sandbox" \
   backsapce/vertex-sandbox:latest
 ```
+
+> **Docker upgrade:** add the `/var/lib/vertex-sandbox` bind mount or a stable
+> named volume before starting the upgraded image. Docker may create an
+> anonymous volume when this mount is omitted, and a later `docker run` does
+> not automatically reuse that anonymous volume. Existing workspace-owned
+> `.vertex-*` state is copied on the first upgraded start.
 
 ### Agent runtime modes
 
@@ -152,12 +163,15 @@ with only sandbox command and sandbox file tools exposed. Browser OPFS and
 browser-only tools are not available to the model, and browser-backed files,
 memory, skills, and identity files are not copied into the sandbox run.
 
-The Agent Node persists run metadata, event logs, and results under
-`AGENT_RUNS_DIR` (default: `<workspace>/.vertex-runs`). Closing the browser does
-not cancel the run; reopening VertexAgent discovers the run by session ID and
-replays its events/result. Keep the Agent Node process alive for the run to
-continue. Because the selected LLM profile is sent to the runtime for model
-calls, use an authenticated HTTPS connection for remote Agent Nodes.
+The Agent Node persists run metadata, event logs, results, managed jobs, and
+auth tokens under an isolated `AGENT_STATE_DIR` outside the executable
+workspace. Closing the browser does not cancel the run; reopening VertexAgent
+discovers the run by session ID and replays its events/result. On first upgrade,
+legacy `.vertex-runs`, `.vertex-jobs`, and `.vertex-token` data is copied out of
+the workspace when the corresponding explicit override is not set. Keep the
+Agent Node process alive for the run to continue. Because the selected LLM
+profile is sent to the runtime for model calls, use an authenticated HTTPS
+connection for remote Agent Nodes.
 
 Shell work has two execution paths. `execute_command` is a foreground tool with
 a 30-second deadline for quick, bounded work. Training, servers, watchers, long
@@ -194,10 +208,11 @@ Agent Node environment variables:
 | `AGENT_PORT` | `3099` | HTTP port for `/agent` |
 | `AGENT_WORKING_DIR` | Server process cwd | Agent workspace root. Commands run here, and file APIs use this same directory by default. |
 | `AGENT_FILES_DIR` | `AGENT_WORKING_DIR` | Optional separate root for file APIs. Set this only when you intentionally want managed files isolated from the command cwd. |
-| `AGENT_RUNS_DIR` | `<workspace>/.vertex-runs` | Persistent metadata, event logs, and results for background sandbox Agent runs. |
+| `AGENT_STATE_DIR` | Sibling `.vertex-sandbox-state/<workspace-id>` | Control-plane root kept outside the executable workspace. The installer uses `~/.local/state/vertex-sandbox`; Docker uses `/var/lib/vertex-sandbox`. |
+| `AGENT_RUNS_DIR` | `<state>/runs` | Optional override for persistent metadata, event logs, and results for background sandbox Agent runs. Keep it outside `AGENT_WORKING_DIR`. |
 | `AGENT_RUN_IDLE_TIMEOUT_MS` | `120000` | Fail a sandbox Agent run that emits no model or tool progress for this many milliseconds (clamped to 30 seconds–30 minutes). |
-| `AGENT_JOBS_DIR` | `<workspace>/.vertex-jobs` | Persistent metadata and bounded logs for managed background commands. |
-| `AGENT_TOKEN_FILE` | `.vertex-token` | File used to persist long-lived auth tokens; the sandbox Docker image sets this to `/home/vertex/.vertex-token`. |
+| `AGENT_JOBS_DIR` | `<state>/jobs` | Optional override for persistent metadata and bounded logs for managed background commands. Keep it outside `AGENT_WORKING_DIR`. |
+| `AGENT_TOKEN_FILE` | `<state>/tokens` | Optional override for the long-lived auth-token file. Keep it outside `AGENT_WORKING_DIR`. |
 | `AGENT_DISABLE_AUTH` | unset | Set to `true` only when the sandbox is already protected by another trusted boundary. When enabled, `/agent` returns `needsAuth: false` and command/file APIs do not require a token. |
 | `AGENT_ALLOWED_ORIGINS` | `http://localhost:5173` | Comma-separated CORS allowlist |
 | `AGENT_SHELL` | Windows: `%ComSpec%`; other platforms: Node default | Shell used to execute commands. Set to `powershell.exe` or `pwsh.exe` when you want PowerShell syntax. |

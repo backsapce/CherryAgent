@@ -23,6 +23,15 @@ const RUN_ABORT_WAIT_MS = 3_000;
 const SANDBOX_ATTACHMENTS_MARKER = 'Sandbox attachment files (available to shell commands and sandbox file tools):';
 const MAX_SKILL_CONTENT_CHARS = 60_000;
 const MAX_SKILL_REFERENCE_CHARS = 80_000;
+const MAX_WAKEUP_CONTINUATION_TOOL_CHARS = 4_000;
+const MAX_WAKEUP_CONTINUATION_TOOL_INPUT_CHARS = 700;
+const MAX_WAKEUP_CONTINUATION_TOOL_RESULT_CHARS = 1_600;
+const COMMAND_CONTINUATION_TOOL_NAMES = new Set([
+  'get_command',
+  'start_command',
+  'stop_command',
+  'wait_command',
+]);
 
 const REMOTE_TOOL_SCHEMAS = [
   {
@@ -232,7 +241,14 @@ export function createAgentRunManager({
   };
 
   const emit = (run, event) => {
-    const stored = { ...event, remoteSequence: run.sequence + 1 };
+    const remoteSequence = run.sequence + 1;
+    const stored = {
+      ...event,
+      // A durable run can contain several runAgentLoop turns separated by
+      // wake-ups. remoteSequence is the stable replay cursor; leave sequence
+      // as the per-turn event protocol value for existing protocol-3 clients.
+      remoteSequence,
+    };
     const eventPath = join(runsDir, `${run.id}.events.ndjson`);
     const line = `${JSON.stringify(stored)}\n`;
     const lineBytes = Buffer.byteLength(line);
@@ -328,9 +344,12 @@ export function createAgentRunManager({
         const modelConfig = input.modelConfig;
         let result;
         let activeTurnToken = null;
+        let turnNumber = 0;
         while (true) {
+          turnNumber += 1;
           const turnToken = {};
           activeTurnToken = turnToken;
+          const eventScope = `${run.id}:turn-${turnNumber}`;
           let scheduledWakeup = null;
           const activityWatchdog = createActivityWatchdog(idleTimeoutMs, (error) => {
             run.controller?.abort(error);
@@ -379,7 +398,7 @@ export function createAgentRunManager({
                     || run.controller.signal.aborted
                   ) return;
                   activityWatchdog.touch();
-                  emit(run, event);
+                  emit(run, namespaceRuntimeEvent(event, eventScope));
                 },
               })),
               activityWatchdog.promise,
@@ -406,7 +425,7 @@ export function createAgentRunManager({
           persist(run);
           runtimeMessages = [
             ...runtimeMessages,
-            { role: 'assistant', content: result.content || 'A future continuation was scheduled.' },
+            { role: 'assistant', content: scheduledTurnContinuation(result) },
             { role: 'user', content: buildWakeupMessage(scheduledWakeup) },
           ];
           if (runtimeMessages.length > MAX_MESSAGES) throw new Error('Scheduled run exceeded the message limit.');
@@ -566,6 +585,157 @@ function createRunAbortError() {
   const error = new Error('Agent run aborted');
   error.name = 'AbortError';
   return error;
+}
+
+function namespaceRuntimeEvent(event, scope) {
+  if (!event || typeof event !== 'object') return event;
+  const scoped = {
+    ...event,
+    runId: scope,
+  };
+  for (const key of ['id', 'stepId', 'segmentId', 'toolCallId', 'requestId']) {
+    if (event[key] != null && event[key] !== '') {
+      scoped[key] = namespaceRuntimeId(event[key], scope);
+    }
+  }
+  if (event.permission && typeof event.permission === 'object') {
+    scoped.permission = { ...event.permission };
+    for (const key of ['id', 'toolCallId']) {
+      if (event.permission[key] != null && event.permission[key] !== '') {
+        scoped.permission[key] = namespaceRuntimeId(event.permission[key], scope);
+      }
+    }
+  }
+  return scoped;
+}
+
+function namespaceRuntimeId(value, scope) {
+  const text = String(value);
+  const prefix = `${scope}:`;
+  return text.startsWith(prefix) ? text : `${prefix}${text}`;
+}
+
+function scheduledTurnContinuation(result = {}) {
+  const content = String(result?.content || '').trim()
+    || 'A future continuation was scheduled.';
+  const toolCalls = Array.isArray(result?.toolCalls)
+    ? result.toolCalls.filter((toolCall) => toolCall?.name !== 'schedule_wakeup')
+    : [];
+  if (toolCalls.length === 0) return content;
+
+  // Retain the newest calls first: command job ids and nextCursor values near
+  // the wake-up are more useful than an early, bulky lookup. Keeping each
+  // continuation small also prevents repeated wake-ups from crowding a 32k
+  // model context solely with copied tool results.
+  const latestCommand = latestCommandContinuation(toolCalls);
+  let compactTools = [];
+  for (let index = toolCalls.length - 1; index >= 0; index -= 1) {
+    const toolCall = toolCalls[index];
+    const candidate = {
+      name: truncateRuntimeContinuationValue(toolCall?.name || 'unknown_tool', 128),
+      status: truncateRuntimeContinuationValue(toolCall?.status || '', 64) || null,
+      input: truncateRuntimeContinuationValue(
+        safeJsonStringify(toolCall?.parsedArgs ?? safeParsedToolInput(toolCall?.rawArgs)),
+        MAX_WAKEUP_CONTINUATION_TOOL_INPUT_CHARS
+      ),
+      result: truncateRuntimeContinuationValue(
+        toolCall?.result ?? toolCall?.terminalOutput ?? '',
+        MAX_WAKEUP_CONTINUATION_TOOL_RESULT_CHARS
+      ),
+    };
+    const nextTools = [candidate, ...compactTools];
+    const nextPayload = {
+      ...(latestCommand ? { latestCommand } : {}),
+      omittedEarlierToolCalls: index,
+      toolCalls: nextTools,
+    };
+    if (safeJsonStringify(nextPayload).length > MAX_WAKEUP_CONTINUATION_TOOL_CHARS) break;
+    compactTools = nextTools;
+  }
+  const serialized = safeJsonStringify({
+    ...(latestCommand ? { latestCommand } : {}),
+    omittedEarlierToolCalls: toolCalls.length - compactTools.length,
+    toolCalls: compactTools,
+  });
+  return [
+    content,
+    'Tool history from the turn that scheduled this continuation:',
+    serialized,
+  ].join('\n\n');
+}
+
+function latestCommandContinuation(toolCalls) {
+  const toolCall = toolCalls.findLast((candidate) => (
+    COMMAND_CONTINUATION_TOOL_NAMES.has(candidate?.name)
+  ));
+  if (!toolCall) return null;
+  const state = commandContinuationState(toolCall).commandState;
+  return {
+    name: truncateRuntimeContinuationValue(toolCall.name, 128),
+    input: truncateRuntimeContinuationValue(
+      safeJsonStringify(toolCall?.parsedArgs ?? safeParsedToolInput(toolCall?.rawArgs)),
+      MAX_WAKEUP_CONTINUATION_TOOL_INPUT_CHARS
+    ),
+    ...(state ? { state } : {}),
+  };
+}
+
+function commandContinuationState(toolCall) {
+  if (!COMMAND_CONTINUATION_TOOL_NAMES.has(toolCall?.name)) return {};
+  const rawResult = toolCall?.result ?? toolCall?.terminalOutput;
+  let result = rawResult;
+  if (typeof rawResult === 'string') {
+    try {
+      result = JSON.parse(rawResult);
+    } catch {
+      return {};
+    }
+  }
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return {};
+
+  const state = {};
+  for (const key of [
+    'job_id',
+    'status',
+    'nextCursor',
+    'logCursor',
+    'logSize',
+    'hasMore',
+    'exit_code',
+    'signal',
+    'error',
+  ]) {
+    const value = result[key];
+    if (value == null) continue;
+    state[key] = typeof value === 'string'
+      ? truncateRuntimeContinuationValue(value, key === 'error' ? 500 : 256)
+      : value;
+  }
+  return Object.keys(state).length > 0 ? { commandState: state } : {};
+}
+
+function safeParsedToolInput(rawArgs) {
+  if (!rawArgs) return {};
+  try {
+    return JSON.parse(rawArgs);
+  } catch {
+    return String(rawArgs);
+  }
+}
+
+function safeJsonStringify(value) {
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return '[Tool history could not be serialized]';
+  }
+}
+
+function truncateRuntimeContinuationValue(value, maxChars) {
+  const text = String(value || '');
+  if (text.length <= maxChars) return text;
+  const marker = '\n...[truncated]';
+  return `${text.slice(0, Math.max(0, maxChars - marker.length))}${marker}`;
 }
 
 function sandboxImageExtension(mimeType) {

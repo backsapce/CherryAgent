@@ -138,6 +138,73 @@ test('concurrent local and remote message appends are both retained deterministi
   );
 });
 
+test('remote reply checkpoints merge atomically by durable event sequence', () => {
+  const metadataBaseline = {
+    id: 'shared',
+    title: 'shared',
+    updatedAtMs: 100,
+  };
+  const reply = (sequence, content) => ({
+    id: 'remote-reply',
+    role: 'assistant',
+    content,
+    thinking: `thinking-${sequence}`,
+    toolCalls: [{ id: `call-${sequence}`, status: 'completed' }],
+    transcript: [{ id: `text-${sequence}`, type: 'text', content }],
+    usage: { total_tokens: sequence },
+    remoteEventSequence: sequence,
+    remoteReasoningParsers: { reasoning: { mode: sequence === 12 ? 'text' : 'reasoning' } },
+    reaction: sequence === 10 ? 'saved-metadata' : 'local-metadata',
+  });
+  const saved = {
+    ...metadataBaseline,
+    updatedAtMs: 110,
+    messages: [reply(10, 'Hello')],
+  };
+  const local = {
+    ...metadataBaseline,
+    updatedAtMs: 120,
+    messages: [reply(12, 'Hello world')],
+  };
+
+  const merged = reconcileStoredSessions(
+    [saved],
+    [local],
+    [metadataBaseline]
+  ).sessions[0].messages[0];
+
+  for (const field of [
+    'content',
+    'thinking',
+    'toolCalls',
+    'transcript',
+    'usage',
+    'remoteEventSequence',
+    'remoteReasoningParsers',
+  ]) {
+    assert.deepEqual(merged[field], local.messages[0][field]);
+  }
+  assert.equal(merged.remoteEventSequence, 12);
+  assert.equal(merged.content, 'Hello world');
+
+  const reverse = reconcileStoredSessions(
+    [local],
+    [saved],
+    [metadataBaseline]
+  ).sessions[0].messages[0];
+  for (const field of [
+    'content',
+    'thinking',
+    'toolCalls',
+    'transcript',
+    'usage',
+    'remoteEventSequence',
+    'remoteReasoningParsers',
+  ]) {
+    assert.deepEqual(reverse[field], local.messages[0][field]);
+  }
+});
+
 test('concurrent scalar metadata conflicts converge independently of device perspective', () => {
   const persisted = session('shared', 100, 'base');
   const local = { ...snapshotSessions([persisted])[0], title: 'Alpha' };

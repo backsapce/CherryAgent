@@ -14,9 +14,12 @@ Environment:
   AGENT_PORT             HTTP port for /agent (default: 3099)
   AGENT_WORKING_DIR      Command working directory (default: process cwd)
   AGENT_FILES_DIR        File API root (default: AGENT_WORKING_DIR)
+  AGENT_STATE_DIR        Isolated run/job/token state root (default: outside workspace)
+  AGENT_RUNS_DIR         Override run state directory (default: AGENT_STATE_DIR/runs)
+  AGENT_JOBS_DIR         Override managed-job directory (default: AGENT_STATE_DIR/jobs)
   AGENT_RUN_IDLE_TIMEOUT_MS
                          No-progress timeout for Agent runs (default: 120000)
-  AGENT_TOKEN_FILE       Auth token file (default: .vertex-token)
+  AGENT_TOKEN_FILE       Auth token file (default: AGENT_STATE_DIR/tokens)
   AGENT_ALLOWED_ORIGINS  Comma-separated CORS allowlist
   AGENT_DISABLE_AUTH     Set true only behind a trusted boundary
 `);

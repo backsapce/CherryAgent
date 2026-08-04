@@ -9,16 +9,18 @@ COPY server ./server
 COPY src ./src
 COPY bin ./bin
 
-RUN mkdir -p /home/vertex
+RUN mkdir -p /home/vertex /var/lib/vertex-sandbox
 
 ENV AGENT_PORT=3099
 ENV AGENT_WORKING_DIR=/home/vertex
-ENV AGENT_TOKEN_FILE=/home/vertex/.vertex-token
+ENV AGENT_STATE_DIR=/var/lib/vertex-sandbox
 ARG AGENT_ALLOWED_ORIGINS=http://localhost:3099
 ENV AGENT_ALLOWED_ORIGINS=$AGENT_ALLOWED_ORIGINS
 
 EXPOSE 3099
 
 WORKDIR /home/vertex
+
+VOLUME ["/var/lib/vertex-sandbox"]
 
 CMD ["node", "/app/server/agent.js"]

@@ -316,13 +316,17 @@ async function assertAgentRunProtocol(url, controls) {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        throw new Error(data.error || `Agent runtime health check returned ${res.status}`);
+        const error = new Error(data.error || `Agent runtime health check returned ${res.status}`);
+        error.status = res.status;
+        throw error;
       }
       const protocol = Number(data.capabilities?.agentRunProtocol) || 0;
       if (protocol < REQUIRED_AGENT_RUN_PROTOCOL) {
-        throw new Error(
+        const error = new Error(
           `Sandbox runtime is outdated (agent run protocol ${protocol || 'missing'}; ${REQUIRED_AGENT_RUN_PROTOCOL} required). Reinstall and restart vertex-sandbox.`
         );
+        error.code = 'AGENT_RUN_PROTOCOL_OUTDATED';
+        throw error;
       }
     });
   } catch (error) {
