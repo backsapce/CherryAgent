@@ -207,12 +207,33 @@ test('sandbox runs reject an outdated agent run protocol before starting', async
   try {
     await assert.rejects(
       startRemoteAgentRun('https://sandbox.example', { sessionId: 'one' }),
-      /runtime is outdated.*protocol 2.*3 required/i
+      (error) => {
+        assert.match(error.message, /runtime is outdated.*protocol 2.*3 required/i);
+        assert.equal(error.code, 'AGENT_RUN_PROTOCOL_OUTDATED');
+        return true;
+      }
     );
     assert.equal(requests.length, 1);
     assert.equal(requests[0].url, 'https://sandbox.example/agent');
     assert.equal(requests[0].options.method, 'GET');
     assert.equal(requests[0].options.cache, 'no-store');
+  } finally {
+    restore();
+  }
+});
+
+test('sandbox runtime health errors preserve their HTTP status for retry policy', async () => {
+  const restore = installBrowserMocks(undefined, async () => ({
+    ok: false,
+    status: 403,
+    json: async () => ({ error: 'Forbidden' }),
+  }));
+
+  try {
+    await assert.rejects(
+      assertRemoteAgentRunProtocol('https://sandbox.example'),
+      (error) => error.message === 'Forbidden' && error.status === 403
+    );
   } finally {
     restore();
   }

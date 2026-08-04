@@ -47,6 +47,19 @@ import { buildWakeupMessage, createOrReplaceTurnWakeup, findNextWakeup } from '.
 import { WifiOff, ChevronRight } from './components/Icons/Icons';
 import { boundContextFilesForPrompt, stripLegacyContextFileSummary } from './contextFiles';
 import { canSupersedeRemoteRun, formatRunFailureContent } from './remoteRunPresentation';
+import {
+  assertRemoteRunSnapshot,
+  captureRemoteReplyFields,
+  findSessionReply,
+  isSlowRemoteRetryError,
+  markConfirmedRemoteRunFailure,
+  markRemoteRunPollError,
+  normalizeRemoteAgentEvent,
+  prepareRemoteEventReplay,
+  shouldPersistRemoteReplayProgress,
+  shouldRetryRemoteRunFailure,
+  upsertSessionReply,
+} from './remoteRunState';
 import './App.css';
 
 const FileManage = lazy(() => import('./components/FileManage/FileManage'));
@@ -125,6 +138,8 @@ const TOOL_HISTORY_MARKER = 'Tool calls performed during this assistant turn:';
 const TOOL_HISTORY_RESULT_MAX_CHARS = 4000;
 const REMOTE_ABORT_TIMEOUT_MS = 5000;
 const REMOTE_ABORT_RETRY_MS = 1500;
+const REMOTE_RESUME_RETRY_MS = 1500;
+const REMOTE_RESUME_SLOW_RETRY_MS = 30_000;
 const REMOTE_WAITING_RECONCILE_MS = 5000;
 const LOCAL_RUN_STOP_TIMEOUT_MS = 5000;
 
@@ -212,7 +227,15 @@ function formatToolCallsForLlm(toolCalls) {
 
 function expandMessagesForLlm(messages) {
   return messages.map((message) => {
-    const { contextFiles, toolCalls, transcript: _transcript, usage: _usage, ...rest } = message;
+    const {
+      contextFiles,
+      toolCalls,
+      transcript: _transcript,
+      usage: _usage,
+      remoteEventSequence: _remoteEventSequence,
+      remoteReasoningParsers: _remoteReasoningParsers,
+      ...rest
+    } = message;
     let content = stripLegacyContextFileSummary(message.content, contextFiles);
 
     if (contextFiles?.length) {
@@ -1307,29 +1330,59 @@ function App() {
       runRegistry.enqueueIfCurrent(sessionId, run, () => setSessions(updater));
     };
 
-    // Add empty assistant message for streaming
-    if (!opts.resumeRunId) {
-      updateSessionsForRun((prev) =>
-        prev.map((c) =>
-          c.id === sessionId
-            ? {
-                ...c,
-                messages: [...(c.messages || sessionMessages || []), { id: replyId, role: 'assistant', content: '', thinking: '', toolCalls: [], transcript: [] }],
-              }
-            : c
-        )
-      );
-    }
+    // Hydrate a lazily-unloaded session before either a fresh stream or a
+    // remote reattachment can write to it. Treating missing messages as [] here
+    // used to overwrite the complete OPFS history when a sleeping run woke
+    // while another conversation was selected.
+    updateSessionsForRun((prev) => prev.map((session) => (
+      session.id === sessionId
+        ? {
+            ...session,
+            messages: upsertSessionReply(
+              session.messages,
+              sessionMessages,
+              replyId
+            ),
+          }
+        : session
+    )));
     let automaticTitleInput = null;
     let runOutcome = { status: 'completed' };
+    let remoteExecution = false;
+    let remoteRunRecoverable = Boolean(
+      opts.resumeRunId
+      && sessionSnapshot?.remoteRun?.id === opts.resumeRunId
+    );
+    let remoteRunReachedAcceptedTerminal = false;
+    let confirmedRemoteFailureStatus = null;
 
     // Track tool calls for this message
-    const toolCalls = [];
-    let agentEventState = createAgentEventState();
+    const seedReply = findSessionReply(
+      sessionSnapshot?.messages || sessionMessages,
+      replyId
+    );
+    const remoteEventReplay = prepareRemoteEventReplay(
+      seedReply,
+      Boolean(opts.resumeRunId)
+    );
+    const toolCalls = [...(remoteEventReplay.seed?.toolCalls || [])];
+    let agentEventState = createAgentEventState(remoteEventReplay.seed || {});
+    let lastRemoteEventSequence = remoteEventReplay.cursor;
+    let hasAppliedRemoteEvents = remoteEventReplay.cursor > 0;
+    run.streamingContent = agentEventState.content;
+    run.streamingThinking = agentEventState.thinking;
 
     const applyStreamEvent = (event) => {
       if (!isRunCurrent() || run.controller.signal.aborted) return;
-      agentEventState = applyAgentEvent(agentEventState, event);
+      const normalizedEvent = event?.remoteSequence
+        ? normalizeRemoteAgentEvent(event)
+        : event;
+      agentEventState = applyAgentEvent(agentEventState, normalizedEvent);
+      lastRemoteEventSequence = Math.max(
+        lastRemoteEventSequence,
+        Number(event?.remoteSequence) || 0
+      );
+      if (Number(event?.remoteSequence) > 0) hasAppliedRemoteEvents = true;
       run.streamingContent = agentEventState.content;
       run.streamingThinking = agentEventState.thinking;
       toolCalls.splice(0, toolCalls.length, ...agentEventState.toolCalls);
@@ -1338,8 +1391,17 @@ function App() {
 
     // Helper: update message in state
     const updateMessage = (fields, { touch = false } = {}) => {
+      // Capture the reducer output and its cursor before React queues the
+      // functional update. Reading these mutable closure values inside the
+      // updater could pair older text with a newer cursor and skip events on
+      // the next resume.
+      const replyFields = captureRemoteReplyFields(
+        fields,
+        lastRemoteEventSequence,
+        agentEventState.reasoningParsers
+      );
+      const preview = String(fields.content ?? run.streamingContent ?? '');
       updateSessionsForRun((prev) => {
-        const preview = String(fields.content ?? run.streamingContent ?? '');
         const next = prev.map((c) =>
           c.id === sessionId
             ? {
@@ -1348,8 +1410,11 @@ function App() {
                 // text exists. Keep the last meaningful preview in that gap.
                 lastMessage: preview.trim() ? preview.slice(0, 60) : c.lastMessage,
                 ...(touch ? sessionTimeFields() : {}),
-                messages: (c.messages || []).map((m) =>
-                  m.id === replyId ? { ...m, ...fields } : m
+                messages: upsertSessionReply(
+                  c.messages,
+                  sessionMessages,
+                  replyId,
+                  replyFields
                 ),
               }
             : c
@@ -1378,6 +1443,7 @@ function App() {
       const sandboxUrl = opts.sandboxUrl ?? agentConfig?.sandboxUrl ?? null;
       const hasToolContext = sandboxUrl || sessionAgentId;
       const useRemoteRuntime = Boolean(opts.resumeRunId || agentConfig?.runtimeMode === 'sandbox');
+      remoteExecution = useRemoteRuntime;
       // Freeze the executable model/config at turn start. Settings changes in
       // another session must not retarget an already-started turn.
       const languageModel = useRemoteRuntime ? null : llm.getLanguageModel(llmProfileId);
@@ -1388,13 +1454,34 @@ function App() {
       let result;
       let responseCompleted = false;
       if (useRemoteRuntime) {
+        if (opts.resumeRunId) {
+          run.remoteRun = { id: opts.resumeRunId, url: sandboxUrl };
+        }
         if (!sandboxUrl || sandboxUrl === E2B_AGENT_ID) {
-          throw new Error('Sandbox runtime requires a connected VertexAgent agent server; direct E2B sandboxes currently provide command execution only.');
+          const error = new Error('Sandbox runtime requires a connected VertexAgent agent server; direct E2B sandboxes currently provide command execution only.');
+          error.code = 'AGENT_RUN_CONFIGURATION_ERROR';
+          throw error;
         }
         if (opts.resumeRunId) {
+          // Bind ownership before the protocol preflight. A failed health
+          // request must still be classified against (and update) the durable
+          // run that this reattachment owns.
           await assertRemoteAgentRunProtocol(sandboxUrl, run.controller.signal);
           assertRunActive();
         }
+        const persistProvisionalRemoteRun = (provisionalRunId) => {
+          remoteRunRecoverable = true;
+          updateSessionsForRun((prev) => prev.map((session) => session.id === sessionId ? {
+            ...session,
+            remoteRun: {
+              id: provisionalRunId,
+              url: sandboxUrl,
+              replyId,
+              status: 'running',
+            },
+            ...sessionTimeFields(),
+          } : session));
+        };
         let remoteRun;
         if (opts.resumeRunId) {
           remoteRun = { id: opts.resumeRunId, status: 'running' };
@@ -1434,32 +1521,47 @@ function App() {
               // The POST may have committed even if its response was lost.
               // Confirm the client-generated id before treating start as a
               // failure, then let the normal polling path replay all events.
-              await getRemoteAgentRun(sandboxUrl, requestedRunId, 0, run.controller.signal);
+              const recoveredRun = await getRemoteAgentRun(
+                sandboxUrl,
+                requestedRunId,
+                0,
+                run.controller.signal
+              );
+              assertRemoteRunSnapshot(recoveredRun, requestedRunId);
               assertRunActive();
               remoteRun = { id: requestedRunId, status: 'running' };
-            } catch {
+            } catch (probeError) {
               if (run.controller.signal.aborted || !isRunCurrent()) {
                 throw new DOMException('Agent run aborted', 'AbortError');
+              }
+              if ([404, 410].includes(Number(probeError?.status))) {
+                // The authoritative id probe confirmed that the POST did not
+                // create a recoverable run. Do not persist a ghost running id.
+                throw probeError;
               }
               if (!Number.isFinite(startError?.status)) {
                 // Both responses can be lost after the POST committed. Persist
                 // the provisional id so the normal resume loop keeps probing
                 // instead of orphaning an unknown server-owned run.
-                updateSessionsForRun((prev) => prev.map((session) => session.id === sessionId ? {
-                  ...session,
-                  remoteRun: {
-                    id: requestedRunId,
-                    url: sandboxUrl,
-                    replyId,
-                    status: 'running',
-                  },
-                  ...sessionTimeFields(),
-                } : session));
+                persistProvisionalRemoteRun(requestedRunId);
               }
               throw startError;
             }
           }
           assertRunActive();
+          try {
+            assertRemoteRunSnapshot(remoteRun, requestedRunId);
+          } catch (validationError) {
+            // A successful response with a missing/unknown status may still
+            // represent a committed POST. Retain the client-generated id and
+            // let a later GET establish the authoritative status. A different
+            // returned id is not recoverable under this request contract.
+            if (remoteRun?.id == null || String(remoteRun.id) === requestedRunId) {
+              persistProvisionalRemoteRun(requestedRunId);
+            }
+            throw validationError;
+          }
+          remoteRunRecoverable = true;
           updateSessionsForRun((prev) => prev.map((session) => session.id === sessionId ? {
             ...session,
             remoteRun: {
@@ -1473,9 +1575,20 @@ function App() {
           } : session));
         }
         run.remoteRun = { id: remoteRun.id, url: sandboxUrl };
-        let remoteEventCursor = 0;
-        while (remoteRun.status === 'running') {
-          remoteRun = await getRemoteAgentRun(sandboxUrl, remoteRun.id, remoteEventCursor, run.controller.signal);
+        // The assistant reply and its applied event cursor are persisted in one
+        // object. Seed the reducer from that reply and request only later events
+        // instead of replaying a long (up to 20 MB) run log from zero on every
+        // wake-up.
+        let remoteEventCursor = remoteEventReplay.cursor;
+        while (true) {
+          const polledRun = await getRemoteAgentRun(
+            sandboxUrl,
+            remoteRun.id,
+            remoteEventCursor,
+            run.controller.signal
+          );
+          assertRemoteRunSnapshot(polledRun, remoteRun.id);
+          remoteRun = polledRun;
           assertRunActive();
           for (const event of remoteRun.events || []) {
             applyStreamEvent(event);
@@ -1492,26 +1605,27 @@ function App() {
               ...(remoteRun.wakeup ? { wakeup: remoteRun.wakeup } : {}),
             },
           } : session));
-          if (remoteRun.status === 'running') {
-            await new Promise((resolve, reject) => {
-              const onAbort = () => {
-                clearTimeout(timer);
-                reject(new DOMException('Polling aborted', 'AbortError'));
-              };
-              const timer = setTimeout(() => {
-                run.controller.signal.removeEventListener('abort', onAbort);
-                resolve();
-              }, 750);
-              run.controller.signal.addEventListener('abort', onAbort, { once: true });
-            });
-          }
+          if (remoteRun.status !== 'running') break;
+          await new Promise((resolve, reject) => {
+            const onAbort = () => {
+              clearTimeout(timer);
+              reject(new DOMException('Polling aborted', 'AbortError'));
+            };
+            const timer = setTimeout(() => {
+              run.controller.signal.removeEventListener('abort', onAbort);
+              resolve();
+            }, 750);
+            run.controller.signal.addEventListener('abort', onAbort, { once: true });
+          });
         }
         if (!['completed', 'waiting'].includes(remoteRun.status)) {
+          confirmedRemoteFailureStatus = remoteRun.status;
           throw new Error(remoteRun.error || `Sandbox run ${remoteRun.status}`);
         }
         result = remoteRun.result;
         responseCompleted = remoteRun.status === 'completed';
         runOutcome = { status: remoteRun.status };
+        remoteRunReachedAcceptedTerminal = true;
       } else {
         let scheduledWakeup = null;
         result = await runAgentLoop({
@@ -1559,7 +1673,10 @@ function App() {
       // final abort event raced with the server's waiting transition, reflect
       // that control flow instead of presenting them as successfully finished.
       const wakeupEndedTurn = runOutcome.status === 'waiting'
-        || toolCalls.some((tc) => tc.name === 'schedule_wakeup' && tc.status === 'completed');
+        || (!remoteExecution
+          && toolCalls.some((tc) => (
+            tc.name === 'schedule_wakeup' && tc.status === 'completed'
+          )));
       toolCalls.splice(0, toolCalls.length, ...toolCalls.map((tc) => {
         if (!['pending', 'running', 'writing'].includes(tc.status)) return tc;
         if (wakeupEndedTurn && tc.name !== 'schedule_wakeup') {
@@ -1572,8 +1689,15 @@ function App() {
         return { ...tc, status: 'completed' };
       }));
 
-      const finalContent = result?.content || run.streamingContent;
-      const finalThinking = result?.thinking || run.streamingThinking;
+      // A durable sandbox run can span several wake-up turns. Its per-turn
+      // result contains only the latest turn, while the namespaced event state
+      // is the complete assistant transcript across all continuations.
+      const finalContent = remoteExecution
+        ? (run.streamingContent || result?.content)
+        : (result?.content || run.streamingContent);
+      const finalThinking = remoteExecution
+        ? (run.streamingThinking || result?.thinking)
+        : (result?.thinking || run.streamingThinking);
       if (
         responseCompleted
         && !String(finalContent || '').trim()
@@ -1607,32 +1731,99 @@ function App() {
             ? { ...tc, status: 'aborted', result: tc.result || 'Aborted' }
             : tc
         )));
-        updateMessage({ content: run.streamingContent, thinking: run.streamingThinking, toolCalls: [...toolCalls], transcript: agentEventState.transcript }, { touch: true });
+        if (shouldPersistRemoteReplayProgress({
+          remoteExecution,
+          hasAppliedRemoteEvents,
+          savedReply: seedReply,
+        })) {
+          updateMessage({ content: run.streamingContent, thinking: run.streamingThinking, toolCalls: [...toolCalls], transcript: agentEventState.transcript }, { touch: true });
+        }
       } else {
-        runOutcome = { status: 'error', error: err };
+        const slowRemoteRetry = isSlowRemoteRetryError(err);
+        const retryableRemoteFailure = shouldRetryRemoteRunFailure({
+          remoteExecution,
+          remoteRunId: run.remoteRun?.id,
+          recoverable: remoteRunRecoverable,
+          reachedAcceptedTerminal: remoteRunReachedAcceptedTerminal,
+          confirmedFailureStatus: confirmedRemoteFailureStatus,
+          error: err,
+        });
+        runOutcome = {
+          status: retryableRemoteFailure ? 'retryable-error' : 'error',
+          error: err,
+          ...(retryableRemoteFailure
+            ? {
+                retryDelayMs: slowRemoteRetry
+                  ? REMOTE_RESUME_SLOW_RETRY_MS
+                  : REMOTE_RESUME_RETRY_MS,
+              }
+            : {}),
+        };
         if (run.remoteRun?.id) {
           updateSessionsForRun((prev) => prev.map((session) => {
             if (session.id !== sessionId || session.remoteRun?.id !== run.remoteRun.id) return session;
+            const nextRemoteRun = retryableRemoteFailure
+              ? markRemoteRunPollError(session.remoteRun, run.remoteRun.id, err)
+              : markConfirmedRemoteRunFailure(
+                  session.remoteRun,
+                  run.remoteRun.id,
+                  confirmedRemoteFailureStatus,
+                  err
+                );
+            if (nextRemoteRun === session.remoteRun) return session;
             return {
               ...session,
-              remoteRun: {
-                ...session.remoteRun,
-                status: 'error',
-                error: String(err?.message || err || 'Unknown sandbox run error'),
-              },
-              ...sessionTimeFields(),
+              remoteRun: nextRemoteRun,
+              ...(retryableRemoteFailure ? {} : sessionTimeFields()),
             };
           }));
+        }
+        if (retryableRemoteFailure) {
+          // Losing one browser poll must not mutate a server-owned run into a
+          // terminal failure or erase its persisted transcript. Commit only
+          // events received before the disconnect; the resume effects will
+          // retry from remoteEventSequence.
+          // A legacy reply has no cursor and therefore must be rebuilt from
+          // event zero. If the connection fails before the first replay event,
+          // leave its saved content untouched instead of replacing it with the
+          // intentionally empty reducer seed.
+          if (shouldPersistRemoteReplayProgress({
+            remoteExecution,
+            hasAppliedRemoteEvents,
+            savedReply: seedReply,
+          })) {
+            updateMessage({
+              content: run.streamingContent,
+              thinking: run.streamingThinking,
+              toolCalls: [...toolCalls],
+              transcript: agentEventState.transcript,
+              ...(agentEventState.usage ? { usage: agentEventState.usage } : {}),
+            });
+          }
+          return runOutcome;
+        }
+        const preserveUnreplayedReply = Boolean(
+          remoteExecution
+          && !hasAppliedRemoteEvents
+          && seedReply
+        );
+        if (preserveUnreplayedReply) {
+          toolCalls.splice(0, toolCalls.length, ...(seedReply.toolCalls || []));
         }
         toolCalls.splice(0, toolCalls.length, ...toolCalls.map((tc) => (
           ['pending', 'running', 'writing'].includes(tc.status)
             ? { ...tc, status: 'error', result: tc.result || `Error: ${err.message}` }
             : tc
         )));
-        const errorContent = formatRunFailureContent(run.streamingContent, err);
+        const errorContent = formatRunFailureContent(
+          preserveUnreplayedReply ? seedReply.content : run.streamingContent,
+          err
+        );
         updateMessage({
           content: errorContent,
-          thinking: run.streamingThinking,
+          thinking: preserveUnreplayedReply
+            ? (seedReply.thinking || '')
+            : run.streamingThinking,
           toolCalls: [...toolCalls],
           // A visible transcript replaces fallback content entirely. Clear it
           // on failure so the error and Retry action cannot be hidden behind a
@@ -1721,7 +1912,7 @@ function App() {
   // server owns execution; this effect only rebuilds UI state from its log.
   useEffect(() => {
     if (!loaded || factoryResetInProgressRef.current) return;
-    const scheduleRetry = (runId) => {
+    const scheduleRetry = (runId, delayMs = REMOTE_RESUME_RETRY_MS) => {
       if (factoryResetInProgressRef.current) return;
       if (remoteResumeRetryTimersRef.current.has(runId)) return;
       const timerId = setTimeout(() => {
@@ -1729,7 +1920,7 @@ function App() {
         if (factoryResetInProgressRef.current) return;
         resumedRemoteRunsRef.current.delete(runId);
         setRemoteResumeVersion((version) => version + 1);
-      }, 1500);
+      }, Math.max(REMOTE_RESUME_RETRY_MS, Number(delayMs) || 0));
       remoteResumeRetryTimersRef.current.set(runId, timerId);
     };
     const resumable = sessions.filter((session) => (
@@ -1770,8 +1961,11 @@ function App() {
             resumeRunId: session.remoteRun.id,
             replyId: session.remoteRun.replyId,
           });
-          if ((!outcome || outcome.status === 'error') && !factoryResetInProgressRef.current) {
-            scheduleRetry(session.remoteRun.id);
+          if (
+            (!outcome || outcome.status === 'retryable-error')
+            && !factoryResetInProgressRef.current
+          ) {
+            scheduleRetry(session.remoteRun.id, outcome?.retryDelayMs);
           }
         } catch (error) {
           console.warn('Remote agent run resume failed:', error);
@@ -1821,6 +2015,7 @@ function App() {
 
         resumingWaitingRunsRef.current.add(runId);
         void (async () => {
+          let outcome = null;
           try {
             const runMessages = currentSession.messages || await loadSessionMessages(currentSession.id);
             if (
@@ -1828,7 +2023,12 @@ function App() {
               || deletedSessionIdsRef.current.has(currentSession.id)
               || (sessionIncarnationsRef.current.get(currentSession.id) || 0) !== sessionIncarnation
             ) return;
-            await streamResponse(currentSession.id, runMessages, {
+            setSessions((prev) => prev.map((item) => (
+              item.id === currentSession.id && !Object.prototype.hasOwnProperty.call(item, 'messages')
+                ? { ...item, messages: runMessages }
+                : item
+            )));
+            outcome = await streamResponse(currentSession.id, runMessages, {
               agentId: currentSession.agentId,
               llmProfileId: currentSession.llmProfileId,
               sandboxUrl: currentSession.remoteRun.url,
@@ -1847,7 +2047,9 @@ function App() {
             ) {
               scheduleResume(
                 latestSession,
-                Math.max(1000, latestSession.remoteRun.wakeup?.runAtMs - Date.now() || 0)
+                outcome?.status === 'retryable-error'
+                  ? (outcome.retryDelayMs || REMOTE_RESUME_RETRY_MS)
+                  : Math.max(1000, latestSession.remoteRun.wakeup?.runAtMs - Date.now() || 0)
               );
             }
           }
@@ -1962,6 +2164,11 @@ function App() {
           resumingWaitingRunsRef.current.add(runId);
           try {
             const runMessages = currentSession.messages || await loadSessionMessages(currentSession.id);
+            setSessions((prev) => prev.map((item) => (
+              item.id === currentSession.id && !Object.prototype.hasOwnProperty.call(item, 'messages')
+                ? { ...item, messages: runMessages }
+                : item
+            )));
             await streamResponse(currentSession.id, runMessages, {
               agentId: currentSession.agentId,
               llmProfileId: currentSession.llmProfileId,

@@ -20,6 +20,15 @@ function sessionDataChanged(left, right) {
 }
 
 const MISSING = Symbol('missing-session-value');
+const REMOTE_REPLY_CHECKPOINT_FIELDS = [
+  'content',
+  'thinking',
+  'toolCalls',
+  'transcript',
+  'usage',
+  'remoteEventSequence',
+  'remoteReasoningParsers',
+];
 
 function isRecord(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -75,6 +84,68 @@ function mergeValueThreeWay(baseline, local, remote) {
   return merged;
 }
 
+function remoteReplySequence(message) {
+  const sequence = Number(message?.remoteEventSequence);
+  return Number.isFinite(sequence) && sequence > 0 ? Math.floor(sequence) : 0;
+}
+
+function remoteReplyCheckpoint(message) {
+  const checkpoint = {};
+  for (const field of REMOTE_REPLY_CHECKPOINT_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(message || {}, field)) continue;
+    Object.defineProperty(checkpoint, field, {
+      configurable: true,
+      enumerable: true,
+      value: message[field],
+      writable: true,
+    });
+  }
+  return checkpoint;
+}
+
+function newerRemoteReplyCheckpoint(...messages) {
+  const candidates = messages
+    .filter(isRecord)
+    .map((message) => ({
+      message,
+      sequence: remoteReplySequence(message),
+      stableKey: stableValueKey(remoteReplyCheckpoint(message)),
+    }))
+    .filter((candidate) => candidate.sequence > 0);
+  if (candidates.length === 0) return null;
+  candidates.sort((left, right) => (
+    left.sequence - right.sequence
+    || (left.stableKey < right.stableKey ? -1 : left.stableKey > right.stableKey ? 1 : 0)
+  ));
+  return candidates.at(-1).message;
+}
+
+function mergeMessageThreeWay(baseline, local, remote) {
+  const merged = mergeValueThreeWay(baseline, local, remote);
+  if (!isRecord(merged)) return merged;
+  const checkpointSource = newerRemoteReplyCheckpoint(baseline, local, remote);
+  if (!checkpointSource) return merged;
+
+  // The cursor is a causal boundary for every rendered/reducer field. Merging
+  // those fields independently can pair seq=12 with seq=10 text and cause the
+  // next replay to skip the missing events permanently. Overlay the complete
+  // checkpoint from one source while retaining normally merged message
+  // metadata such as reactions or attachments.
+  for (const field of REMOTE_REPLY_CHECKPOINT_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(checkpointSource, field)) {
+      Object.defineProperty(merged, field, {
+        configurable: true,
+        enumerable: true,
+        value: checkpointSource[field],
+        writable: true,
+      });
+    } else {
+      delete merged[field];
+    }
+  }
+  return merged;
+}
+
 function keyedMessages(messages) {
   const byKey = new Map();
   const keys = [];
@@ -102,7 +173,7 @@ function mergeMessages(baselineMessages, localMessages, remoteMessages) {
   const resolved = new Map();
   const allKeys = new Set([...baseline.keys, ...remote.keys, ...local.keys]);
   for (const key of allKeys) {
-    const value = mergeValueThreeWay(
+    const value = mergeMessageThreeWay(
       baseline.byKey.has(key) ? baseline.byKey.get(key) : MISSING,
       local.byKey.has(key) ? local.byKey.get(key) : MISSING,
       remote.byKey.has(key) ? remote.byKey.get(key) : MISSING

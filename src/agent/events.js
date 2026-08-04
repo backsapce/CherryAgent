@@ -36,7 +36,11 @@ export const AGENT_EVENT_TYPES = Object.freeze([
   'run-abort',
 ]);
 
-export function createAgentEventState() {
+export function createAgentEventState(seed = {}) {
+  const content = String(seed?.content || '');
+  const thinking = String(seed?.thinking || '');
+  const toolCalls = Array.isArray(seed?.toolCalls) ? seed.toolCalls : [];
+  const transcript = seedTranscript(seed, { content, thinking, toolCalls });
   return {
     version: AGENT_EVENT_VERSION,
     status: 'idle',
@@ -46,17 +50,72 @@ export function createAgentEventState() {
     finishedAt: null,
     finishReason: null,
     error: null,
-    content: '',
-    thinking: '',
-    toolCalls: [],
-    transcript: [],
-    reasoningParsers: {},
+    content,
+    thinking,
+    toolCalls,
+    transcript,
+    reasoningParsers: seed?.remoteReasoningParsers
+      && typeof seed.remoteReasoningParsers === 'object'
+      && !Array.isArray(seed.remoteReasoningParsers)
+      ? seed.remoteReasoningParsers
+      : {},
     steps: [],
     currentStepId: null,
     permissions: [],
     compactions: [],
-    usage: null,
+    usage: seed?.usage || null,
   };
+}
+
+function seedTranscript(seed, { content, thinking, toolCalls }) {
+  // Older persisted replies may predate the transcript representation, or a
+  // previous client may have retained only some segment types while keeping
+  // the complete visible fields. Fill each missing type independently so the
+  // next delta cannot recalculate content from an incomplete transcript.
+  const transcript = Array.isArray(seed?.transcript) ? [...seed.transcript] : [];
+  const hasReasoning = transcript.some((segment) => (
+    segment?.type === 'reasoning' && segment.content
+  ));
+  const hasText = transcript.some((segment) => (
+    segment?.type === 'text' && segment.content
+  ));
+  if (thinking && !hasReasoning) {
+    const reasoning = {
+      id: 'seed:reasoning',
+      type: 'reasoning',
+      content: thinking,
+      status: 'finished',
+      stepId: null,
+      startedAt: null,
+      finishedAt: null,
+    };
+    const firstTextIndex = transcript.findIndex((segment) => segment?.type === 'text');
+    if (firstTextIndex >= 0) transcript.splice(firstTextIndex, 0, reasoning);
+    else transcript.unshift(reasoning);
+  }
+  if (content && !hasText) {
+    transcript.push({
+      id: 'seed:text',
+      type: 'text',
+      content,
+      status: 'finished',
+      stepId: null,
+      startedAt: null,
+      finishedAt: null,
+    });
+  }
+  for (const toolCall of toolCalls) {
+    if (!toolCall?.id) continue;
+    if (transcript.some((segment) => segment?.toolCallId === toolCall.id)) continue;
+    transcript.push({
+      id: `tool:${toolCall.id}`,
+      type: 'tool',
+      toolCallId: toolCall.id,
+      stepId: null,
+      startedAt: null,
+    });
+  }
+  return transcript;
 }
 
 /**

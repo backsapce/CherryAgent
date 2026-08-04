@@ -263,3 +263,114 @@ test('agent events record a replayable run lifecycle and streamed tool input', (
   }]);
   assert.deepEqual(state.usage, { total_tokens: 53 });
 });
+
+test('persisted assistant state seeds incremental remote event replay', () => {
+  let state = createAgentEventState({
+    content: 'Before sleeping.',
+    thinking: 'Initial reasoning.',
+    toolCalls: [{ id: 'turn-1:call', name: 'schedule_wakeup', status: 'completed' }],
+    transcript: [],
+    usage: { total_tokens: 10 },
+  });
+
+  state = applyAgentEvent(state, {
+    type: 'text-start',
+    runId: 'turn-2',
+    stepId: 'turn-2:step-1',
+    segmentId: 'turn-2:answer',
+    sequence: 11,
+  });
+  state = applyAgentEvent(state, {
+    type: 'text-delta',
+    runId: 'turn-2',
+    stepId: 'turn-2:step-1',
+    segmentId: 'turn-2:answer',
+    sequence: 12,
+    text: 'After waking.',
+  });
+
+  assert.equal(state.content, 'Before sleeping.\n\nAfter waking.');
+  assert.equal(state.thinking, 'Initial reasoning.');
+  assert.deepEqual(state.toolCalls.map((toolCall) => toolCall.id), ['turn-1:call']);
+  assert.equal(state.sequence, 12);
+});
+
+test('incremental replay restores tagged-reasoning parser checkpoints', () => {
+  const checkpoint = (state) => ({
+    content: state.content,
+    thinking: state.thinking,
+    toolCalls: state.toolCalls,
+    transcript: state.transcript,
+    remoteReasoningParsers: state.reasoningParsers,
+  });
+  const apply = (state, event) => applyAgentEvent(state, event);
+  const start = {
+    type: 'reasoning-start',
+    stepId: 'turn:step-1',
+    segmentId: 'turn:reasoning-1',
+    sequence: 1,
+  };
+
+  let full = apply(createAgentEventState(), start);
+  full = apply(full, {
+    type: 'reasoning-delta',
+    stepId: start.stepId,
+    segmentId: start.segmentId,
+    text: '<think',
+    sequence: 2,
+  });
+  let resumed = createAgentEventState(checkpoint(full));
+  const remainder = {
+    type: 'reasoning-delta',
+    stepId: start.stepId,
+    segmentId: start.segmentId,
+    text: 'ing>secret</thinking>answer',
+    sequence: 3,
+  };
+  full = apply(full, remainder);
+  resumed = apply(resumed, remainder);
+  assert.equal(resumed.thinking, full.thinking);
+  assert.equal(resumed.content, full.content);
+  assert.equal(resumed.thinking, 'secret');
+  assert.equal(resumed.content, 'answer');
+
+  const next = {
+    type: 'reasoning-delta',
+    stepId: start.stepId,
+    segmentId: start.segmentId,
+    text: ' after checkpoint',
+    sequence: 4,
+  };
+  full = apply(full, next);
+  resumed = apply(resumed, next);
+  assert.equal(resumed.thinking, full.thinking);
+  assert.equal(resumed.content, full.content);
+  assert.equal(resumed.content, 'answer after checkpoint');
+});
+
+test('a partial legacy transcript retains visible fields during incremental replay', () => {
+  let state = createAgentEventState({
+    content: 'Saved visible answer.',
+    thinking: 'Saved reasoning.',
+    toolCalls: [{ id: 'call-one', name: 'read_file', status: 'completed' }],
+    transcript: [{
+      id: 'legacy-reasoning',
+      type: 'reasoning',
+      content: 'Saved reasoning.',
+      status: 'finished',
+    }],
+  });
+
+  assert.equal(state.transcript.some((segment) => segment.type === 'text'), true);
+  assert.equal(state.transcript.some((segment) => segment.toolCallId === 'call-one'), true);
+  state = applyAgentEvent(state, {
+    type: 'text-delta',
+    stepId: 'turn-two:step-one',
+    segmentId: 'turn-two:text-one',
+    text: 'New answer.',
+    sequence: 2,
+  });
+  assert.match(state.content, /Saved visible answer\./);
+  assert.match(state.content, /New answer\./);
+  assert.equal(state.thinking, 'Saved reasoning.');
+});

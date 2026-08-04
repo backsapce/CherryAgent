@@ -12,6 +12,7 @@ set -e
 PACKAGE_URL="${VERTEX_SANDBOX_PACKAGE:-github:backsapce/VertexAgent}"
 PM2_APP_NAME="${VERTEX_SANDBOX_PM2_NAME:-vertex-sandbox}"
 WORKSPACE_DIR="${VERTEX_SANDBOX_WORKDIR:-$HOME/vertex-workspace}"
+STATE_DIR="${VERTEX_SANDBOX_STATE_DIR:-$HOME/.local/state/vertex-sandbox}"
 REQUIRED_NODE_MAJOR=18
 
 info()  { printf '\033[1;34m[info]\033[0m  %s\n' "$1"; }
@@ -101,10 +102,10 @@ install_sandbox_package() {
 }
 
 start_pm2() {
-  mkdir -p "$WORKSPACE_DIR"
   export AGENT_WORKING_DIR="${AGENT_WORKING_DIR:-$WORKSPACE_DIR}"
   export AGENT_FILES_DIR="${AGENT_FILES_DIR:-$AGENT_WORKING_DIR}"
-  export AGENT_TOKEN_FILE="${AGENT_TOKEN_FILE:-$AGENT_WORKING_DIR/.vertex-token}"
+  export AGENT_STATE_DIR="${AGENT_STATE_DIR:-$STATE_DIR}"
+  mkdir -p "$AGENT_WORKING_DIR" "$AGENT_STATE_DIR"
 
   info "Starting $PM2_APP_NAME with PM2..."
   pm2 delete "$PM2_APP_NAME" >/dev/null 2>&1 || true
@@ -129,6 +130,8 @@ print_summary() {
   echo ""
   echo "  Workspace:"
   echo "    $AGENT_WORKING_DIR"
+  echo "  Control state:"
+  echo "    $AGENT_STATE_DIR"
   echo ""
   echo "  Agent endpoint: http://<host>:${AGENT_PORT:-3099}/agent"
   echo "  Health check:   http://<host>:${AGENT_PORT:-3099}/agent/health"
