@@ -13,10 +13,10 @@ import { tmpdir } from 'node:os';
 import { createFilePathPolicy } from './file-path-policy.js';
 
 test('file path policy rejects direct and ancestor mutations of protected state', () => {
-  const root = mkdtempSync(join(tmpdir(), 'vertex-agent-path-policy-'));
+  const root = mkdtempSync(join(tmpdir(), 'cherry-agent-path-policy-'));
   try {
     const filesRootDir = join(root, 'files');
-    const legacyRunsDir = join(filesRootDir, '.vertex-runs');
+    const legacyRunsDir = join(filesRootDir, '.cherry-runs');
     mkdirSync(legacyRunsDir, { recursive: true });
     writeFileSync(join(legacyRunsDir, 'run.json'), '{}');
     const policy = createFilePathPolicy({
@@ -25,7 +25,7 @@ test('file path policy rejects direct and ancestor mutations of protected state'
     });
 
     assert.equal(policy.isSafePath('notes/new.txt'), true);
-    assert.equal(policy.isSafePath('.vertex-runs/run.json'), false);
+    assert.equal(policy.isSafePath('.cherry-runs/run.json'), false);
     assert.equal(policy.isSafeMutationPath(''), false);
     assert.equal(policy.isSafeMutationPath('notes'), true);
   } finally {
@@ -36,7 +36,7 @@ test('file path policy rejects direct and ancestor mutations of protected state'
 test('file path policy rejects a symlink alias to external control state', {
   skip: process.platform === 'win32',
 }, () => {
-  const root = mkdtempSync(join(tmpdir(), 'vertex-agent-path-alias-'));
+  const root = mkdtempSync(join(tmpdir(), 'cherry-agent-path-alias-'));
   try {
     const filesRootDir = join(root, 'files');
     const stateDir = join(root, 'state');
@@ -58,17 +58,17 @@ test('file path policy rejects a symlink alias to external control state', {
 });
 
 test('protected path comparisons are case-insensitive on default macOS filesystems', () => {
-  const root = mkdtempSync(join(tmpdir(), 'vertex-agent-path-case-'));
+  const root = mkdtempSync(join(tmpdir(), 'cherry-agent-path-case-'));
   try {
     const filesRootDir = join(root, 'files');
     mkdirSync(filesRootDir);
     const policy = createFilePathPolicy({
       filesRootDir,
-      protectedPaths: [join(filesRootDir, '.vertex-token')],
+      protectedPaths: [join(filesRootDir, '.cherry-token')],
       platform: 'darwin',
     });
 
-    assert.equal(policy.isSafePath('.VERTEX-TOKEN'), false);
+    assert.equal(policy.isSafePath('.CHERRY-TOKEN'), false);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

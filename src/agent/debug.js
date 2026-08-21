@@ -21,7 +21,7 @@ export function buildChatDebugExport({
   const toolCalls = collectToolCalls(chatMessages);
 
   return {
-    type: 'vertex-agent-chat-debug',
+    type: 'cherry-agent-chat-debug',
     version: DEBUG_EXPORT_VERSION,
     generatedAt,
     session: sanitizeSession(session, chatMessages),
@@ -56,7 +56,7 @@ export function createChatDebugFilename(session, date = new Date()) {
   const sessionId = safeFilenamePart(session?.id || 'session');
   const title = safeFilenamePart(session?.title || 'chat').slice(0, 36) || 'chat';
   const stamp = date.toISOString().replace(/[:.]/g, '-');
-  return `vertex-agent-debug-${title}-${sessionId}-${stamp}.json`;
+  return `cherry-agent-debug-${title}-${sessionId}-${stamp}.json`;
 }
 
 function sanitizeSession(session, messages) {

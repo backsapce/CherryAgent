@@ -2,14 +2,14 @@
  * Agent Management — multi-agent workspace system.
  *
  * Each agent has its own isolated workspace in OPFS:
- *   vertex-agent/workspace/agent-xxxxxx/
+ *   cherry-agent/workspace/agent-xxxxxx/
  *     meta.json     — { id, name, createdAt }
  *     AGENTS.md     — agent identity: whoami, capabilities, workspace context
  *     memory/       — MEMORY.md, USER.md
  *     skills/       — agent-specific skills
  *     files/        — agent-scoped files for tool execution
  *
- * Global skills (vertex-agent/skills/) are shared across all agents.
+ * Global skills (cherry-agent/skills/) are shared across all agents.
  * Sessions and messages remain global.
  *
  * Usage:
@@ -19,7 +19,7 @@
 import config from '../config/config.js';
 import { notifyOpfsMutation, writeAgentAgentsFile, readAgentAgentsFile } from '../vfs/opfs.js';
 
-const ROOT_DIR = 'vertex-agent';
+const ROOT_DIR = 'cherry-agent';
 const WORKSPACE_DIR = 'workspace';
 
 function normalizeAgent(agent) {
@@ -289,7 +289,7 @@ created: ${new Date().toISOString()}
 
 # Agent: ${name}
 
-You are an AI agent in the VertexAgent system.
+You are an AI agent in the CherryAgent system.
 
 ## Identity
 

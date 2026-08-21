@@ -22,7 +22,7 @@ import {
 const TEST_CONFIG = {
   region: 'us-east-1',
   bucket: 'test-bucket',
-  prefix: 'vertex-agent',
+  prefix: 'cherry-agent',
   accessKeyId: 'test-access-key',
   secretAccessKey: 'test-secret-key',
 };
@@ -50,7 +50,7 @@ function awsError(name, statusCode, headers = undefined) {
 }
 
 test('object keys normalize prefix and suffix slashes', () => {
-  assert.equal(objectKey({ prefix: '/vertex-agent/' }, '/manifest.json/'), 'vertex-agent/manifest.json');
+  assert.equal(objectKey({ prefix: '/cherry-agent/' }, '/manifest.json/'), 'cherry-agent/manifest.json');
   assert.equal(objectKey({}, 'manifest.json'), 'manifest.json');
 });
 
@@ -621,7 +621,7 @@ test('error helpers recognize AWS and S3-compatible conditional responses', () =
 });
 
 test('connection test uses scoped put/get/delete and always deletes an uploaded probe', async () => {
-  const key = 'vertex-agent/.sync/test-probe';
+  const key = 'cherry-agent/.sync/test-probe';
   let stored = null;
   const client = new FakeClient(async (command) => {
     if (command.constructor.name === 'PutObjectCommand') {
@@ -677,7 +677,7 @@ test('object listing follows continuation tokens and normalizes metadata', async
     if (!command.input.ContinuationToken) {
       return {
         Contents: [{
-          Key: 'vertex-agent/manifests/a.json',
+          Key: 'cherry-agent/manifests/a.json',
           ETag: '"a"',
           Size: 12,
           LastModified: '2026-07-15T00:00:00.000Z',
@@ -688,21 +688,21 @@ test('object listing follows continuation tokens and normalizes metadata', async
     }
     assert.equal(command.input.ContinuationToken, 'page-2');
     return {
-      Contents: [{ Key: 'vertex-agent/manifests/b.json', Size: 8 }],
+      Contents: [{ Key: 'cherry-agent/manifests/b.json', Size: 8 }],
       IsTruncated: false,
     };
   });
   const backend = createS3Backend(TEST_CONFIG, { client });
 
-  assert.deepEqual(await backend.list('vertex-agent/manifests/'), [
+  assert.deepEqual(await backend.list('cherry-agent/manifests/'), [
     {
-      key: 'vertex-agent/manifests/a.json',
+      key: 'cherry-agent/manifests/a.json',
       etag: '"a"',
       size: 12,
       lastModified: new Date('2026-07-15T00:00:00.000Z'),
     },
     {
-      key: 'vertex-agent/manifests/b.json',
+      key: 'cherry-agent/manifests/b.json',
       etag: null,
       size: 8,
       lastModified: null,
@@ -717,14 +717,14 @@ test('object listing clamps the first page to the requested object limit', async
     assert.equal(command.constructor.name, 'ListObjectsV2Command');
     assert.equal(command.input.MaxKeys, 1);
     return {
-      Contents: [{ Key: 'vertex-agent/manifests/a.json', Size: 12 }],
+      Contents: [{ Key: 'cherry-agent/manifests/a.json', Size: 12 }],
       IsTruncated: true,
       NextContinuationToken: 'unneeded-page',
     };
   });
   const backend = createS3Backend(TEST_CONFIG, { client });
 
-  assert.equal((await backend.list('vertex-agent/manifests/', { maxObjects: 1 })).length, 1);
+  assert.equal((await backend.list('cherry-agent/manifests/', { maxObjects: 1 })).length, 1);
   assert.equal(calls, 1);
 });
 
@@ -732,8 +732,8 @@ test('object listing rejects repeated continuation tokens', async () => {
   const client = new FakeClient(async (command) => ({
     Contents: [{
       Key: command.input.ContinuationToken
-        ? 'vertex-agent/manifests/b.json'
-        : 'vertex-agent/manifests/a.json',
+        ? 'cherry-agent/manifests/b.json'
+        : 'cherry-agent/manifests/a.json',
     }],
     IsTruncated: true,
     NextContinuationToken: 'repeated-token',
@@ -741,7 +741,7 @@ test('object listing rejects repeated continuation tokens', async () => {
   const backend = createS3Backend(TEST_CONFIG, { client });
 
   await assert.rejects(
-    backend.list('vertex-agent/manifests/'),
+    backend.list('cherry-agent/manifests/'),
     /repeated a continuation token/i
   );
   assert.equal(client.commands.length, 2);
@@ -756,7 +756,7 @@ test('object listing rejects truncated pages that make no object progress', asyn
   const backend = createS3Backend(TEST_CONFIG, { client });
 
   await assert.rejects(
-    backend.list('vertex-agent/manifests/'),
+    backend.list('cherry-agent/manifests/'),
     /made no object progress/i
   );
   assert.equal(client.commands.length, 1);

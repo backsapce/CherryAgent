@@ -5,10 +5,10 @@ import process from 'node:process';
 const args = process.argv.slice(2);
 
 if (args.includes('--help') || args.includes('-h')) {
-  console.log(`Vertex Sandbox
+  console.log(`Cherry Sandbox
 
 Usage:
-  vertex-sandbox
+  cherry-sandbox
 
 Environment:
   AGENT_PORT             HTTP port for /agent (default: 3099)

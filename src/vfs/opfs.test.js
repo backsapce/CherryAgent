@@ -195,7 +195,7 @@ test('parseable non-array session storage is not mistaken for a missing index', 
 test('generic text reads propagate storage I/O failures instead of treating them as missing', async () => {
   const origin = useMemoryOpfs();
   await writePathText('memory/MEMORY.md', 'important', { internal: true });
-  const appRoot = await origin.getDirectoryHandle('vertex-agent');
+  const appRoot = await origin.getDirectoryHandle('cherry-agent');
   const memoryDir = await appRoot.getDirectoryHandle('memory');
   const handle = await memoryDir.getFileHandle('MEMORY.md');
   handle.getFile = async () => {
@@ -214,7 +214,7 @@ test('session deletion stays committed when orphan-body cleanup fails', async ()
     { id: 'keep-me', title: 'Keep', messages: [{ role: 'user', content: 'safe' }] },
   ];
   await saveSessions(sessions);
-  const appRoot = await origin.getDirectoryHandle('vertex-agent');
+  const appRoot = await origin.getDirectoryHandle('cherry-agent');
   const sessionDir = await appRoot.getDirectoryHandle('sessions');
   const removeEntry = sessionDir.removeEntry.bind(sessionDir);
   sessionDir.removeEntry = async (name, options) => {
@@ -254,7 +254,7 @@ test('unchanged session messages are not rewritten after save or reload', async 
   }];
 
   await saveSessions(sessions);
-  const appRoot = await origin.getDirectoryHandle('vertex-agent');
+  const appRoot = await origin.getDirectoryHandle('cherry-agent');
   const sessionDir = await appRoot.getDirectoryHandle('sessions');
   const bodyHandle = await sessionDir.getFileHandle('stable.json');
   const firstModified = bodyHandle.lastModified;
@@ -276,7 +276,7 @@ test('session metadata loads without reading message bodies', async () => {
   const body = [{ role: 'assistant', content: 'large history body' }];
   await saveSessions([{ id: 'lazy', title: 'Lazy', messages: body }]);
 
-  const appRoot = await origin.getDirectoryHandle('vertex-agent');
+  const appRoot = await origin.getDirectoryHandle('cherry-agent');
   const sessionDir = await appRoot.getDirectoryHandle('sessions');
   const bodyHandle = await sessionDir.getFileHandle('lazy.json');
   const getFile = bodyHandle.getFile.bind(bodyHandle);
@@ -441,7 +441,7 @@ test('recovery journal validation rejects unsafe, duplicate, and excessive sessi
 test('oversized recovery journals are rejected before their content is read', async () => {
   const origin = useMemoryOpfs();
   await writePathText('.sync/session-recovery.json', '{}', { internal: true });
-  const appRoot = await origin.getDirectoryHandle('vertex-agent');
+  const appRoot = await origin.getDirectoryHandle('cherry-agent');
   const syncDir = await appRoot.getDirectoryHandle('.sync');
   const handle = await syncDir.getFileHandle('session-recovery.json');
   let contentRead = false;
@@ -730,5 +730,5 @@ test('ZIP import hard limits are exported and remain compatible with valid overr
     { path: 'two.bin', data: '2', createFolders: false },
   ]);
   await importFromZip(input, { maxEntries: ZIP_IMPORT_MAX_ENTRIES + 1 });
-  assert.ok(root.entries.has('vertex-agent'));
+  assert.ok(root.entries.has('cherry-agent'));
 });

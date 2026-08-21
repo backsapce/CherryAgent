@@ -351,7 +351,7 @@ test('sandbox run network failures include runtime connectivity diagnostics', as
         assert.equal(error.name, 'AgentRuntimeNetworkError');
         assert.equal(error.code, 'AGENT_RUNTIME_NETWORK_ERROR');
         assert.equal(error.agentRunRequestStarted, true);
-        assert.match(error.message, /vertex-sandbox is running/i);
+        assert.match(error.message, /cherry-sandbox is running/i);
         assert.match(error.message, /AGENT_ALLOWED_ORIGINS/);
         assert.match(error.message, /Local Network Access/);
         return true;

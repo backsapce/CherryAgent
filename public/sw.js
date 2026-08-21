@@ -1,5 +1,5 @@
 /**
- * Service Worker for Vertex Agent — offline-first caching.
+ * Service Worker for Cherry Agent — offline-first caching.
  *
  * Strategy:
  *   - Precache the app shell (index.html, JS, CSS, icons) on install.
@@ -7,8 +7,8 @@
  *   - All fetched resources are opportunistically cached for offline use.
  */
 
-const CACHE_NAME = 'vertex-agent-v1';
-const BASE = '/';  // replaced at build time with GH_PAGES_BASE (e.g. '/VertexAgent/')
+const CACHE_NAME = 'cherry-agent-v1';
+const BASE = '/';  // replaced at build time with GH_PAGES_BASE (e.g. '/CherryAgent/')
 const DEV_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 const IS_DEV_HOST = DEV_HOSTS.has(self.location.hostname);
 

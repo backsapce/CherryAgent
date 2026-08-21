@@ -27,4 +27,4 @@ dist-ssr
 *.sln
 *.sw?
 
-.vertex-agent
+.cherry-agent

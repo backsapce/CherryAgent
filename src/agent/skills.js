@@ -35,7 +35,7 @@ const DEFAULT_SKILLS = [
     name: 'skill-creator',
     content: `---
 name: skill-creator
-description: Use when creating or improving VertexAgent skills. Helps write concise trigger descriptions, progressive instructions, and optional reference files.
+description: Use when creating or improving CherryAgent skills. Helps write concise trigger descriptions, progressive instructions, and optional reference files.
 version: 2.1.0
 ---
 

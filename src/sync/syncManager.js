@@ -2727,8 +2727,8 @@ async function saveRemoteManifest(backend, syncConfig, manifest, remote = {}, st
 async function verifyConditionalManifestWrites(backend, syncConfig) {
   const probeId = randomId();
   const key = objectKey(syncConfig, `.probe/conditional-${probeId}`);
-  const firstPayload = new TextEncoder().encode('vertex-agent-conditional-probe-1');
-  const secondPayload = new TextEncoder().encode('vertex-agent-conditional-probe-2');
+  const firstPayload = new TextEncoder().encode('cherry-agent-conditional-probe-1');
+  const secondPayload = new TextEncoder().encode('cherry-agent-conditional-probe-2');
   let created = false;
   try {
     const createdResult = await backend.putBytes(
@@ -2766,7 +2766,7 @@ async function verifyConditionalManifestWrites(backend, syncConfig) {
         key,
         secondPayload,
         'application/octet-stream',
-        { ifMatch: `"vertex-agent-stale-${probeId}"` }
+        { ifMatch: `"cherry-agent-stale-${probeId}"` }
       );
     } catch (err) {
       if (!isConditionalWriteConflictError(err)) throw err;
@@ -2801,7 +2801,7 @@ async function conditionalDeleteCapability(backend, syncConfig) {
   }
   const probeId = randomId();
   const key = objectKey(syncConfig, `.probe/conditional-delete-${probeId}`);
-  const payload = new TextEncoder().encode('vertex-agent-conditional-delete-probe');
+  const payload = new TextEncoder().encode('cherry-agent-conditional-delete-probe');
   let exists = false;
   try {
     const putResult = await backend.putBytes(key, payload, 'application/octet-stream');
@@ -2818,7 +2818,7 @@ async function conditionalDeleteCapability(backend, syncConfig) {
     }
 
     try {
-      await backend.delete(key, { ifMatch: `"vertex-agent-stale-${probeId}"` });
+      await backend.delete(key, { ifMatch: `"cherry-agent-stale-${probeId}"` });
       exists = false;
       // The backend ignored If-Match. Never delete mutable shard keys here.
       conditionalDeleteCapabilities.set(scope, false);
@@ -4622,7 +4622,7 @@ async function withBrowserSyncLock(syncConfig, operation) {
     return operation();
   }
   return locks.request(
-    `vertex-agent-sync:${syncBackendIdentity(syncConfig)}`,
+    `cherry-agent-sync:${syncBackendIdentity(syncConfig)}`,
     { mode: 'exclusive' },
     operation
   );

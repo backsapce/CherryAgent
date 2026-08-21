@@ -1117,7 +1117,7 @@ function formatSkills(skills) {
     .join('\n');
 }
 
-const SUB_AGENT_SYSTEM_PROMPT = `You are a delegated VertexAgent agent run.
+const SUB_AGENT_SYSTEM_PROMPT = `You are a delegated CherryAgent agent run.
 
 Work on the assigned task independently and return a concise final report with:
 - What you did or found

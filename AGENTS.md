@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-VertexAgent is a browser-based AI agent framework. It's a React SPA that connects to LLM providers (OpenAI, Anthropic, Gemini, OpenRouter, Qwen, custom OpenAI-compatible) for sessions, with an autonomous agent loop for tool execution. All browser data is persisted in OPFS (Origin Private File System). Optionally supports E2B cloud sandboxes for remote execution.
+CherryAgent is a browser-based AI agent framework. It's a React SPA that connects to LLM providers (OpenAI, Anthropic, Gemini, OpenRouter, Qwen, custom OpenAI-compatible) for sessions, with an autonomous agent loop for tool execution. All browser data is persisted in OPFS (Origin Private File System). Optionally supports E2B cloud sandboxes for remote execution.
 
 ## Commands
 
@@ -12,7 +12,7 @@ VertexAgent is a browser-based AI agent framework. It's a React SPA that connect
 - **Dev frontend only:** `npm run dev:front`
 - **Dev agent server only:** `npm run dev:agent`
 - **Build:** `npm run build` — Vite production build + service worker precache injection
-- **Build for GitHub Pages:** `npm run build:pages` — sets `VITE_BASE=/VertexAgent/` base path
+- **Build for GitHub Pages:** `npm run build:pages` — sets `VITE_BASE=/CherryAgent/` base path
 - **Lint:** `npm run lint`
 - **Preview production build:** `npm run preview` — serves dist/ on port 5173 (same port as dev to preserve OPFS data)
 - **Docker build:** `npm run build:docker` — multi-platform build + push
@@ -50,11 +50,11 @@ The agent system replaces the old `<execute>` XML tag parsing with native LLM to
   - `qwen.js` — Alibaba Qwen/DashScope API
   - `custom-openai.js` — Any OpenAI-compatible endpoint
   - `shared.js` — Common utilities shared across providers
-- **`e2b.js`** — E2B cloud sandbox integration. Persistent sandbox (tagged via localStorage ID), command execution, file CRUD, upload/download. Sandbox is created/reused based on metadata filter `vertexsandbox`.
+- **`e2b.js`** — E2B cloud sandbox integration. Persistent sandbox (tagged via localStorage ID), command execution, file CRUD, upload/download. Sandbox is created/reused based on metadata filter `cherrysandbox`.
 
 ### OPFS VFS (`src/vfs/opfs.js`)
 
-Root directory: `vertex-agent/`. Key subdirectories:
+Root directory: `cherry-agent/`. Key subdirectories:
 - `session.json` + `sessions/<id>.json` — session metadata and per-session message files
 - `memory/` — `MEMORY.md` and `USER.md` for agent memory
 - `skills/` — skill directories with `SKILL.md` and optional `references/`

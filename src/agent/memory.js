@@ -1,5 +1,5 @@
 /**
- * Structured memory for VertexAgent.
+ * Structured memory for CherryAgent.
  *
  * Memory remains human-readable Markdown in OPFS, but entries are stored as
  * small records with ids and metadata so the agent can update, search, and
@@ -23,7 +23,7 @@ const USER_PROMPT_MAX = 1800;
 const ENTRY_MAX = 1200;
 const USER_ENTRY_MAX = 800;
 const DELIMITER = '§';
-const DOC_MARKER = '<!-- vertex-memory:v2 -->';
+const DOC_MARKER = '<!-- cherry-memory:v2 -->';
 const MEMORY_FILE = 'MEMORY.md';
 const USER_FILE = 'USER.md';
 

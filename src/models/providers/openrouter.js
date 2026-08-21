@@ -56,8 +56,8 @@ export default {
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${config.apiKey}`,
-        'HTTP-Referer': globalThis.location?.href || 'https://vertex-agent.local',
-        'X-Title': 'Vertex Agent',
+        'HTTP-Referer': globalThis.location?.href || 'https://cherry-agent.local',
+        'X-Title': 'Cherry Agent',
       },
       body: JSON.stringify(body),
       signal: opts.signal,

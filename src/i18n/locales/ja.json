@@ -1,7 +1,7 @@
 {
     "app": {
         "loading": "読み込み中...",
-        "name": "VertexAgent",
+        "name": "CherryAgent",
         "tagline": "ブラウザで完全に動作する AI エージェント",
         "sendHint": "メッセージを送信して開始",
         "newSession": "新しいセッション",
@@ -19,7 +19,7 @@
     },
     "message": {
         "you": "あなた",
-        "assistant": "Vertex Agent",
+        "assistant": "Cherry Agent",
         "thinking": "思考中",
         "thinkingRound": "第 {round} ラウンド思考中",
         "thoughtFor": "思考時間 {seconds}",
@@ -159,7 +159,7 @@
         "hint": "サンドボックスサーバーホスト URL を入力してください。サーバーは認証用の接続トークンをコンソールに表示します。",
         "alreadyAdded": "このサンドボックスは既に追加されています。",
         "connectFailed": "接続できません。サンドボックスサーバーが実行中であることを確認してください。",
-        "modeServer": "Vertex サンドボックス",
+        "modeServer": "Cherry サンドボックス",
         "modeE2b": "E2B クラウド",
         "e2bNotStarted": "サンドボックス未起動"
     },
@@ -184,7 +184,7 @@
         "title": "データ管理",
         "desc": "すべてのセッションと設定を zip ファイルにエクスポート、または以前のバックアップからインポートします。",
         "storageTitle": "ブラウザーファイルシステム",
-        "storageDesc": "このブラウザーに保存されている VertexAgent データの合計です。",
+        "storageDesc": "このブラウザーに保存されている CherryAgent データの合計です。",
         "storageLoading": "計算中...",
         "storageError": "ストレージサイズを計算できません。",
         "storageFiles": "ファイル数: {count}",
@@ -303,7 +303,7 @@
         "runtime": "エージェントランタイム",
         "browserRuntime": "ブラウザー（既定）",
         "sandboxRuntime": "サンドボックス（バックグラウンド）",
-        "runtimeNeedsSandbox": "サンドボックスランタイムには VertexAgent agent server を選択してください。",
+        "runtimeNeedsSandbox": "サンドボックスランタイムには CherryAgent agent server を選択してください。",
         "commandOnly": "コマンドのみ",
         "sandbox": "サンドボックス",
         "noSandbox": "サンドボックスを使用しない"

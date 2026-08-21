@@ -1,5 +1,5 @@
 /**
- * Unified LLM Service for Vertex Agent.
+ * Unified LLM Service for Cherry Agent.
  *
  * Provider connections own credentials/endpoints. LLM records reference one
  * connection and select a concrete model, so many LLMs can reuse a connection

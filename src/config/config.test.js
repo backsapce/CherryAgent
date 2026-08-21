@@ -114,7 +114,7 @@ class MemoryConfigDirectory {
 async function freshConfig(directory) {
   const origin = {
     getDirectoryHandle: async (name) => {
-      assert.equal(name, 'vertex-agent');
+      assert.equal(name, 'cherry-agent');
       return directory;
     },
   };

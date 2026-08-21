@@ -1,8 +1,8 @@
-# VertexAgent
+# CherryAgent
 
-VertexAgent is a browser-based AI agent workspace. It runs as a React single-page app, stores data in the browser's Origin Private File System (OPFS), and can optionally connect to an execution sandbox for shell commands and file operations.
+CherryAgent is a browser-based AI agent workspace. It runs as a React single-page app, stores data in the browser's Origin Private File System (OPFS), and can optionally connect to an execution sandbox for shell commands and file operations.
 
-Hosted app: https://backsapce.github.io/VertexAgent/
+Hosted app: https://backsapce.github.io/CherryAgent/
 
 ## What It Does
 
@@ -16,7 +16,7 @@ Hosted app: https://backsapce.github.io/VertexAgent/
 
 ## Privacy Model
 
-VertexAgent does not require an application backend for normal session usage. API keys, sessions, settings, memory, skills, and managed files are stored in your browser through OPFS.
+CherryAgent does not require an application backend for normal session usage. API keys, sessions, settings, memory, skills, and managed files are stored in your browser through OPFS.
 
 External services are contacted only when you configure them:
 
@@ -29,14 +29,14 @@ External services are contacted only when you configure them:
 Use the hosted app:
 
 ```text
-https://backsapce.github.io/VertexAgent/
+https://backsapce.github.io/CherryAgent/
 ```
 
 For local development:
 
 ```bash
-git clone https://github.com/backsapce/VertexAgent
-cd VertexAgent
+git clone https://github.com/backsapce/CherryAgent
+cd CherryAgent
 npm install
 npm run dev
 ```
@@ -53,7 +53,7 @@ npm run dev          # Frontend + local Agent Node
 npm run dev:front    # Frontend only
 npm run dev:agent    # Agent Node only
 npm run build        # Production build
-npm run build:pages  # GitHub Pages build with /VertexAgent/ base path
+npm run build:pages  # GitHub Pages build with /CherryAgent/ base path
 npm run lint         # ESLint
 npm run test:runtime # Agent runtime and managed command tests
 npm run preview      # Preview dist/ on port 5173
@@ -83,7 +83,7 @@ agent selections continue to work.
 
 ## Sandboxes
 
-Sandbox support is optional. VertexAgent works as a private browser session app without any sandbox connected.
+Sandbox support is optional. CherryAgent works as a private browser session app without any sandbox connected.
 
 ### E2B Cloud
 
@@ -91,14 +91,14 @@ Sandbox support is optional. VertexAgent works as a private browser session app 
 2. Add your E2B API key.
 3. Enable E2B Cloud Sandbox.
 
-VertexAgent keeps a sandbox ID in `localStorage` so it can reconnect after page reloads.
+CherryAgent keeps a sandbox ID in `localStorage` so it can reconnect after page reloads.
 
 E2B Cloud currently provides command/file execution to the browser runtime. It
-does not expose the VertexAgent background-run or managed-background-command protocols.
+does not expose the CherryAgent background-run or managed-background-command protocols.
 
 ### Self-Hosted Agent Node
 
-Run the Agent Node when you want VertexAgent to execute commands or manage files on a machine you control.
+Run the Agent Node when you want CherryAgent to execute commands or manage files on a machine you control.
 
 ```bash
 npm run dev:agent
@@ -107,52 +107,52 @@ npm run dev:agent
 Install the sandbox runtime from GitHub with npm and keep it in the background with PM2:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/backsapce/VertexAgent/main/script/install_sandbox_npm.sh | sh
+curl -fsSL https://raw.githubusercontent.com/backsapce/CherryAgent/main/script/install_sandbox_npm.sh | sh
 ```
 
-The installer runs `npm install -g github:backsapce/VertexAgent`, starts the `vertex-sandbox` binary with PM2, and saves the PM2 process list. The default workspace is `~/vertex-workspace`; override it with `VERTEX_SANDBOX_WORKDIR=/path/to/workspace`. You can also run the binary yourself after installing:
+The installer runs `npm install -g github:backsapce/CherryAgent`, starts the `cherry-sandbox` binary with PM2, and saves the PM2 process list. The default workspace is `~/cherry-workspace`; override it with `CHERRY_SANDBOX_WORKDIR=/path/to/workspace`. You can also run the binary yourself after installing:
 
 ```bash
-npm install -g github:backsapce/VertexAgent
-vertex-sandbox
+npm install -g github:backsapce/CherryAgent
+cherry-sandbox
 ```
 
 Or run the Docker image:
 
 ```bash
-mkdir -p ./vertex-workspace ./vertex-state
+mkdir -p ./cherry-workspace ./cherry-state
 
 docker run -d \
-  --name vertex-sandbox \
+  --name cherry-sandbox \
   --restart unless-stopped \
   -p 3099:3099 \
   -e AGENT_ALLOWED_ORIGINS=https://your-frontend-origin \
-  -v "$(pwd)/vertex-workspace:/home/vertex" \
-  -v "$(pwd)/vertex-state:/var/lib/vertex-sandbox" \
-  backsapce/vertex-sandbox:latest
+  -v "$(pwd)/cherry-workspace:/home/cherry" \
+  -v "$(pwd)/cherry-state:/var/lib/cherry-sandbox" \
+  backsapce/cherry-sandbox:latest
 ```
 
-The sandbox container uses `/home/vertex` as its Docker `WORKDIR` and
+The sandbox container uses `/home/cherry` as its Docker `WORKDIR` and
 `AGENT_WORKING_DIR`. Runtime control state is kept separately under
-`/var/lib/vertex-sandbox`, so workspace cleanup commands cannot delete another
+`/var/lib/cherry-sandbox`, so workspace cleanup commands cannot delete another
 session's run, job log, or auth token. Persist both directories:
 
 ```bash
 docker run -d \
-  --name vertex-sandbox \
+  --name cherry-sandbox \
   --restart unless-stopped \
   -p 3099:3099 \
   -e AGENT_ALLOWED_ORIGINS=https://your-frontend-origin \
-  -v "/absolute/path/to/workspace:/home/vertex" \
-  -v "/absolute/path/to/vertex-state:/var/lib/vertex-sandbox" \
-  backsapce/vertex-sandbox:latest
+  -v "/absolute/path/to/workspace:/home/cherry" \
+  -v "/absolute/path/to/cherry-state:/var/lib/cherry-sandbox" \
+  backsapce/cherry-sandbox:latest
 ```
 
-> **Docker upgrade:** add the `/var/lib/vertex-sandbox` bind mount or a stable
+> **Docker upgrade:** add the `/var/lib/cherry-sandbox` bind mount or a stable
 > named volume before starting the upgraded image. Docker may create an
 > anonymous volume when this mount is omitted, and a later `docker run` does
 > not automatically reuse that anonymous volume. Existing workspace-owned
-> `.vertex-*` state is copied on the first upgraded start.
+> `.cherry-*` state is copied on the first upgraded start.
 
 ### Agent runtime modes
 
@@ -165,9 +165,9 @@ memory, skills, and identity files are not copied into the sandbox run.
 
 The Agent Node persists run metadata, event logs, results, managed jobs, and
 auth tokens under an isolated `AGENT_STATE_DIR` outside the executable
-workspace. Closing the browser does not cancel the run; reopening VertexAgent
+workspace. Closing the browser does not cancel the run; reopening CherryAgent
 discovers the run by session ID and replays its events/result. On first upgrade,
-legacy `.vertex-runs`, `.vertex-jobs`, and `.vertex-token` data is copied out of
+legacy `.cherry-runs`, `.cherry-jobs`, and `.cherry-token` data is copied out of
 the workspace when the corresponding explicit override is not set. Keep the
 Agent Node process alive for the run to continue. Because the selected LLM
 profile is sent to the runtime for model calls, use an authenticated HTTPS
@@ -193,13 +193,13 @@ or
 
 ```bash
 docker run -d \
-  --name vertex-agent \
+  --name cherry-agent \
   --restart unless-stopped \
   -p 3098:80 \
-  backsapce/vertex-agent:latest
+  backsapce/cherry-agent:latest
 ```
 
-The server prints a temporary pairing token on startup. Paste that token into VertexAgent Settings to exchange it for a long-lived token.
+The server prints a temporary pairing token on startup. Paste that token into CherryAgent Settings to exchange it for a long-lived token.
 
 Agent Node environment variables:
 
@@ -208,7 +208,7 @@ Agent Node environment variables:
 | `AGENT_PORT` | `3099` | HTTP port for `/agent` |
 | `AGENT_WORKING_DIR` | Server process cwd | Agent workspace root. Commands run here, and file APIs use this same directory by default. |
 | `AGENT_FILES_DIR` | `AGENT_WORKING_DIR` | Optional separate root for file APIs. Set this only when you intentionally want managed files isolated from the command cwd. |
-| `AGENT_STATE_DIR` | Sibling `.vertex-sandbox-state/<workspace-id>` | Control-plane root kept outside the executable workspace. The installer uses `~/.local/state/vertex-sandbox`; Docker uses `/var/lib/vertex-sandbox`. |
+| `AGENT_STATE_DIR` | Sibling `.cherry-sandbox-state/<workspace-id>` | Control-plane root kept outside the executable workspace. The installer uses `~/.local/state/cherry-sandbox`; Docker uses `/var/lib/cherry-sandbox`. |
 | `AGENT_RUNS_DIR` | `<state>/runs` | Optional override for persistent metadata, event logs, and results for background sandbox Agent runs. Keep it outside `AGENT_WORKING_DIR`. |
 | `AGENT_RUN_IDLE_TIMEOUT_MS` | `120000` | Fail a sandbox Agent run that emits no model or tool progress for this many milliseconds (clamped to 30 seconds–30 minutes). |
 | `AGENT_JOBS_DIR` | `<state>/jobs` | Optional override for persistent metadata and bounded logs for managed background commands. Keep it outside `AGENT_WORKING_DIR`. |
@@ -269,7 +269,7 @@ callback resolving to `true` permits that repeated call.
 Browser data lives under the OPFS root:
 
 ```text
-vertex-agent/
+cherry-agent/
   session.json
   sessions/
   memory/

@@ -34,7 +34,7 @@ function inaccessibleDirectory() {
 
 test('workspace file search excludes hidden files and directories by default', async () => {
   const root = directory([
-    ['.vertex-runs', inaccessibleDirectory()],
+    ['.cherry-runs', inaccessibleDirectory()],
     ['.env', file(10, 20)],
     ['src', directory([
       ['.cache', inaccessibleDirectory()],
@@ -73,7 +73,7 @@ test('sandbox file search excludes hidden files and hidden directories by defaul
   const listings = {
     '': {
       children: [
-        { name: '.vertex-runs', path: '.vertex-runs', type: 'directory' },
+        { name: '.cherry-runs', path: '.cherry-runs', type: 'directory' },
         { name: '.env', path: '.env', type: 'file', size: 10 },
         { name: 'src', path: 'src', type: 'directory' },
       ],

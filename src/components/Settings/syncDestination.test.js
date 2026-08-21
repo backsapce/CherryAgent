@@ -11,7 +11,7 @@ const cnameDestination = {
   endpoint: 'https://sync.example.test',
   bucketEndpoint: true,
   bucket: '',
-  prefix: 'vertex-agent',
+  prefix: 'cherry-agent',
   manifestMode: 'conditional',
 };
 

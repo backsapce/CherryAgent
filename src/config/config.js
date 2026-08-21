@@ -1,5 +1,5 @@
 /**
- * Config Adapter for Vertex Agent.
+ * Config Adapter for Cherry Agent.
  *
  * Central configuration proxy that reads/writes a `config.yaml` file in OPFS.
  * All modules access configuration through this adapter so that changes
@@ -29,7 +29,7 @@ import { notifyOpfsMutation } from '../vfs/opfs.js';
 
 // ─── OPFS helpers ───────────────────────────────────────────────────────────
 
-const ROOT_DIR = 'vertex-agent';
+const ROOT_DIR = 'cherry-agent';
 const CONFIG_FILE = 'config.yaml';
 
 async function getRootDir() {
