@@ -316,12 +316,16 @@ function compressImage(file) {
 const ContextBudget = ({ messages, llmConfig }) => {
   // Check if the last assistant message has real usage data from the API
   const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant' && m.usage);
-  const contextWindow = Number(llmConfig?.contextWindow);
-  const total = Number.isFinite(contextWindow) && contextWindow > 0 ? contextWindow : null;
+  const usage = lastAssistant?.usage;
+  // Prefer the window recorded by the run itself (usage.content_len): the
+  // active profile may have changed since the message was produced.
+  const runWindow = Number(usage?.content_len);
+  const configWindow = Number(llmConfig?.contextWindow);
+  const total = [runWindow, configWindow].find((v) => Number.isFinite(v) && v > 0) ?? null;
 
   let used = null;
-  if (total && lastAssistant?.usage) {
-    const u = lastAssistant.usage;
+  if (total && usage) {
+    const u = usage;
     used = u.total_tokens
       || (u.prompt_tokens || 0) + (u.completion_tokens || u.output_tokens || 0)
       || (u.input_tokens || 0) + (u.output_tokens || 0);

@@ -25,7 +25,7 @@ import qwen from './providers/qwen.js';
 import deepseek from './providers/deepseek.js';
 import customOpenai from './providers/custom-openai.js';
 import { loadSettings, saveSettings } from './settings.js';
-import { getModelContextWindowFallback } from './contextWindow.js';
+import { getStaticContextWindow } from './contextWindow.js';
 import { jsonSchema, streamText, tool } from 'ai';
 import { createLanguageModel, normalizeAiUsage, toModelMessages } from './ai.js';
 import {
@@ -142,7 +142,7 @@ function publicLlm(llmConfig) {
   const model = llmConfig.model || adapter?.defaultModel || null;
   const contextWindow = llmConfig.contextWindow
     || (providerConfig?.type && model
-      ? getModelContextWindowFallback(providerConfig.type, model)
+      ? getStaticContextWindow(providerConfig.type, model)
       : null);
   return {
     id: llmConfig.id,
@@ -248,10 +248,10 @@ async function resolveContextWindow(providerId, modelId) {
   try {
     const catalog = await loadModelsDevCatalog();
     return findModelsDevContextWindow(catalog, providerId, modelId)
-      || getModelContextWindowFallback(providerId, modelId);
+      || getStaticContextWindow(providerId, modelId);
   } catch (err) {
     console.warn('Failed to fetch model context window from models.dev:', err.message);
-    return getModelContextWindowFallback(providerId, modelId);
+    return getStaticContextWindow(providerId, modelId);
   }
 }
 
