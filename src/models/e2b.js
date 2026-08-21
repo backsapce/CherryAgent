@@ -2,7 +2,7 @@
  * E2B cloud sandbox integration using the official E2B SDK.
  *
  * Flow: user provides API key -> find/create sandbox with metadata tag -> execute commands.
- * Sandbox is reused across sessions via metadata filter (vertexsandbox + random ID).
+ * Sandbox is reused across sessions via metadata filter (cherrysandbox + random ID).
  * Commands are sent via E2B's WebSocket protocol (browser-compatible).
  */
 
@@ -10,7 +10,7 @@ import config from '../config/config.js';
 import { Sandbox } from 'e2b';
 
 const E2B_TEMPLATE = 'base';
-const E2B_META_KEY = 'vertexsandbox';
+const E2B_META_KEY = 'cherrysandbox';
 const E2B_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 const E2B_RECURSIVE_LIST_DEPTH = 64;
 
@@ -22,10 +22,10 @@ const E2B_RECURSIVE_LIST_DEPTH = 64;
  */
 function getOrCreateId() {
   if (typeof localStorage === 'undefined') return crypto.randomUUID();
-  let id = localStorage.getItem('e2b_vertex_id');
+  let id = localStorage.getItem('e2b_cherry_id');
   if (!id) {
     id = crypto.randomUUID();
-    localStorage.setItem('e2b_vertex_id', id);
+    localStorage.setItem('e2b_cherry_id', id);
   }
   return id;
 }

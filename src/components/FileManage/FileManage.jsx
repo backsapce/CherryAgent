@@ -20,7 +20,7 @@ import './FileManage.css';
 const MOBILE_BREAKPOINT = 768;
 
 const ROOT_ID = 'root';
-const FILE_MANAGER_DRAG_TYPE = 'application/x-vertex-filemanager-item';
+const FILE_MANAGER_DRAG_TYPE = 'application/x-cherry-filemanager-item';
 
 function getTreeItemPath(parentDir, name) {
   return joinFileManagerPath(parentDir, name);

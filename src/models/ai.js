@@ -20,7 +20,7 @@ const DEFAULT_BASE_URLS = {
 };
 
 /**
- * Create an AI SDK language model from a saved VertexAgent profile.
+ * Create an AI SDK language model from a saved CherryAgent profile.
  *
  * The application intentionally creates a provider per request: profiles can
  * change at runtime and each request must use the selected session profile.
@@ -58,8 +58,8 @@ export function createLanguageModel(config = {}) {
         baseUrl,
         model,
         headers: {
-          'HTTP-Referer': globalThis.location?.href || 'https://vertex-agent.local',
-          'X-Title': 'Vertex Agent',
+          'HTTP-Referer': globalThis.location?.href || 'https://cherry-agent.local',
+          'X-Title': 'Cherry Agent',
         },
       });
     case 'qwen':
@@ -71,7 +71,7 @@ export function createLanguageModel(config = {}) {
   }
 }
 
-/** Convert AI SDK usage into the persisted VertexAgent usage shape. */
+/** Convert AI SDK usage into the persisted CherryAgent usage shape. */
 export function normalizeAiUsage(usage) {
   const prompt = numberOrZero(usage?.inputTokens ?? usage?.prompt_tokens ?? usage?.input_tokens);
   const completion = numberOrZero(usage?.outputTokens ?? usage?.completion_tokens ?? usage?.output_tokens);
@@ -83,7 +83,7 @@ export function normalizeAiUsage(usage) {
   };
 }
 
-/** Convert VertexAgent's persisted message shape into AI SDK ModelMessages. */
+/** Convert CherryAgent's persisted message shape into AI SDK ModelMessages. */
 export function toModelMessages(messages = []) {
   return messages
     .filter((message) => message?.role === 'system' || message?.role === 'user' || message?.role === 'assistant')

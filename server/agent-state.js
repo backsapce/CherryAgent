@@ -67,13 +67,13 @@ export function resolveAgentStatePaths({
     env.AGENT_STATE_DIR
       || join(
         dirname(canonicalWorkspace),
-        '.vertex-sandbox-state',
+        '.cherry-sandbox-state',
         safeStateKey(stateKeyWorkspace)
       )
   );
   const legacyTokenFiles = [...new Set([
-    join(resolve(legacyCwd), '.vertex-token'),
-    join(workspace, '.vertex-token'),
+    join(resolve(legacyCwd), '.cherry-token'),
+    join(workspace, '.cherry-token'),
   ])];
   return {
     workspaceDir: workspace,
@@ -81,10 +81,10 @@ export function resolveAgentStatePaths({
     tokenFile: resolve(env.AGENT_TOKEN_FILE || join(stateDir, 'tokens')),
     runsDir: resolve(env.AGENT_RUNS_DIR || join(stateDir, 'runs')),
     jobsDir: resolve(env.AGENT_JOBS_DIR || join(stateDir, 'jobs')),
-    legacyTokenFile: join(workspace, '.vertex-token'),
+    legacyTokenFile: join(workspace, '.cherry-token'),
     legacyTokenFiles,
-    legacyRunsDir: join(workspace, '.vertex-runs'),
-    legacyJobsDir: join(workspace, '.vertex-jobs'),
+    legacyRunsDir: join(workspace, '.cherry-runs'),
+    legacyJobsDir: join(workspace, '.cherry-jobs'),
     migrateToken: !env.AGENT_TOKEN_FILE,
     migrateRuns: !env.AGENT_RUNS_DIR,
     migrateJobs: !env.AGENT_JOBS_DIR,

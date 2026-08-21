@@ -705,7 +705,7 @@ export function createS3Backend(config, dependencies = {}) {
 
   return {
     async test(key = defaultProbeKey(normalized)) {
-      const probe = new TextEncoder().encode(`vertex-agent-sync-probe:${key}`);
+      const probe = new TextEncoder().encode(`cherry-agent-sync-probe:${key}`);
       let uploaded = false;
       try {
         // The probe key is random, so a conditional header adds no practical

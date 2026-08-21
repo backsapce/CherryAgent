@@ -1,6 +1,6 @@
 {
-    "name": "Vertex Agent",
-    "short_name": "VertexAgent",
+    "name": "Cherry Agent",
+    "short_name": "CherryAgent",
     "description": "AI agent running purely in your browser",
     "start_url": "./",
     "display": "standalone",

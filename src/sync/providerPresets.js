@@ -38,7 +38,7 @@ export function validateSyncPrefix(prefix, providerPreset = 's3') {
     + utf8ByteLength(LONGEST_MANAGED_OBJECT_SUFFIX);
   if (requiredBytes > maximumBytes) {
     throw new RangeError(
-      'Object storage prefix is too long to fit VertexAgent sync keys within '
+      'Object storage prefix is too long to fit CherryAgent sync keys within '
       + `${preset === 'aliyun-oss' ? "OSS's 1,023" : "S3's 1,024"} UTF-8-byte object-key limit`
     );
   }

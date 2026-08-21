@@ -1,7 +1,7 @@
 {
     "app": {
         "loading": "加载中...",
-        "name": "VertexAgent",
+        "name": "CherryAgent",
         "tagline": "完全在浏览器中运行的 AI 助手",
         "sendHint": "发送消息开始会话",
         "newSession": "新会话",
@@ -19,7 +19,7 @@
     },
     "message": {
         "you": "你",
-        "assistant": "Vertex Agent",
+        "assistant": "Cherry Agent",
         "thinking": "思考中",
         "thinkingRound": "第 {round} 轮思考中",
         "thoughtFor": "已思考 {seconds}",
@@ -159,7 +159,7 @@
         "hint": "输入沙箱服务器的主机 URL。服务器会在控制台打印连接令牌用于认证。",
         "alreadyAdded": "该沙箱已添加。",
         "connectFailed": "无法连接。请确保沙箱服务器正在运行。",
-        "modeServer": "Vertex 沙箱",
+        "modeServer": "Cherry 沙箱",
         "modeE2b": "E2B 云端",
         "e2bNotStarted": "沙箱未启动"
     },
@@ -184,7 +184,7 @@
         "title": "数据管理",
         "desc": "将所有会话和设置导出为 zip 文件，或导入之前导出的备份。",
         "storageTitle": "浏览器文件系统",
-        "storageDesc": "此浏览器中存储的 VertexAgent 数据总量。",
+        "storageDesc": "此浏览器中存储的 CherryAgent 数据总量。",
         "storageLoading": "正在计算...",
         "storageError": "无法计算存储大小。",
         "storageFiles": "文件数：{count}",
@@ -303,7 +303,7 @@
         "runtime": "Agent 运行时",
         "browserRuntime": "浏览器（默认）",
         "sandboxRuntime": "Sandbox（后台运行）",
-        "runtimeNeedsSandbox": "Sandbox 运行时需要选择一个 VertexAgent agent server。",
+        "runtimeNeedsSandbox": "Sandbox 运行时需要选择一个 CherryAgent agent server。",
         "commandOnly": "仅命令执行",
         "sandbox": "沙箱",
         "noSandbox": "不使用沙箱"

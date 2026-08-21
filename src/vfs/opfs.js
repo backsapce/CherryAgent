@@ -1,5 +1,5 @@
 /**
- * OPFS-based Virtual File System for Vertex Agent
+ * OPFS-based Virtual File System for Cherry Agent
  * Uses the Origin Private File System to persist data in the browser.
  */
 
@@ -8,7 +8,7 @@ import yaml from 'js-yaml';
 import { getWorkspaceDirName } from '../agents/agents.js';
 import { reconcileSessionRecoveryJournal } from '../sessionRefresh.js';
 
-const ROOT_DIR = 'vertex-agent';
+const ROOT_DIR = 'cherry-agent';
 const SYNC_DIR = '.sync';
 
 export const ZIP_IMPORT_MAX_ENTRIES = 10_000;

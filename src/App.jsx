@@ -112,7 +112,7 @@ function sessionHasRunningRemote(sessions, sessionId) {
 const AGENT_SYSTEM_PROMPT = `You have access to commands, browser-workspace files, sandbox-runtime files, memory, skills, and focused sub-agent delegation.
 
 Filesystem model:
-- VertexAgent state lives in browser OPFS, but browser file tools do NOT expose the OPFS root.
+- CherryAgent state lives in browser OPFS, but browser file tools do NOT expose the OPFS root.
 - Browser file tools can read/write only the active agent's own persistent files area: workspace/<active-agent>/files/.
 - Browser file tools cannot access other agents, OPFS root files, AGENTS.md, memory files, or skill files by path.
 - The skill catalog is merged in order from OPFS global skills, active OPFS workspace skills, then selected agent skills; a later same-named skill overrides an earlier one.
@@ -1458,7 +1458,7 @@ function App() {
           run.remoteRun = { id: opts.resumeRunId, url: sandboxUrl };
         }
         if (!sandboxUrl || sandboxUrl === E2B_AGENT_ID) {
-          const error = new Error('Sandbox runtime requires a connected VertexAgent agent server; direct E2B sandboxes currently provide command execution only.');
+          const error = new Error('Sandbox runtime requires a connected CherryAgent agent server; direct E2B sandboxes currently provide command execution only.');
           error.code = 'AGENT_RUN_CONFIGURATION_ERROR';
           throw error;
         }
@@ -2761,7 +2761,7 @@ function App() {
       await waitForSyncIdle();
       const blob = await exportToZip({ materializeSessionRecovery: true });
       downloadBlobFile(
-        `vertex-agent-recovery-${new Date().toISOString().slice(0, 10)}.zip`,
+        `cherry-agent-recovery-${new Date().toISOString().slice(0, 10)}.zip`,
         blob
       );
     } catch (error) {
@@ -2776,7 +2776,7 @@ function App() {
   const handleStartupFactoryReset = useCallback(async () => {
     if (startupRecoveryBusyRef.current) return;
     if (!window.confirm(
-      'Factory reset permanently deletes all local VertexAgent data. '
+      'Factory reset permanently deletes all local CherryAgent data. '
       + 'Export a recovery backup first if you may need this data. Continue?'
     )) return;
 

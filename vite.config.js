@@ -7,7 +7,7 @@ import { resolve, join, relative } from 'path'
 const { VITE_BASE } = process.env
 
 // GitHub Pages base path — set via VITE_BASE env var.
-//   VITE_BASE=/VertexAgent/ npm run build:pages → GitHub Pages
+//   VITE_BASE=/CherryAgent/ npm run build:pages → GitHub Pages
 //   npm run build                                  → normal (no prefix)
 const GH_PAGES_BASE = VITE_BASE || '/'
 
@@ -41,7 +41,7 @@ function swPrecachePlugin() {
 
       // Read the sw.js template from public/ and replace placeholders
       const swTemplate = readFileSync(resolve('public/sw.js'), 'utf-8')
-      const cacheVersion = `vertex-agent-${Date.now()}`
+      const cacheVersion = `cherry-agent-${Date.now()}`
       const swContent = swTemplate
         .replace(
           /const CACHE_NAME = '[^']*'/,

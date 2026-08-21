@@ -126,7 +126,7 @@ function wrapAgentNetworkError(error, label, endpoint) {
     || !/failed to fetch|fetch failed|networkerror|load failed/i.test(String(error?.message || ''))
   ) return error;
   const wrapped = new Error(
-    `${label} could not reach ${endpoint} (${error.message}). Check that vertex-sandbox is running, the URL uses compatible HTTPS, AGENT_ALLOWED_ORIGINS permits this page, and the browser granted Local Network Access.`
+    `${label} could not reach ${endpoint} (${error.message}). Check that cherry-sandbox is running, the URL uses compatible HTTPS, AGENT_ALLOWED_ORIGINS permits this page, and the browser granted Local Network Access.`
   );
   wrapped.name = 'AgentRuntimeNetworkError';
   wrapped.code = 'AGENT_RUNTIME_NETWORK_ERROR';
@@ -297,7 +297,7 @@ export async function executeCommand(cmd, url, opts = {}) {
 
 function assertRemoteAgentRuntime(url) {
   if (!url || url === E2B_AGENT_ID) {
-    throw new Error('Sandbox runtime requires an authenticated VertexAgent agent server. Direct E2B command sandboxes do not expose the background run API.');
+    throw new Error('Sandbox runtime requires an authenticated CherryAgent agent server. Direct E2B command sandboxes do not expose the background run API.');
   }
 }
 
@@ -323,7 +323,7 @@ async function assertAgentRunProtocol(url, controls) {
       const protocol = Number(data.capabilities?.agentRunProtocol) || 0;
       if (protocol < REQUIRED_AGENT_RUN_PROTOCOL) {
         const error = new Error(
-          `Sandbox runtime is outdated (agent run protocol ${protocol || 'missing'}; ${REQUIRED_AGENT_RUN_PROTOCOL} required). Reinstall and restart vertex-sandbox.`
+          `Sandbox runtime is outdated (agent run protocol ${protocol || 'missing'}; ${REQUIRED_AGENT_RUN_PROTOCOL} required). Reinstall and restart cherry-sandbox.`
         );
         error.code = 'AGENT_RUN_PROTOCOL_OUTDATED';
         throw error;
@@ -441,7 +441,7 @@ export function abortRemoteAgentRun(url, runId, signalOrOptions) {
 
 function assertManagedCommandRuntime(url) {
   if (!url || url === E2B_AGENT_ID) {
-    throw new Error('Managed background commands require a connected VertexAgent agent server.');
+    throw new Error('Managed background commands require a connected CherryAgent agent server.');
   }
 }
 

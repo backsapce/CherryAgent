@@ -1,7 +1,7 @@
 {
     "app": {
         "loading": "Loading...",
-        "name": "VertexAgent",
+        "name": "CherryAgent",
         "tagline": "AI agent running purely in your browser",
         "sendHint": "Send a message to get started",
         "newSession": "New Session",
@@ -19,7 +19,7 @@
     },
     "message": {
         "you": "You",
-        "assistant": "Vertex Agent",
+        "assistant": "Cherry Agent",
         "thinking": "Thinking",
         "thinkingRound": "Thinking · round {round}",
         "thoughtFor": "Thought for {seconds}",
@@ -159,7 +159,7 @@
         "hint": "Enter the host URL of a sandbox server. The server will print a connect token to its console for authentication.",
         "alreadyAdded": "This sandbox is already added.",
         "connectFailed": "Could not connect. Make sure the sandbox server is running.",
-        "modeServer": "Vertex Sandbox",
+        "modeServer": "Cherry Sandbox",
         "modeE2b": "E2B Cloud",
         "e2bNotStarted": "sandbox not started"
     },
@@ -184,7 +184,7 @@
         "title": "Data Management",
         "desc": "Export all your sessions and settings to a zip file, or import a previously exported backup.",
         "storageTitle": "Browser File System",
-        "storageDesc": "Total VertexAgent data stored in this browser.",
+        "storageDesc": "Total CherryAgent data stored in this browser.",
         "storageLoading": "Calculating...",
         "storageError": "Unable to calculate storage size.",
         "storageFiles": "Files: {count}",
@@ -303,7 +303,7 @@
         "runtime": "Agent runtime",
         "browserRuntime": "Browser (default)",
         "sandboxRuntime": "Sandbox (background)",
-        "runtimeNeedsSandbox": "Select a VertexAgent agent server for sandbox runtime.",
+        "runtimeNeedsSandbox": "Select a CherryAgent agent server for sandbox runtime.",
         "commandOnly": "commands only",
         "sandbox": "Sandbox",
         "noSandbox": "Do not use sandbox"

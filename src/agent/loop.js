@@ -2,7 +2,7 @@
  * Agent loop powered by Vercel AI SDK.
  *
  * `streamText` owns the model -> tool -> model loop. This module is the thin
- * VertexAgent adapter that provides its tools, context packing, bounded loop
+ * CherryAgent adapter that provides its tools, context packing, bounded loop
  * policy, and a UI-safe event stream derived from AI SDK's `fullStream`.
  */
 
@@ -30,8 +30,8 @@ const DEFAULT_SANDBOX_MODEL_TIMEOUT = Object.freeze({
 });
 const MAX_CONTINUATION_GUARDS = 2;
 const STREAMING_TOOL_OUTPUT_MAX_CHARS = 80_000;
-const WAKEUP_SCHEDULED_CONTROL_CODE = 'VERTEX_WAKEUP_SCHEDULED';
-const WAKEUP_SCHEDULED_CONTROL_BRAND = Symbol('vertex-wakeup-scheduled');
+const WAKEUP_SCHEDULED_CONTROL_CODE = 'CHERRY_WAKEUP_SCHEDULED';
+const WAKEUP_SCHEDULED_CONTROL_BRAND = Symbol('cherry-wakeup-scheduled');
 
 const CONTINUATION_INTENT_RE =
   /\b(?:wait(?:ing)?|poll|check(?:ing)?|download(?:ing)?|compare|continue|next step|not (?:done|finished|complete)|after .*complete|once .*complete)\b|(?:等待|生成完成后|完成后|下载|对比|继续|下一步|稍后|轮生成任务)/i;

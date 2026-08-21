@@ -1,18 +1,18 @@
 #!/usr/bin/env sh
 set -e
 
-# ─── Vertex Sandbox npm Installer ───────────────────────────────────────────
+# ─── Cherry Sandbox npm Installer ───────────────────────────────────────────
 # Installs the sandbox runtime from the GitHub repo and keeps it running with
 # PM2. This path is useful before the sandbox runtime is published to npm.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/backsapce/VertexAgent/main/script/install_sandbox_npm.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/backsapce/CherryAgent/main/script/install_sandbox_npm.sh | sh
 # ─────────────────────────────────────────────────────────────────────────────
 
-PACKAGE_URL="${VERTEX_SANDBOX_PACKAGE:-github:backsapce/VertexAgent}"
-PM2_APP_NAME="${VERTEX_SANDBOX_PM2_NAME:-vertex-sandbox}"
-WORKSPACE_DIR="${VERTEX_SANDBOX_WORKDIR:-$HOME/vertex-workspace}"
-STATE_DIR="${VERTEX_SANDBOX_STATE_DIR:-$HOME/.local/state/vertex-sandbox}"
+PACKAGE_URL="${CHERRY_SANDBOX_PACKAGE:-github:backsapce/CherryAgent}"
+PM2_APP_NAME="${CHERRY_SANDBOX_PM2_NAME:-cherry-sandbox}"
+WORKSPACE_DIR="${CHERRY_SANDBOX_WORKDIR:-$HOME/cherry-workspace}"
+STATE_DIR="${CHERRY_SANDBOX_STATE_DIR:-$HOME/.local/state/cherry-sandbox}"
 REQUIRED_NODE_MAJOR=18
 
 info()  { printf '\033[1;34m[info]\033[0m  %s\n' "$1"; }
@@ -95,10 +95,10 @@ ensure_pm2() {
 }
 
 install_sandbox_package() {
-  info "Installing Vertex Sandbox runtime from $PACKAGE_URL..."
+  info "Installing Cherry Sandbox runtime from $PACKAGE_URL..."
   npm install -g "$PACKAGE_URL"
-  has_cmd vertex-sandbox || error "vertex-sandbox binary was not found after install."
-  ok "Vertex Sandbox runtime installed: $(command -v vertex-sandbox)"
+  has_cmd cherry-sandbox || error "cherry-sandbox binary was not found after install."
+  ok "Cherry Sandbox runtime installed: $(command -v cherry-sandbox)"
 }
 
 start_pm2() {
@@ -109,7 +109,7 @@ start_pm2() {
 
   info "Starting $PM2_APP_NAME with PM2..."
   pm2 delete "$PM2_APP_NAME" >/dev/null 2>&1 || true
-  pm2 start "$(command -v vertex-sandbox)" \
+  pm2 start "$(command -v cherry-sandbox)" \
     --name "$PM2_APP_NAME" \
     --cwd "$AGENT_WORKING_DIR" \
     --update-env \
@@ -121,7 +121,7 @@ start_pm2() {
 print_summary() {
   echo ""
   echo "============================================================"
-  echo "  Vertex Sandbox installed and running with PM2"
+  echo "  Cherry Sandbox installed and running with PM2"
   echo "============================================================"
   echo ""
   echo "  Process:"
@@ -137,7 +137,7 @@ print_summary() {
   echo "  Health check:   http://<host>:${AGENT_PORT:-3099}/agent/health"
   echo ""
   echo "  Override package source:"
-  echo "    VERTEX_SANDBOX_PACKAGE=github:user/repo#branch sh install_sandbox_npm.sh"
+  echo "    CHERRY_SANDBOX_PACKAGE=github:user/repo#branch sh install_sandbox_npm.sh"
   echo ""
   echo "============================================================"
   echo ""
@@ -145,7 +145,7 @@ print_summary() {
 
 main() {
   echo ""
-  info "Starting Vertex Sandbox npm installer..."
+  info "Starting Cherry Sandbox npm installer..."
   echo ""
   detect_os
   ensure_node

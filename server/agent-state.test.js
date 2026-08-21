@@ -22,7 +22,7 @@ import {
 } from './agent-state.js';
 
 test('default sandbox control state is outside the executable workspace', () => {
-  const root = mkdtempSync(join(tmpdir(), 'vertex-agent-state-paths-'));
+  const root = mkdtempSync(join(tmpdir(), 'cherry-agent-state-paths-'));
   try {
     const workspaceDir = join(root, 'workspace');
     const paths = resolveAgentStatePaths({ env: {}, workspaceDir });
@@ -39,7 +39,7 @@ test('default sandbox control state is outside the executable workspace', () => 
 test('workspace symlink aliases resolve to the same default control state', {
   skip: process.platform === 'win32',
 }, () => {
-  const root = mkdtempSync(join(tmpdir(), 'vertex-agent-state-alias-'));
+  const root = mkdtempSync(join(tmpdir(), 'cherry-agent-state-alias-'));
   try {
     const workspaceDir = join(root, 'workspace');
     const workspaceAlias = join(root, 'workspace-alias');
@@ -58,7 +58,7 @@ test('workspace symlink aliases resolve to the same default control state', {
 test('missing workspaces use their nearest real parent for the default state key', {
   skip: process.platform === 'win32',
 }, () => {
-  const root = mkdtempSync(join(tmpdir(), 'vertex-agent-state-missing-alias-'));
+  const root = mkdtempSync(join(tmpdir(), 'cherry-agent-state-missing-alias-'));
   try {
     const realParent = join(root, 'real-parent');
     const aliasParent = join(root, 'alias-parent');
@@ -80,15 +80,15 @@ test('missing workspaces use their nearest real parent for the default state key
 });
 
 test('legacy workspace state is copied into isolated control storage once', () => {
-  const root = mkdtempSync(join(tmpdir(), 'vertex-agent-state-migrate-'));
+  const root = mkdtempSync(join(tmpdir(), 'cherry-agent-state-migrate-'));
   try {
     const workspaceDir = join(root, 'workspace');
     const stateDir = join(root, 'control');
-    mkdirSync(join(workspaceDir, '.vertex-runs'), { recursive: true });
-    mkdirSync(join(workspaceDir, '.vertex-jobs'), { recursive: true });
-    writeFileSync(join(workspaceDir, '.vertex-token'), 'token-one\n');
-    writeFileSync(join(workspaceDir, '.vertex-runs', 'run-one.json'), '{"id":"run-one"}');
-    writeFileSync(join(workspaceDir, '.vertex-jobs', 'job-one.json'), '{"id":"job-one"}');
+    mkdirSync(join(workspaceDir, '.cherry-runs'), { recursive: true });
+    mkdirSync(join(workspaceDir, '.cherry-jobs'), { recursive: true });
+    writeFileSync(join(workspaceDir, '.cherry-token'), 'token-one\n');
+    writeFileSync(join(workspaceDir, '.cherry-runs', 'run-one.json'), '{"id":"run-one"}');
+    writeFileSync(join(workspaceDir, '.cherry-jobs', 'job-one.json'), '{"id":"job-one"}');
 
     const paths = resolveAgentStatePaths({
       env: { AGENT_STATE_DIR: stateDir },
@@ -116,13 +116,13 @@ test('legacy workspace state is copied into isolated control storage once', () =
 });
 
 test('a failed legacy copy stops startup without suppressing the next retry', () => {
-  const root = mkdtempSync(join(tmpdir(), 'vertex-agent-state-retry-'));
+  const root = mkdtempSync(join(tmpdir(), 'cherry-agent-state-retry-'));
   try {
     const workspaceDir = join(root, 'workspace');
     const stateDir = join(root, 'control');
-    mkdirSync(join(workspaceDir, '.vertex-runs'), { recursive: true });
-    writeFileSync(join(workspaceDir, '.vertex-token'), 'token-one\n');
-    writeFileSync(join(workspaceDir, '.vertex-runs', 'run-one.json'), '{"id":"run-one"}');
+    mkdirSync(join(workspaceDir, '.cherry-runs'), { recursive: true });
+    writeFileSync(join(workspaceDir, '.cherry-token'), 'token-one\n');
+    writeFileSync(join(workspaceDir, '.cherry-runs', 'run-one.json'), '{"id":"run-one"}');
 
     const paths = resolveAgentStatePaths({
       env: { AGENT_STATE_DIR: stateDir },
@@ -156,11 +156,11 @@ test('a failed legacy copy stops startup without suppressing the next retry', ()
 test('nested legacy symlinks fail closed and remain retryable', {
   skip: process.platform === 'win32',
 }, () => {
-  const root = mkdtempSync(join(tmpdir(), 'vertex-agent-state-symlink-'));
+  const root = mkdtempSync(join(tmpdir(), 'cherry-agent-state-symlink-'));
   try {
     const workspaceDir = join(root, 'workspace');
     const stateDir = join(root, 'control');
-    const legacyRunsDir = join(workspaceDir, '.vertex-runs');
+    const legacyRunsDir = join(workspaceDir, '.cherry-runs');
     const linkedRun = join(legacyRunsDir, 'run-one.json');
     const externalRun = join(root, 'external-run.json');
     mkdirSync(legacyRunsDir, { recursive: true });
@@ -194,15 +194,15 @@ test('nested legacy symlinks fail closed and remain retryable', {
 });
 
 test('legacy token candidates cover both the old process cwd and workspace defaults', () => {
-  const root = mkdtempSync(join(tmpdir(), 'vertex-agent-state-token-cwd-'));
+  const root = mkdtempSync(join(tmpdir(), 'cherry-agent-state-token-cwd-'));
   try {
     const legacyCwd = join(root, 'old-cwd');
     const workspaceDir = join(root, 'workspace');
     const stateDir = join(root, 'control');
     mkdirSync(legacyCwd);
     mkdirSync(workspaceDir);
-    writeFileSync(join(legacyCwd, '.vertex-token'), 'cwd-token\n');
-    writeFileSync(join(workspaceDir, '.vertex-token'), 'workspace-token\n');
+    writeFileSync(join(legacyCwd, '.cherry-token'), 'cwd-token\n');
+    writeFileSync(join(workspaceDir, '.cherry-token'), 'workspace-token\n');
 
     const paths = resolveAgentStatePaths({
       env: { AGENT_STATE_DIR: stateDir },
@@ -223,10 +223,10 @@ test('legacy token candidates cover both the old process cwd and workspace defau
 test('physical target containment is rejected before copying legacy state', {
   skip: process.platform === 'win32',
 }, () => {
-  const root = mkdtempSync(join(tmpdir(), 'vertex-agent-state-contained-alias-'));
+  const root = mkdtempSync(join(tmpdir(), 'cherry-agent-state-contained-alias-'));
   try {
     const workspaceDir = join(root, 'workspace');
-    const legacyRunsDir = join(workspaceDir, '.vertex-runs');
+    const legacyRunsDir = join(workspaceDir, '.cherry-runs');
     const physicalStateDir = join(legacyRunsDir, 'control');
     const stateAlias = join(root, 'control-alias');
     mkdirSync(physicalStateDir, { recursive: true });
@@ -262,12 +262,12 @@ test('physical target containment is rejected before copying legacy state', {
 });
 
 test('an atomic concurrent token migration winner is never overwritten', () => {
-  const root = mkdtempSync(join(tmpdir(), 'vertex-agent-state-token-race-'));
+  const root = mkdtempSync(join(tmpdir(), 'cherry-agent-state-token-race-'));
   try {
     const workspaceDir = join(root, 'workspace');
     const stateDir = join(root, 'control');
     mkdirSync(workspaceDir);
-    writeFileSync(join(workspaceDir, '.vertex-token'), 'legacy-token\n');
+    writeFileSync(join(workspaceDir, '.cherry-token'), 'legacy-token\n');
     const paths = resolveAgentStatePaths({
       env: {
         AGENT_STATE_DIR: stateDir,
@@ -297,13 +297,13 @@ test('an atomic concurrent token migration winner is never overwritten', () => {
 });
 
 test('an existing target with the wrong type fails closed', () => {
-  const root = mkdtempSync(join(tmpdir(), 'vertex-agent-state-wrong-target-'));
+  const root = mkdtempSync(join(tmpdir(), 'cherry-agent-state-wrong-target-'));
   try {
     const workspaceDir = join(root, 'workspace');
     const stateDir = join(root, 'control');
-    mkdirSync(join(workspaceDir, '.vertex-runs'), { recursive: true });
+    mkdirSync(join(workspaceDir, '.cherry-runs'), { recursive: true });
     mkdirSync(stateDir);
-    writeFileSync(join(workspaceDir, '.vertex-runs', 'run-one.json'), '{}');
+    writeFileSync(join(workspaceDir, '.cherry-runs', 'run-one.json'), '{}');
     const paths = resolveAgentStatePaths({
       env: {
         AGENT_STATE_DIR: stateDir,

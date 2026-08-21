@@ -226,7 +226,7 @@ test('sandbox wake-up dispatch delegates scheduling to the run manager', async (
 });
 
 test('sandbox run reuses duplicate wake-ups and replaces a changed request in one turn', async () => {
-  const runsDir = mkdtempSync(join(tmpdir(), 'vertex-runs-'));
+  const runsDir = mkdtempSync(join(tmpdir(), 'cherry-runs-'));
   try {
     const manager = createManager(runsDir, {
       createModel: () => ({}),
@@ -260,7 +260,7 @@ test('sandbox run reuses duplicate wake-ups and replaces a changed request in on
 });
 
 test('sandbox run enters waiting and resumes after a real agent-loop wake-up', async () => {
-  const runsDir = mkdtempSync(join(tmpdir(), 'vertex-runs-'));
+  const runsDir = mkdtempSync(join(tmpdir(), 'cherry-runs-'));
   let releaseWakeup;
   const wakeupGate = new Promise((resolve) => { releaseWakeup = resolve; });
   let modelCallCount = 0;
@@ -349,7 +349,7 @@ test('sandbox run enters waiting and resumes after a real agent-loop wake-up', a
 });
 
 test('a second session cannot disturb a waiting run and wake-up keeps compact tool history', async () => {
-  const runsDir = mkdtempSync(join(tmpdir(), 'vertex-runs-'));
+  const runsDir = mkdtempSync(join(tmpdir(), 'cherry-runs-'));
   const wakeupGate = deferred();
   let firstSessionTurns = 0;
   let resumedMessages = null;
@@ -451,7 +451,7 @@ test('a second session cannot disturb a waiting run and wake-up keeps compact to
 });
 
 test('sandbox run enters waiting when the provider leaves the wake-up stream open', async () => {
-  const runsDir = mkdtempSync(join(tmpdir(), 'vertex-runs-'));
+  const runsDir = mkdtempSync(join(tmpdir(), 'cherry-runs-'));
   const model = new MockLanguageModelV3({
     doStream: async () => ({
       stream: new ReadableStream({
@@ -499,7 +499,7 @@ test('sandbox run enters waiting when the provider leaves the wake-up stream ope
 });
 
 test('schedule_wakeup bypasses a blocking tool in the same model step', async () => {
-  const runsDir = mkdtempSync(join(tmpdir(), 'vertex-runs-'));
+  const runsDir = mkdtempSync(join(tmpdir(), 'cherry-runs-'));
   let commandStarted = false;
   let commandAborted = false;
   const usage = {
@@ -573,7 +573,7 @@ test('schedule_wakeup bypasses a blocking tool in the same model step', async ()
 });
 
 test('late output from a pre-wakeup turn cannot pollute the resumed turn', async () => {
-  const runsDir = mkdtempSync(join(tmpdir(), 'vertex-runs-'));
+  const runsDir = mkdtempSync(join(tmpdir(), 'cherry-runs-'));
   const oldCommandGate = deferred();
   const lateOutputAttempted = deferred();
   let modelCallCount = 0;
@@ -785,7 +785,7 @@ test('sandbox startup snapshot rejects paths outside identity and skills', async
 });
 
 test('sandbox run rejects oversized message content before it is persisted', () => {
-  const runsDir = mkdtempSync(join(tmpdir(), 'vertex-runs-'));
+  const runsDir = mkdtempSync(join(tmpdir(), 'cherry-runs-'));
   try {
     const manager = createManager(runsDir, {
       runAgent: async () => ({ content: 'unreachable' }),
@@ -842,7 +842,7 @@ test('existing sandbox attachments are reused on later runs', async () => {
 });
 
 test('persisted runs and event logs can be recovered after reconnect', () => {
-  const runsDir = mkdtempSync(join(tmpdir(), 'vertex-runs-'));
+  const runsDir = mkdtempSync(join(tmpdir(), 'cherry-runs-'));
   try {
     const run = {
       id: 'run-reconnect',
@@ -868,7 +868,7 @@ test('persisted runs and event logs can be recovered after reconnect', () => {
 });
 
 test('sandbox runs execute concurrently with isolated events, cancellation, and completion', async () => {
-  const runsDir = mkdtempSync(join(tmpdir(), 'vertex-runs-'));
+  const runsDir = mkdtempSync(join(tmpdir(), 'cherry-runs-'));
   const active = new Map();
   let releaseBothStarted;
   const bothStarted = new Promise((resolve) => { releaseBothStarted = resolve; });
@@ -972,7 +972,7 @@ test('sandbox runs execute concurrently with isolated events, cancellation, and 
 });
 
 test('sandbox abort force-terminates and unlocks a session when a provider ignores cancellation', async () => {
-  const runsDir = mkdtempSync(join(tmpdir(), 'vertex-runs-'));
+  const runsDir = mkdtempSync(join(tmpdir(), 'cherry-runs-'));
   try {
     let receivedSignal;
     const manager = createManager(runsDir, {
@@ -1013,7 +1013,7 @@ test('sandbox abort force-terminates and unlocks a session when a provider ignor
 });
 
 test('sandbox run fails and unlocks a session when the provider makes no progress', async () => {
-  const runsDir = mkdtempSync(join(tmpdir(), 'vertex-runs-'));
+  const runsDir = mkdtempSync(join(tmpdir(), 'cherry-runs-'));
   try {
     let receivedSignal;
     const manager = createManager(runsDir, {
@@ -1057,7 +1057,7 @@ test('sandbox run fails and unlocks a session when the provider makes no progres
 });
 
 test('sandbox run reports a provider AbortError as an error without a cancel request', async () => {
-  const runsDir = mkdtempSync(join(tmpdir(), 'vertex-runs-'));
+  const runsDir = mkdtempSync(join(tmpdir(), 'cherry-runs-'));
   try {
     const manager = createManager(runsDir, {
       runAgent() {
@@ -1081,7 +1081,7 @@ test('sandbox run reports a provider AbortError as an error without a cancel req
 });
 
 test('a cancelled sandbox run drops detached late events and cannot become completed', async () => {
-  const runsDir = mkdtempSync(join(tmpdir(), 'vertex-runs-'));
+  const runsDir = mkdtempSync(join(tmpdir(), 'cherry-runs-'));
   try {
     let activeRun;
     const manager = createManager(runsDir, {
@@ -1123,7 +1123,7 @@ test('a cancelled sandbox run drops detached late events and cannot become compl
 });
 
 test('sandbox event logs fail the owning run before consuming unbounded memory', async () => {
-  const runsDir = mkdtempSync(join(tmpdir(), 'vertex-runs-'));
+  const runsDir = mkdtempSync(join(tmpdir(), 'cherry-runs-'));
   try {
     const manager = createManager(runsDir, {
       maxEventBytes: 100,
@@ -1151,7 +1151,7 @@ test('sandbox event logs fail the owning run before consuming unbounded memory',
 });
 
 test('a failed initial persist does not leave a ghost active session run', async () => {
-  const runsDir = mkdtempSync(join(tmpdir(), 'vertex-runs-'));
+  const runsDir = mkdtempSync(join(tmpdir(), 'cherry-runs-'));
   try {
     const manager = createManager(runsDir, {
       runAgent: async () => ({ content: 'done' }),
@@ -1180,7 +1180,7 @@ test('a failed initial persist does not leave a ghost active session run', async
 });
 
 test('a server restart marks an in-flight or waiting run as interrupted', () => {
-  const runsDir = mkdtempSync(join(tmpdir(), 'vertex-runs-'));
+  const runsDir = mkdtempSync(join(tmpdir(), 'cherry-runs-'));
   try {
     writeFileSync(join(runsDir, 'run-active.json'), JSON.stringify({
       id: 'run-active',

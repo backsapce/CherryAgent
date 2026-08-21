@@ -19,7 +19,7 @@ function createManager(directory) {
 }
 
 test('background jobs return immediately and expose incremental logs until completion', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'vertex-command-jobs-'));
+  const directory = mkdtempSync(join(tmpdir(), 'cherry-command-jobs-'));
   try {
     const manager = createManager(directory);
     let state = manager.start(nodeCommand("const fs=require('fs');fs.writeSync(1,'first\\n');setTimeout(()=>fs.writeSync(1,'last\\n'),80)"));
@@ -46,7 +46,7 @@ test('background jobs return immediately and expose incremental logs until compl
 });
 
 test('stopping a background job terminates its process tree', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'vertex-command-stop-'));
+  const directory = mkdtempSync(join(tmpdir(), 'cherry-command-stop-'));
   try {
     const manager = createManager(directory);
     const started = manager.start(nodeCommand('setInterval(()=>{},1000)'));
@@ -60,7 +60,7 @@ test('stopping a background job terminates its process tree', async () => {
 });
 
 test('a restarted manager marks unobserved active jobs as interrupted', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'vertex-command-reload-'));
+  const directory = mkdtempSync(join(tmpdir(), 'cherry-command-reload-'));
   try {
     const fakeExecutor = {
       start() {

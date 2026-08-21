@@ -22,10 +22,10 @@ const MAX_RESPONSE_RESERVE = 24_000;
 const TOKENS_PER_CHAR = 4;
 const MAX_SUMMARY_SOURCE_CHARS = 80_000;
 
-const AGENT_RUNTIME_PROMPT = `You are VertexAgent, an autonomous coding and browser-work agent.
+const AGENT_RUNTIME_PROMPT = `You are CherryAgent, an autonomous coding and browser-work agent.
 
 Filesystem model:
-- Browser OPFS is the durable VertexAgent storage backend, but browser file tools do NOT expose the OPFS root.
+- Browser OPFS is the durable CherryAgent storage backend, but browser file tools do NOT expose the OPFS root.
 - Browser file tools can read/write only the active agent's own files area: workspace/<active-agent>/files/.
 - Browser file tools cannot access other agents, OPFS root files, AGENTS.md, memory files, or skill files by path.
 - The skill catalog is merged in order from OPFS global skills, active OPFS workspace skills, then selected agent skills; a later same-named skill overrides an earlier one.
@@ -47,7 +47,7 @@ Operating rules:
 
 const AGENT_RUNTIME_PROMPT_WITH_COMMANDS = `${AGENT_RUNTIME_PROMPT}\n\n${COMMAND_EXECUTION_GUIDANCE}`;
 
-const SANDBOX_RUNTIME_PROMPT = `You are VertexAgent running entirely inside a persistent sandbox runtime.
+const SANDBOX_RUNTIME_PROMPT = `You are CherryAgent running entirely inside a persistent sandbox runtime.
 
 Runtime isolation:
 - The agent loop, model calls, tool calls, and filesystem operations all run in this sandbox.

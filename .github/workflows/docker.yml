@@ -17,11 +17,11 @@ jobs:
         include:
           - name: frontend
             dockerfile: Dockerfile
-            image: vertex-agent
+            image: cherry-agent
             context: .
           - name: agent
             dockerfile: Dockerfile.sandbox
-            image: vertex-sandbox
+            image: cherry-sandbox
             context: .
     steps:
       - uses: actions/checkout@v4

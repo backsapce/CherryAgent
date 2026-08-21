@@ -62,7 +62,7 @@ test('buildChatDebugExport records active LLM, context estimates, and tool calls
     generatedAt: '2026-06-18T00:00:00.000Z',
   });
 
-  assert.equal(debug.type, 'vertex-agent-chat-debug');
+  assert.equal(debug.type, 'cherry-agent-chat-debug');
   assert.equal(debug.llm.providerName, 'OpenAI');
   assert.equal(debug.agent.hasSandbox, true);
   assert.equal(debug.context.providerUsage.total_tokens, 50);
@@ -85,5 +85,5 @@ test('createChatDebugFilename keeps the export name filesystem friendly', () => 
     new Date('2026-06-18T00:00:00.000Z')
   );
 
-  assert.equal(filename, 'vertex-agent-debug-hello-debug-session-1-2026-06-18T00-00-00-000Z.json');
+  assert.equal(filename, 'cherry-agent-debug-hello-debug-session-1-2026-06-18T00-00-00-000Z.json');
 });

@@ -11,10 +11,10 @@ import {
   readStructuredUpdate,
 } from './yjsMerge.js';
 
-const LEGACY_TYPE = '__vertex_yjs_type__';
-const LEGACY_ORDER = '__vertex_yjs_order__';
-const LEGACY_ITEMS = '__vertex_yjs_items__';
-const LEGACY_VALUE = '__vertex_yjs_value__';
+const LEGACY_TYPE = '__cherry_yjs_type__';
+const LEGACY_ORDER = '__cherry_yjs_order__';
+const LEGACY_ITEMS = '__cherry_yjs_items__';
+const LEGACY_VALUE = '__cherry_yjs_value__';
 
 function legacyYValue(value) {
   if (Array.isArray(value)) {
@@ -274,10 +274,10 @@ test('merged update can reconstruct structured data', () => {
 
 test('forward-compatible tree encoding preserves reserved keys, duplicate identities, and JSON scalars', () => {
   const data = {
-    __vertex_yjs_type__: 'user-owned',
-    __vertex_yjs_order__: ['keep'],
-    __vertex_yjs_items__: { keep: true },
-    __vertex_yjs_value__: null,
+    __cherry_yjs_type__: 'user-owned',
+    __cherry_yjs_order__: ['keep'],
+    __cherry_yjs_items__: { keep: true },
+    __cherry_yjs_value__: null,
     enabled: false,
     count: 0,
     optional: null,

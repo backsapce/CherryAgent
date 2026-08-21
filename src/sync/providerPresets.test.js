@@ -30,7 +30,7 @@ test('sync prefixes are normalized and reserve space for managed object keys', (
   const maxOssPrefixBytes = MAX_OSS_OBJECT_KEY_BYTES - suffixBytes - 1;
   const maxS3CjkCharacters = Math.floor(maxS3PrefixBytes / 3);
 
-  assert.equal(validateSyncPrefix('  /team/vertex/  '), 'team/vertex');
+  assert.equal(validateSyncPrefix('  /team/cherry/  '), 'team/cherry');
   assert.equal(
     validateSyncPrefix('a'.repeat(maxS3PrefixBytes)),
     'a'.repeat(maxS3PrefixBytes)
@@ -63,8 +63,8 @@ test('sync prefixes are normalized and reserve space for managed object keys', (
 
 test('provider normalization returns the canonical prefix', () => {
   assert.equal(
-    normalizeProviderConfig({ providerPreset: 's3', prefix: ' /vertex-agent/ ' }).prefix,
-    'vertex-agent'
+    normalizeProviderConfig({ providerPreset: 's3', prefix: ' /cherry-agent/ ' }).prefix,
+    'cherry-agent'
   );
 });
 

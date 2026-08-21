@@ -210,7 +210,7 @@ const Settings = ({
     endpoint: '',
     region: 'us-east-1',
     bucket: '',
-    prefix: 'vertex-agent',
+    prefix: 'cherry-agent',
     accessKeyId: '',
     secretAccessKey: '',
     sessionToken: '',
@@ -366,7 +366,7 @@ const Settings = ({
       endpoint: endpointForSyncForm(savedSync, providerPreset),
       region: savedSync.region || (providerPreset === 'aliyun-oss' ? 'cn-beijing' : 'us-east-1'),
       bucket: savedSync.bucket || '',
-      prefix: savedSync.prefix || 'vertex-agent',
+      prefix: savedSync.prefix || 'cherry-agent',
       accessKeyId: savedSync.accessKeyId || '',
       secretAccessKey: '',
       sessionToken: '',
@@ -778,7 +778,7 @@ const Settings = ({
       region: syncForm.region.trim() || 'us-east-1',
       bucket: syncForm.bucket.trim(),
       prefix: validateSyncPrefix(
-        syncForm.prefix.trim() || 'vertex-agent',
+        syncForm.prefix.trim() || 'cherry-agent',
         providerPreset
       ),
       accessKeyId: syncForm.accessKeyId.trim(),
@@ -1508,7 +1508,7 @@ const Settings = ({
                         const url = URL.createObjectURL(blob);
                         const a = document.createElement('a');
                         a.href = url;
-                        a.download = `vertex-agent-backup-${new Date().toISOString().slice(0, 10)}.zip`;
+                        a.download = `cherry-agent-backup-${new Date().toISOString().slice(0, 10)}.zip`;
                         document.body.appendChild(a);
                         a.click();
                         document.body.removeChild(a);
@@ -1740,7 +1740,7 @@ const Settings = ({
               <label>{t('syncSettings.prefix')}</label>
               <input
                 type="text"
-                placeholder="vertex-agent"
+                placeholder="cherry-agent"
                 value={syncForm.prefix}
                 onChange={(e) => setSyncForm((f) => ({ ...f, prefix: e.target.value }))}
               />

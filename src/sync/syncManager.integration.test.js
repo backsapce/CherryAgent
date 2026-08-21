@@ -30,7 +30,7 @@ const SYNC_CONFIG = {
   providerPreset: 's3',
   region: 'us-east-1',
   bucket: 'test-bucket',
-  prefix: 'vertex-agent',
+  prefix: 'cherry-agent',
   accessKeyId: 'test-access-key',
   secretAccessKey: 'test-secret-key',
   maxConcurrentRequests: 2,
@@ -1874,7 +1874,7 @@ test('namespace reconciliation never recursively deletes a child created during 
       files: { [rootPath]: remoteEntry },
     });
 
-    const appRoot = await origin.getDirectoryHandle('vertex-agent');
+    const appRoot = await origin.getDirectoryHandle('cherry-agent');
     const filesDirectory = await appRoot.getDirectoryHandle('files');
     const removeEntry = filesDirectory.removeEntry.bind(filesDirectory);
     let injected = false;
@@ -1916,7 +1916,7 @@ test('direct push never recursively deletes a file replaced by a populated direc
     };
     backend.setJson(manifestKey, remote);
 
-    const appRoot = await origin.getDirectoryHandle('vertex-agent');
+    const appRoot = await origin.getDirectoryHandle('cherry-agent');
     const filesDirectory = await appRoot.getDirectoryHandle('files');
     const removeEntry = filesDirectory.removeEntry.bind(filesDirectory);
     let injected = false;

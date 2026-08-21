@@ -1,16 +1,16 @@
 #!/usr/bin/env sh
 set -e
 
-# ─── VertexAgent Server Installer ───────────────────────────────────────────
+# ─── CherryAgent Server Installer ───────────────────────────────────────────
 # Installs the agent server only (no frontend).
 # Suitable for regular servers or E2B sandboxes.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/backsapce/VertexAgent/main/script/install_server.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/backsapce/CherryAgent/main/script/install_server.sh | sh
 # ─────────────────────────────────────────────────────────────────────────────
 
-REPO="https://github.com/backsapce/VertexAgent.git"
-INSTALL_DIR="${VERTEX_AGENT_DIR:-$HOME/.vertex-agent}"
+REPO="https://github.com/backsapce/CherryAgent.git"
+INSTALL_DIR="${CHERRY_AGENT_DIR:-$HOME/.cherry-agent}"
 REQUIRED_NODE_MAJOR=18
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -128,7 +128,7 @@ clone_or_update() {
     cd "$INSTALL_DIR"
     git pull --ff-only || warn "git pull failed — continuing with existing code."
   else
-    info "Cloning VertexAgent into $INSTALL_DIR..."
+    info "Cloning CherryAgent into $INSTALL_DIR..."
     git clone --depth 1 "$REPO" "$INSTALL_DIR"
     cd "$INSTALL_DIR"
   fi
@@ -147,7 +147,7 @@ install_deps() {
 # ─── Create launcher script ─────────────────────────────────────────────────
 
 create_launcher() {
-  LAUNCHER="$INSTALL_DIR/vertex-agent-server"
+  LAUNCHER="$INSTALL_DIR/cherry-agent-server"
   cat > "$LAUNCHER" <<'SCRIPT'
 #!/usr/bin/env sh
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -159,7 +159,7 @@ SCRIPT
   # Symlink into PATH
   BIN_DIR="$HOME/.local/bin"
   mkdir -p "$BIN_DIR"
-  ln -sf "$LAUNCHER" "$BIN_DIR/vertex-agent-server"
+  ln -sf "$LAUNCHER" "$BIN_DIR/cherry-agent-server"
 
   ok "Launcher created at $LAUNCHER"
 
@@ -182,18 +182,18 @@ create_systemd_service() {
     return
   fi
 
-  SERVICE_FILE="/etc/systemd/system/vertex-agent.service"
+  SERVICE_FILE="/etc/systemd/system/cherry-agent.service"
   info "Creating systemd service at $SERVICE_FILE..."
 
   cat > "$SERVICE_FILE" <<EOF
 [Unit]
-Description=VertexAgent Server
+Description=CherryAgent Server
 After=network.target
 
 [Service]
 Type=simple
 User=$USER
-ExecStart=$INSTALL_DIR/vertex-agent-server
+ExecStart=$INSTALL_DIR/cherry-agent-server
 Restart=on-failure
 RestartSec=5
 Environment=AGENT_PORT=\${AGENT_PORT:-3099}
@@ -204,8 +204,8 @@ EOF
 
   ok "Systemd service file created."
   info "Enable and start with:"
-  info "  sudo systemctl enable --now vertex-agent"
-  info "  sudo systemctl status vertex-agent"
+  info "  sudo systemctl enable --now cherry-agent"
+  info "  sudo systemctl status cherry-agent"
 }
 
 # ─── Summary ─────────────────────────────────────────────────────────────────
@@ -213,11 +213,11 @@ EOF
 print_summary() {
   echo ""
   echo "============================================================"
-  echo "  VertexAgent Server installed successfully!"
+  echo "  CherryAgent Server installed successfully!"
   echo "============================================================"
   echo ""
   echo "  Start the server:"
-  echo "    vertex-agent-server"
+  echo "    cherry-agent-server"
   echo ""
   echo "  Or run directly:"
   echo "    cd $INSTALL_DIR"
@@ -227,7 +227,7 @@ print_summary() {
   echo ""
   if has_cmd systemctl; then
     echo "  Systemd service available:"
-    echo "    sudo systemctl enable --now vertex-agent"
+    echo "    sudo systemctl enable --now cherry-agent"
     echo ""
   fi
   echo "  Agent endpoint: http://<host>:3099/agent"
@@ -241,7 +241,7 @@ print_summary() {
 
 main() {
   echo ""
-  info "Starting VertexAgent Server installer..."
+  info "Starting CherryAgent Server installer..."
   echo ""
   detect_os
   ensure_git

@@ -308,14 +308,14 @@ test('backend identity isolates state by destination and normalizes Aliyun defau
     providerPreset: 'aliyun-oss',
     region: 'cn-beijing',
     bucket: 'bucket-a',
-    prefix: '/vertex-agent/',
+    prefix: '/cherry-agent/',
     forcePathStyle: true,
   };
   const derived = syncBackendIdentity(base);
   const explicit = syncBackendIdentity({
     ...base,
     endpoint: 'https://s3.oss-cn-beijing.aliyuncs.com/',
-    prefix: 'vertex-agent',
+    prefix: 'cherry-agent',
     forcePathStyle: false,
   });
   assert.equal(derived, explicit);
@@ -337,7 +337,7 @@ test('bucket endpoint identity ignores the unused bucket label', () => {
     providerPreset: 'custom',
     endpoint: 'https://sync.example.com',
     bucketEndpoint: true,
-    prefix: 'vertex-agent',
+    prefix: 'cherry-agent',
   };
   assert.equal(
     syncBackendIdentity({ ...base, bucket: '' }),
@@ -363,19 +363,19 @@ test('sync paths and manifest object references are constrained to the configure
   }
   assert.throws(() => validateRemoteManifest({
     version: 2,
-    files: { '.sync/state.json': { objectKey: 'vertex-agent/objects/evil' } },
-  }, { prefix: 'vertex-agent' }), /unsafe path/i);
+    files: { '.sync/state.json': { objectKey: 'cherry-agent/objects/evil' } },
+  }, { prefix: 'cherry-agent' }), /unsafe path/i);
   assert.throws(() => validateRemoteManifest({
     version: 2,
     files: { 'files/a.md': { objectKey: 'other-prefix/objects/a' } },
-  }, { prefix: 'vertex-agent' }), /outside the configured prefix/i);
+  }, { prefix: 'cherry-agent' }), /outside the configured prefix/i);
 
   const protoPathManifest = validateRemoteManifest(JSON.parse(`{
     "version": 2,
     "files": {
       "__proto__": { "deleted": true }
     }
-  }`), { prefix: 'vertex-agent' });
+  }`), { prefix: 'cherry-agent' });
   assert.equal(Object.getPrototypeOf(protoPathManifest.files), null);
   assert.equal(Object.hasOwn(protoPathManifest.files, '__proto__'), true);
 });
@@ -420,7 +420,7 @@ test('structured local merge bases use a fixed-length path digest', async () => 
     {
       providerPreset: 's3',
       bucket: 'bucket',
-      prefix: 'vertex-agent',
+      prefix: 'cherry-agent',
       accessKeyId: 'key',
     }
   );
@@ -431,7 +431,7 @@ test('structured local merge bases use a fixed-length path digest', async () => 
     await structuredBasePath(`files/${'nested/'.repeat(500)}data.json`, {
       providerPreset: 's3',
       bucket: 'bucket',
-      prefix: 'vertex-agent',
+      prefix: 'cherry-agent',
       accessKeyId: 'rotated-key',
     })
   );
@@ -470,7 +470,7 @@ test('logical entry revisions beat skewed clocks and converge independently of s
   const syncConfig = {
     providerPreset: 'aliyun-oss',
     bucket: 'bucket',
-    prefix: 'vertex-agent',
+    prefix: 'cherry-agent',
   };
   const oldClockFuture = {
     deleted: true,
@@ -509,7 +509,7 @@ test('concurrent structured writers survive different logical revision numbers',
   const syncConfig = {
     providerPreset: 'aliyun-oss',
     bucket: 'bucket',
-    prefix: 'vertex-agent',
+    prefix: 'cherry-agent',
   };
   const path = 'path.json';
   const entry = (hash, revision, revisionBy) => ({
@@ -521,7 +521,7 @@ test('concurrent structured writers survive different logical revision numbers',
     updatedAt: '2026-01-01T00:00:00.000Z',
     revision,
     revisionBy,
-    yjsKey: `vertex-agent/${yjsPath(path, hash)}`,
+    yjsKey: `cherry-agent/${yjsPath(path, hash)}`,
   });
   const fromA = entry('a'.repeat(64), 3, 'device-a');
   const fromB = entry('b'.repeat(64), 2, 'device-b');
@@ -547,7 +547,7 @@ test('concurrent structured writers survive different logical revision numbers',
 });
 
 test('causal manifest merge deterministically resolves file/descendant conflicts', () => {
-  const syncConfig = { bucket: 'bucket', prefix: 'vertex-agent' };
+  const syncConfig = { bucket: 'bucket', prefix: 'cherry-agent' };
   const entry = (path, revision, revisionBy) => {
     const hash = revisionBy.repeat(64).slice(0, 64);
     return {
@@ -559,7 +559,7 @@ test('causal manifest merge deterministically resolves file/descendant conflicts
       updatedAt: '2026-01-01T00:00:00.000Z',
       revision,
       revisionBy,
-      objectKey: `vertex-agent/${objectPath(path, hash)}`,
+      objectKey: `cherry-agent/${objectPath(path, hash)}`,
     };
   };
   const parent = entry('files/foo', 1, 'a');
@@ -612,7 +612,7 @@ test('manifest metadata projection rejects a near-ceiling commit before uploads'
       manifest,
       {},
       local,
-      { bucket: 'bucket', prefix: 'vertex-agent' },
+      { bucket: 'bucket', prefix: 'cherry-agent' },
       'device-a'
     ),
     /exceeds.*safety limit/i
@@ -637,7 +637,7 @@ test('manifest validation rejects malformed causal vectors and revision writers'
   const syncConfig = {
     providerPreset: 'aliyun-oss',
     bucket: 'bucket',
-    prefix: 'vertex-agent',
+    prefix: 'cherry-agent',
   };
   assert.throws(() => validateRemoteManifest({
     version: 2,
@@ -660,7 +660,7 @@ test('manifest validation rejects malformed causal vectors and revision writers'
 });
 
 test('integrity-v3 manifests require exact sizes and config can never use a raw payload', () => {
-  const syncConfig = { bucket: 'bucket', prefix: 'vertex-agent' };
+  const syncConfig = { bucket: 'bucket', prefix: 'cherry-agent' };
   const hash = 'a'.repeat(64);
   assert.throws(() => validateRemoteManifest({
     version: 2,
@@ -670,7 +670,7 @@ test('integrity-v3 manifests require exact sizes and config can never use a raw 
         structured: false,
         hash,
         hashType: 'content',
-        objectKey: `vertex-agent/${objectPath('files/missing-size.bin', hash)}`,
+        objectKey: `cherry-agent/${objectPath('files/missing-size.bin', hash)}`,
       },
     },
   }, syncConfig), /no content size/i);
@@ -679,7 +679,7 @@ test('integrity-v3 manifests require exact sizes and config can never use a raw 
     files: {
       'config.yaml': {
         structured: false,
-        objectKey: `vertex-agent/${objectPath('config.yaml')}`,
+        objectKey: `cherry-agent/${objectPath('config.yaml')}`,
       },
     },
   }, syncConfig), /config must use.*redacted structured/i);
@@ -691,7 +691,7 @@ test('manifest integrity promotion waits for every bounded v3 semantic and paylo
     structured: false,
     hash,
     hashType: 'content',
-    objectKey: `vertex-agent/${objectPath('files/raw.bin', hash)}`,
+    objectKey: `cherry-agent/${objectPath('files/raw.bin', hash)}`,
   };
   assert.equal(manifestIntegrityVersion({ 'files/raw.bin': raw }), 2);
   assert.equal(manifestIntegrityVersion({
@@ -703,20 +703,20 @@ test('manifest integrity promotion waits for every bounded v3 semantic and paylo
     hash,
     hashType: 'content',
     size: 1,
-    yjsKey: 'vertex-agent/yjs/by-hash/aa/primary.bin',
+    yjsKey: 'cherry-agent/yjs/by-hash/aa/primary.bin',
     payloadHash: hash,
     payloadSize: 1,
-    baseYjsKey: 'vertex-agent/yjs/by-hash/aa/base.bin',
+    baseYjsKey: 'cherry-agent/yjs/by-hash/aa/base.bin',
     baseHash: hash,
     basePayloadHash: hash,
     basePayloadSize: 1,
     structuredCandidates: [{
       hash,
       hashType: 'content',
-      yjsKey: 'vertex-agent/yjs/by-hash/aa/candidate.bin',
+      yjsKey: 'cherry-agent/yjs/by-hash/aa/candidate.bin',
       payloadHash: hash,
       payloadSize: 1,
-      baseYjsKey: 'vertex-agent/yjs/by-hash/aa/candidate-base.bin',
+      baseYjsKey: 'cherry-agent/yjs/by-hash/aa/candidate-base.bin',
       baseHash: hash,
       basePayloadHash: hash,
       basePayloadSize: 1,

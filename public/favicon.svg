@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" fill="none" viewBox="0 0 48 48">
   <!-- Background rounded square -->
   <rect width="48" height="48" rx="12" fill="#0f0f23"/>
-  <!-- V-shape vertex / AI node -->
+  <!-- V-shape cherry / AI node -->
   <path d="M12 34 L24 12 L36 34" stroke="#863bff" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
   <!-- Center node dot -->
   <circle cx="24" cy="12" r="3" fill="#47bfff"/>

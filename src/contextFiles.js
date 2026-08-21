@@ -1,5 +1,5 @@
 /**
- * Older VertexAgent versions appended a plain-text file summary to the user's
+ * Older CherryAgent versions appended a plain-text file summary to the user's
  * message. File metadata now renders as attachment cards, so remove that
  * generated suffix when the structured contextFiles data is available.
  */

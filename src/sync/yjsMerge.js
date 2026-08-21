@@ -2,19 +2,19 @@ import * as Y from 'yjs';
 import yaml from 'js-yaml';
 
 // Structured updates are stored as nested Y.Map/Y.Array values so older
-// VertexAgent clients can continue reading root.data. New readers use a small
+// CherryAgent clients can continue reading root.data. New readers use a small
 // format marker to unescape user keys which overlap with in-band metadata.
-const LEGACY_TYPE = '__vertex_yjs_type__';
-const LEGACY_ORDER = '__vertex_yjs_order__';
-const LEGACY_ITEMS = '__vertex_yjs_items__';
-const LEGACY_VALUE = '__vertex_yjs_value__';
+const LEGACY_TYPE = '__cherry_yjs_type__';
+const LEGACY_ORDER = '__cherry_yjs_order__';
+const LEGACY_ITEMS = '__cherry_yjs_items__';
+const LEGACY_VALUE = '__cherry_yjs_value__';
 
-const ENCODING_KEY = '__vertex_encoding__';
+const ENCODING_KEY = '__cherry_encoding__';
 const TREE_ENCODING = 'tree-v2';
 const COMPACT_ENCODING = 'json-v3';
-const METADATA_PREFIX = '__vertex_yjs_';
-const KEY_ESCAPE_PREFIX = '__vertex_yjs_key_escape__:';
-const MISSING = Symbol('vertex-structured-missing');
+const METADATA_PREFIX = '__cherry_yjs_';
+const KEY_ESCAPE_PREFIX = '__cherry_yjs_key_escape__:';
+const MISSING = Symbol('cherry-structured-missing');
 
 export function isStructuredPath(path) {
   return /\.(json|ya?ml)$/i.test(path);
