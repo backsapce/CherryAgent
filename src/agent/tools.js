@@ -42,6 +42,7 @@ import {
   writeAgentFile,
 } from '../vfs/opfs.js';
 import config from '../config/config.js';
+import llm from '../models/llm.js';
 import { getAgent, listAgents } from '../agents/agents.js';
 
 const DEFAULT_READ_FILE_MAX_BYTES = 256 * 1024;
@@ -999,7 +1000,7 @@ registry.register({
   category: 'agents',
   schema: {
     description:
-      'Run one or more focused tasks through an existing agent workspace and return their results. If no agent_id or agent_name is provided, run as the current/default agent. This tool cannot create new agents. For multiple related tasks, send them in one call with shared_context so requests share the same prompt prefix for better provider cache hits.',
+      'Run one or more focused tasks through existing agent workspaces and return one result per task; a failed task never cancels or hides its siblings. Tasks assigned to the same agent run sequentially to protect that workspace, while different agent workspaces run in parallel. If no agent_id or agent_name is provided, run as the current/default agent. A delegated agent uses its own configured model profile when it has one, otherwise the caller profile. This tool cannot create new agents. For multiple related tasks, send them in one call with shared_context so requests share the same prompt prefix for better provider cache hits.',
     parameters: {
       type: 'object',
       properties: {
@@ -1057,20 +1058,13 @@ registry.register({
   },
   checkAvailable: (ctx) => !!ctx?.agentId && !!ctx?.llmProfileId && (ctx?.subAgentDepth || 0) < 1,
   async handler({ task, tasks, shared_context: sharedContext = '', agent_id: agentId, agent_name: agentName, max_rounds: maxRounds = 4 }, ctx) {
-    try {
-      const requestedTasks = normalizeSpawnTasks({ task, tasks, agentId, agentName });
-      if (requestedTasks.length === 0) {
-        return 'Error running delegated agent task: provide task or tasks.';
-      }
-      const boundedRounds = Math.min(Math.max(Number(maxRounds) || 4, 1), 6);
-      const results = await Promise.all(
-        requestedTasks.map((item, index) => runSpawnedAgent(item, index, requestedTasks.length, sharedContext, boundedRounds, ctx))
-      );
-
-      return results.join('\n\n---\n\n');
-    } catch (err) {
-      return `Error running delegated agent task: ${err.message}`;
+    const requestedTasks = normalizeSpawnTasks({ task, tasks, agentId, agentName });
+    if (requestedTasks.length === 0) {
+      return 'Error running delegated agent task: provide task or tasks.';
     }
+    const boundedRounds = Math.min(Math.max(Number(maxRounds) || 4, 1), 6);
+    const results = await runSpawnedAgents(requestedTasks, sharedContext, boundedRounds, ctx);
+    return results.join('\n\n---\n\n');
   },
 });
 
@@ -1154,43 +1148,146 @@ function normalizeSpawnTasks({ task, tasks, agentId, agentName }) {
   }];
 }
 
-async function runSpawnedAgent(item, index, total, sharedContext, maxRounds, ctx) {
-  const { runAgentLoop } = await import('./loop.js');
+async function runSpawnedAgents(requestedTasks, sharedContext, maxRounds, ctx) {
+  const entries = await Promise.all(requestedTasks.map(async (item, index) => {
+    try {
+      return { index, item, agent: await resolveSpawnAgent(item, ctx) };
+    } catch (err) {
+      return { index, item, error: err };
+    }
+  }));
 
-  let subAgent = null;
-
-  if (item.agentId) {
-    subAgent = await getAgent(item.agentId);
-    if (!subAgent) throw new Error(`Agent not found: ${item.agentId}`);
-  } else if (item.agentName) {
-    const agents = await listAgents();
-    subAgent = agents.find((agent) => agent.name === item.agentName) || null;
-    if (!subAgent) throw new Error(`Agent not found: ${item.agentName}`);
-  } else {
-    subAgent = await getAgent(ctx.agentId);
-    if (!subAgent) throw new Error(`Current agent not found: ${ctx.agentId}`);
+  const results = new Array(entries.length);
+  const groups = new Map();
+  for (const entry of entries) {
+    if (entry.error) {
+      results[entry.index] = spawnFailureResult(entry.item, ctx, entry.error);
+      continue;
+    }
+    const group = groups.get(entry.agent.id) || [];
+    group.push(entry);
+    groups.set(entry.agent.id, group);
   }
 
-  const messages = buildSubAgentMessages(sharedContext, item.task, index, total);
+  // Tasks sharing one agent workspace run sequentially so their file and
+  // memory writes cannot race; distinct workspaces stay parallel.
+  await Promise.allSettled(Array.from(groups.values()).map(async (group) => {
+    for (const entry of group) {
+      if (ctx.signal?.aborted) {
+        results[entry.index] = spawnFailureResult(entry.item, ctx, new DOMException('Aborted', 'AbortError'));
+        continue;
+      }
+      try {
+        results[entry.index] = await runSpawnedAgent(entry, entries.length, sharedContext, maxRounds, ctx);
+      } catch (err) {
+        results[entry.index] = spawnFailureResult(entry.item, ctx, err);
+      }
+    }
+  }));
+
+  return results.map((result, index) => (
+    result || spawnFailureResult(entries[index].item, ctx, new Error('Delegated agent run did not complete.'))
+  ));
+}
+
+async function resolveSpawnAgent(item, ctx) {
+  if (item.agentId) {
+    const agent = await getAgent(item.agentId);
+    if (!agent) throw new Error(`Agent not found: ${item.agentId}`);
+    return agent;
+  }
+  if (item.agentName) {
+    const agents = await listAgents();
+    const matches = agents.filter((agent) => agent.name === item.agentName);
+    if (matches.length === 0) throw new Error(`Agent not found: ${item.agentName}`);
+    if (matches.length > 1) {
+      throw new Error(
+        `Multiple agents are named "${item.agentName}" (${matches.map((agent) => agent.id).join(', ')}). Pass agent_id to select one.`
+      );
+    }
+    return matches[0];
+  }
+  const agent = await getAgent(ctx.agentId);
+  if (!agent) throw new Error(`Current agent not found: ${ctx.agentId}`);
+  return agent;
+}
+
+function spawnTaskLabel(item, ctx) {
+  if (item.agentId) return item.agentId;
+  if (item.agentName) return item.agentName;
+  return ctx?.agentName || 'the current agent';
+}
+
+function spawnFailureResult(item, ctx, err) {
+  return `Delegated agent task for ${spawnTaskLabel(item, ctx)} failed: ${err?.message || String(err)}`;
+}
+
+async function runSpawnedAgent(entry, total, sharedContext, maxRounds, ctx) {
+  const { runAgentLoop } = await import('./loop.js');
+  const subAgent = entry.agent;
+  const profile = resolveSpawnProfile(subAgent, ctx);
+  const messages = buildSubAgentMessages(sharedContext, entry.item.task, entry.index, total);
+
   const result = await runAgentLoop({
     messages,
     systemPrompt: SUB_AGENT_SYSTEM_PROMPT,
     agentUrl: ctx.agentUrl || null,
     agentId: subAgent.id,
-    llmProfileId: ctx.llmProfileId,
-    provider: ctx.provider,
-    model: ctx.model,
-    contextWindow: ctx.contextWindow,
+    llmProfileId: profile.llmProfileId,
+    provider: profile.provider,
+    model: profile.model,
+    contextWindow: profile.contextWindow,
     signal: ctx.signal,
     maxRounds,
     subAgentDepth: (ctx.subAgentDepth || 0) + 1,
+    onEvent: createSpawnProgressReporter(subAgent, ctx),
   });
+
+  ctx.recordSubAgentUsage?.(result.usage);
 
   const toolSummary = result.toolCalls?.length
     ? `\n\nAgent tool calls:\n${result.toolCalls.map((tc) => `- ${tc.name}: ${tc.status}`).join('\n')}`
     : '';
 
   return `Agent ${subAgent.name} (${subAgent.id}) completed.\n\n${result.content || '(no final content)'}${toolSummary}`;
+}
+
+/**
+ * A delegated agent keeps its own configured model profile when it has a
+ * usable one; otherwise it inherits the caller's frozen profile.
+ */
+function resolveSpawnProfile(subAgent, ctx) {
+  const fallback = {
+    llmProfileId: ctx.llmProfileId,
+    provider: ctx.provider,
+    model: ctx.model,
+    contextWindow: ctx.contextWindow,
+  };
+  const ownProfileId = subAgent?.llmProfileId;
+  if (!ownProfileId || ownProfileId === ctx.llmProfileId) return fallback;
+  const profile = llm.getActiveConfig(ownProfileId);
+  if (!profile?.id || !profile.configured) return fallback;
+  return {
+    llmProfileId: ownProfileId,
+    provider: profile.provider || ctx.provider,
+    model: profile.model || ctx.model,
+    contextWindow: profile.contextWindow || ctx.contextWindow,
+  };
+}
+
+function createSpawnProgressReporter(subAgent, ctx) {
+  if (typeof ctx.onToolUpdate !== 'function') return undefined;
+  return (event) => {
+    let line = null;
+    if (event.type === 'tool-call') {
+      line = `[${subAgent.name}] tool ${event.toolName}${event.summary ? ` (${event.summary})` : ''}`;
+    } else if (event.type === 'run-finish') {
+      line = `[${subAgent.name}] finished (${event.modelCallCount || 1} model calls)`;
+    } else if (event.type === 'run-error') {
+      line = `[${subAgent.name}] error: ${event.error?.message || 'unknown error'}`;
+    }
+    if (line) ctx.onToolUpdate({ stdout: `${line}\n` });
+  };
 }
 
 function buildSubAgentMessages(sharedContext, task, index, total) {
