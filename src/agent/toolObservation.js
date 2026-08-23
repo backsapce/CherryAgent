@@ -3,9 +3,15 @@ const TOOL_OBSERVATION_MIN_CHARS = 4_000;
 const TOOL_OBSERVATION_MAX_CHARS = 24_000;
 const TOOL_OBSERVATION_HEAD_RATIO = 0.62;
 
+// Delegation reports are the entire point of a spawn_agent call, so the parent
+// model gets a much larger share of the context window for them.
+const TOOL_OBSERVATION_OVERRIDES = {
+  spawn_agent: { ratio: 0.1, minChars: 8_000, maxChars: 48_000 },
+};
+
 export function compactToolResultForModel(toolCall, result, opts = {}) {
   const text = String(result ?? '');
-  const maxChars = getToolObservationMaxChars(opts.contextWindow);
+  const maxChars = getToolObservationMaxChars(opts.contextWindow, toolCall?.name);
   if (text.length <= maxChars) return text;
 
   const notice = [
@@ -18,12 +24,18 @@ export function compactToolResultForModel(toolCall, result, opts = {}) {
   return `${notice}${truncateMiddle(text, contentBudget)}`;
 }
 
-function getToolObservationMaxChars(contextWindow) {
+function getToolObservationMaxChars(contextWindow, toolName) {
+  const override = TOOL_OBSERVATION_OVERRIDES[toolName];
+  const ratio = override?.ratio ?? TOOL_OBSERVATION_CONTEXT_RATIO;
   const parsed = Number(contextWindow);
   const rawLimit = Number.isFinite(parsed) && parsed > 0
-    ? Math.floor(parsed * TOOL_OBSERVATION_CONTEXT_RATIO)
-    : TOOL_OBSERVATION_MAX_CHARS;
-  return clampNumber(rawLimit, TOOL_OBSERVATION_MIN_CHARS, TOOL_OBSERVATION_MAX_CHARS);
+    ? Math.floor(parsed * ratio)
+    : (override?.maxChars ?? TOOL_OBSERVATION_MAX_CHARS);
+  return clampNumber(
+    rawLimit,
+    override?.minChars ?? TOOL_OBSERVATION_MIN_CHARS,
+    override?.maxChars ?? TOOL_OBSERVATION_MAX_CHARS
+  );
 }
 
 function truncateMiddle(text, maxChars) {

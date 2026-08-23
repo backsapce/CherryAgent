@@ -1715,11 +1715,6 @@ function App() {
       if (responseCompleted) {
         automaticTitleInput = { sessionId, sessionMessages, replyId, finalContent };
       }
-      if (result?.toolCalls?.some((tc) => tc.name === 'spawn_agent')) {
-        const nextAgentList = await listAgents();
-        assertRunActive();
-        setAgentList(nextAgentList);
-      }
     } catch (err) {
       // Only the run owner's signal makes this a silent user cancellation.
       // Providers and proxies also use AbortError for transport failures; if

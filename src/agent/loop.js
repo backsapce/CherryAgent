@@ -131,6 +131,9 @@ export async function runAgentLoop(opts) {
     parentAborted: () => Boolean(signal?.aborted),
     abortTurn: () => turn.abort(createWakeupScheduledControl()),
   };
+  // Delegated agent runs (spawn_agent) own their model calls; fold their
+  // tokens into this turn's totals so usage reporting covers the whole turn.
+  let subAgentUsage = emptyUsage();
   const toolContext = {
     agentUrl,
     agentId,
@@ -154,6 +157,9 @@ export async function runAgentLoop(opts) {
       }
       : undefined,
     loopControl,
+    recordSubAgentUsage: (usage) => {
+      subAgentUsage = addUsage(subAgentUsage, usage);
+    },
     toolLoopGuard: createToolLoopGuard(),
     dispatchTool: opts.dispatchTool || ((name, input, context) => registry.dispatch(name, input, context)),
   };
@@ -301,7 +307,7 @@ export async function runAgentLoop(opts) {
       error.code = 'EMPTY_MODEL_RESPONSE';
       throw error;
     }
-    const usage = buildUsageReport(latestUsage, totalUsage, contextWindow, modelCallCount);
+    const usage = buildUsageReport(latestUsage, addUsage(totalUsage, subAgentUsage), contextWindow, modelCallCount);
     emit({
       type: 'run-finish',
       usage,
