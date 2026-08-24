@@ -225,10 +225,14 @@ export function createAgentRunManager({
 
   const persist = (run) => {
     const publicRun = serializeRun(run);
+    // `resume` is durable recovery state only (it can include the model config
+    // and the full conversation). Keep it out of API responses via serializeRun
+    // but write it alongside the run so a restart can re-arm a waiting run.
+    const stored = run.resume ? { ...publicRun, resume: run.resume } : publicRun;
     const target = join(runsDir, `${run.id}.json`);
     const temporary = `${target}.tmp`;
     try {
-      writeFileSync(temporary, JSON.stringify(publicRun, null, 2), 'utf8');
+      writeFileSync(temporary, JSON.stringify(stored, null, 2), 'utf8');
       renameSync(temporary, target);
     } catch (error) {
       try {
@@ -272,6 +276,192 @@ export function createAgentRunManager({
     readFile,
     writeFile,
   });
+
+  // The subset of the original run request needed to continue a durable run
+  // after a restart. `runtimeContext` keeps sandboxFiles so skills/identity are
+  // re-materialized if the sandbox filesystem was recreated.
+  const persistableInput = (input) => ({
+    systemPrompt: input.systemPrompt || '',
+    agentId: input.agentId || null,
+    maxRounds: input.maxRounds,
+    modelConfig: input.modelConfig,
+    runtimeContext: input.runtimeContext || null,
+  });
+
+  // Drive one durable run across its wake-up separated turns. When `resume`
+  // is provided the run restarts from a persisted waiting point: it first waits
+  // out the saved wake-up, appends the continuation, then keeps running turns.
+  const executeRunLoop = async (run, input, resume) => {
+    try {
+      throwIfRunCancelled(run);
+      await materializeRuntimeFiles(input.runtimeContext?.sandboxFiles, { fileExists, readFile, writeFile });
+      throwIfRunCancelled(run);
+      let runtimeMessages;
+      let turnNumber;
+      let result;
+      let pendingWakeup = null;
+      if (resume) {
+        runtimeMessages = resume.runtimeMessages;
+        turnNumber = resume.turnNumber;
+        result = resume.result;
+        pendingWakeup = resume.wakeup;
+      } else {
+        runtimeMessages = await materializeMessageImages(input.messages, {
+          fileExists,
+          writeFile,
+          attachmentScope: run.id,
+        });
+        throwIfRunCancelled(run);
+        turnNumber = 0;
+      }
+      const modelConfig = input.modelConfig;
+      let activeTurnToken = null;
+      while (true) {
+        if (pendingWakeup) {
+          run.status = 'waiting';
+          run.wakeup = pendingWakeup;
+          run.updatedAt = new Date().toISOString();
+          persist(run);
+          await waitUntilWakeup(pendingWakeup.runAtMs, run.controller.signal);
+          throwIfRunCancelled(run);
+
+          run.status = 'running';
+          run.wakeup = null;
+          run.resume = null;
+          run.updatedAt = new Date().toISOString();
+          persist(run);
+          runtimeMessages = [
+            ...runtimeMessages,
+            { role: 'assistant', content: scheduledTurnContinuation(result) },
+            { role: 'user', content: buildWakeupMessage(pendingWakeup) },
+          ];
+          if (runtimeMessages.length > MAX_MESSAGES) throw new Error('Scheduled run exceeded the message limit.');
+          pendingWakeup = null;
+        }
+
+        turnNumber += 1;
+        const turnToken = {};
+        activeTurnToken = turnToken;
+        const eventScope = `${run.id}:turn-${turnNumber}`;
+        let scheduledWakeup = null;
+        const activityWatchdog = createActivityWatchdog(idleTimeoutMs, (error) => {
+          run.controller?.abort(error);
+        });
+        try {
+          result = await Promise.race([
+            Promise.resolve(runAgent({
+              messages: runtimeMessages,
+              systemPrompt: input.systemPrompt || '',
+              agentId: input.agentId || null,
+              provider: modelConfig.provider,
+              model: modelConfig.model,
+              contextWindow: modelConfig.contextWindow || undefined,
+              maxRounds: input.maxRounds,
+              signal: run.controller.signal,
+              languageModel: createModel(modelConfig),
+              runtimeContext: normalizeRuntimeContext(input.runtimeContext),
+              toolSchemas: REMOTE_TOOL_SCHEMAS,
+              dispatchTool,
+              scheduleWakeup: async ({ delaySeconds, prompt }) => {
+                if (activeTurnToken !== turnToken) throw createRunAbortError();
+                throwIfRunCancelled(run);
+                scheduledWakeup = createOrReplaceTurnWakeup({
+                  currentWakeup: scheduledWakeup,
+                  id: scheduledWakeup?.id || `wake-${randomUUID()}`,
+                  delaySeconds,
+                  prompt,
+                });
+                return scheduledWakeup;
+              },
+              autoSummarize: false,
+              runtimeMode: 'sandbox',
+              onEvent: (event) => {
+                // A provider or tool may ignore the per-turn abort and report
+                // late output after the scheduled continuation has begun. A
+                // run-level status check alone cannot distinguish those turns.
+                // Drop stale callback output instead of throwing: callbacks
+                // from an EventEmitter/setTimeout may live outside the tool's
+                // promise chain, where a throw would become an uncaughtException
+                // and terminate the entire agent server.
+                if (
+                  activeTurnToken !== turnToken
+                  || run.status !== 'running'
+                  || run.cancelRequested
+                  || !run.controller
+                  || run.controller.signal.aborted
+                ) return;
+                activityWatchdog.touch();
+                emit(run, namespaceRuntimeEvent(event, eventScope));
+              },
+            })),
+            activityWatchdog.promise,
+          ]);
+        } finally {
+          activityWatchdog.dispose();
+          if (activeTurnToken === turnToken) activeTurnToken = null;
+        }
+
+        throwIfRunCancelled(run);
+        run.result = result;
+        if (!scheduledWakeup) break;
+
+        pendingWakeup = scheduledWakeup;
+        // Capture everything needed to continue after this wake-up survives a
+        // server restart: the conversation so far, the turn that scheduled the
+        // wake-up, its result (used to build the continuation), and the request.
+        run.resume = {
+          v: 1,
+          runtimeMessages,
+          turnNumber,
+          result,
+          input: persistableInput(input),
+        };
+      }
+      run.status = 'completed';
+      run.result = result;
+      run.resume = null;
+    } catch (error) {
+      if (!run.forceTerminated) {
+        run.status = run.cancelRequested ? 'aborted' : 'error';
+        run.error = error?.message || String(error);
+        run.resume = null;
+      }
+    } finally {
+      if (!run.forceTerminated) {
+        run.updatedAt = new Date().toISOString();
+        run.controller = null;
+        try {
+          persist(run);
+        } catch (error) {
+          console.error(`Failed to persist terminal agent run ${run.id}:`, error);
+        }
+      }
+      run.resolveCompletion();
+    }
+  };
+
+  // Re-arm any waiting run that survived a restart with persisted resume state.
+  // A waiting run without resume state cannot be continued and stays interrupted.
+  const resumePersistedWaitingRuns = () => {
+    for (const run of runs.values()) {
+      if (run.status !== 'waiting' || !run.resume || !run.wakeup) continue;
+      const resume = {
+        runtimeMessages: run.resume.runtimeMessages,
+        turnNumber: run.resume.turnNumber,
+        result: run.resume.result,
+        wakeup: run.wakeup,
+      };
+      const input = run.resume.input;
+      run.controller = new AbortController();
+      run.cancelRequested = false;
+      run.forceTerminated = false;
+      let resolveCompletion;
+      run.completion = new Promise((resolve) => { resolveCompletion = resolve; });
+      run.resolveCompletion = resolveCompletion;
+      Promise.resolve().then(() => executeRunLoop(run, input, resume));
+    }
+  };
+  resumePersistedWaitingRuns();
 
   const start = (input) => {
     validateRunInput(input);
@@ -330,126 +520,7 @@ export function createAgentRunManager({
       throw error;
     }
 
-    Promise.resolve().then(async () => {
-      try {
-        throwIfRunCancelled(run);
-        await materializeRuntimeFiles(input.runtimeContext?.sandboxFiles, { fileExists, readFile, writeFile });
-        throwIfRunCancelled(run);
-        let runtimeMessages = await materializeMessageImages(input.messages, {
-          fileExists,
-          writeFile,
-          attachmentScope: run.id,
-        });
-        throwIfRunCancelled(run);
-        const modelConfig = input.modelConfig;
-        let result;
-        let activeTurnToken = null;
-        let turnNumber = 0;
-        while (true) {
-          turnNumber += 1;
-          const turnToken = {};
-          activeTurnToken = turnToken;
-          const eventScope = `${run.id}:turn-${turnNumber}`;
-          let scheduledWakeup = null;
-          const activityWatchdog = createActivityWatchdog(idleTimeoutMs, (error) => {
-            run.controller?.abort(error);
-          });
-          try {
-            result = await Promise.race([
-              Promise.resolve(runAgent({
-                messages: runtimeMessages,
-                systemPrompt: input.systemPrompt || '',
-                agentId: input.agentId || null,
-                provider: modelConfig.provider,
-                model: modelConfig.model,
-                contextWindow: modelConfig.contextWindow || undefined,
-                maxRounds: input.maxRounds,
-                signal: run.controller.signal,
-                languageModel: createModel(modelConfig),
-                runtimeContext: normalizeRuntimeContext(input.runtimeContext),
-                toolSchemas: REMOTE_TOOL_SCHEMAS,
-                dispatchTool,
-                scheduleWakeup: async ({ delaySeconds, prompt }) => {
-                  if (activeTurnToken !== turnToken) throw createRunAbortError();
-                  throwIfRunCancelled(run);
-                  scheduledWakeup = createOrReplaceTurnWakeup({
-                    currentWakeup: scheduledWakeup,
-                    id: scheduledWakeup?.id || `wake-${randomUUID()}`,
-                    delaySeconds,
-                    prompt,
-                  });
-                  return scheduledWakeup;
-                },
-                autoSummarize: false,
-                runtimeMode: 'sandbox',
-                onEvent: (event) => {
-                  // A provider or tool may ignore the per-turn abort and report
-                  // late output after the scheduled continuation has begun. A
-                  // run-level status check alone cannot distinguish those turns.
-                  // Drop stale callback output instead of throwing: callbacks
-                  // from an EventEmitter/setTimeout may live outside the tool's
-                  // promise chain, where a throw would become an uncaughtException
-                  // and terminate the entire agent server.
-                  if (
-                    activeTurnToken !== turnToken
-                    || run.status !== 'running'
-                    || run.cancelRequested
-                    || !run.controller
-                    || run.controller.signal.aborted
-                  ) return;
-                  activityWatchdog.touch();
-                  emit(run, namespaceRuntimeEvent(event, eventScope));
-                },
-              })),
-              activityWatchdog.promise,
-            ]);
-          } finally {
-            activityWatchdog.dispose();
-            if (activeTurnToken === turnToken) activeTurnToken = null;
-          }
-
-          throwIfRunCancelled(run);
-          run.result = result;
-          if (!scheduledWakeup) break;
-
-          run.status = 'waiting';
-          run.wakeup = scheduledWakeup;
-          run.updatedAt = new Date().toISOString();
-          persist(run);
-          await waitUntilWakeup(scheduledWakeup.runAtMs, run.controller.signal);
-          throwIfRunCancelled(run);
-
-          run.status = 'running';
-          run.wakeup = null;
-          run.updatedAt = new Date().toISOString();
-          persist(run);
-          runtimeMessages = [
-            ...runtimeMessages,
-            { role: 'assistant', content: scheduledTurnContinuation(result) },
-            { role: 'user', content: buildWakeupMessage(scheduledWakeup) },
-          ];
-          if (runtimeMessages.length > MAX_MESSAGES) throw new Error('Scheduled run exceeded the message limit.');
-        }
-        run.status = 'completed';
-        run.result = result;
-      } catch (error) {
-        if (!run.forceTerminated) {
-          run.status = run.cancelRequested ? 'aborted' : 'error';
-          run.error = error?.message || String(error);
-        }
-      } finally {
-        if (!run.forceTerminated) {
-          run.updatedAt = new Date().toISOString();
-          run.controller = null;
-          try {
-            persist(run);
-          } catch (error) {
-            console.error(`Failed to persist terminal agent run ${run.id}:`, error);
-          }
-        }
-        resolveCompletion();
-      }
-    });
+    Promise.resolve().then(() => executeRunLoop(run, input, null));
 
     return serializeRun(run);
   };
@@ -1287,6 +1358,23 @@ function serializeRun(run) {
   };
 }
 
+function canResumeWaitingRun(saved) {
+  // A waiting run survives a restart only when its durable resume state is
+  // complete enough to continue the loop: the wake-up still pending, the
+  // conversation so far, the turn that scheduled it, and the model request.
+  const resume = saved?.resume;
+  return Boolean(
+    saved?.status === 'waiting'
+    && saved?.wakeup
+    && Number.isFinite(saved.wakeup.runAtMs)
+    && resume
+    && Array.isArray(resume.runtimeMessages)
+    && Number.isInteger(resume.turnNumber)
+    && resume.input
+    && resume.input.modelConfig
+  );
+}
+
 function loadPersistedRuns(runsDir, runs) {
   for (const name of readdirSync(runsDir).filter((entry) => entry.endsWith('.json'))) {
     try {
@@ -1296,10 +1384,12 @@ function loadPersistedRuns(runsDir, runs) {
       const events = existsSync(eventsPath)
         ? readFileSync(eventsPath, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line))
         : [];
+      const resumable = canResumeWaitingRun(saved);
       runs.set(saved.id, {
         ...saved,
-        status: ['running', 'waiting'].includes(saved.status) ? 'interrupted' : saved.status,
-        error: ['running', 'waiting'].includes(saved.status) ? 'Agent server restarted before the run completed.' : saved.error,
+        resume: resumable ? saved.resume : null,
+        status: ['running', 'waiting'].includes(saved.status) && !resumable ? 'interrupted' : saved.status,
+        error: ['running', 'waiting'].includes(saved.status) && !resumable ? 'Agent server restarted before the run completed.' : saved.error,
         events,
         eventBytes: existsSync(eventsPath) ? readFileSync(eventsPath).byteLength : 0,
         controller: null,
