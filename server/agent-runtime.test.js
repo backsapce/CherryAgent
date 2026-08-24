@@ -1212,3 +1212,146 @@ test('a server restart marks an in-flight or waiting run as interrupted', () => 
     rmSync(runsDir, { recursive: true, force: true });
   }
 });
+
+test('a server restart re-arms a waiting run and it resumes after the wake-up', async () => {
+  const runsDir = mkdtempSync(join(tmpdir(), 'cherry-runs-'));
+  const abandonedWakeupGate = deferred();
+  const restartedWakeupGate = deferred();
+  let turns = 0;
+  let resumedMessages = null;
+
+  const runAgent = async ({ messages, scheduleWakeup, onEvent }) => {
+    onEvent({ type: 'run-start', runId: 'run-logical', sequence: 1 });
+    turns += 1;
+    if (turns === 1) {
+      await scheduleWakeup({ delaySeconds: 60, prompt: 'continue the long task' });
+      return { content: 'Sleeping until the job finishes.', toolCalls: [] };
+    }
+    resumedMessages = messages;
+    return { content: 'resumed after restart', toolCalls: [] };
+  };
+
+  try {
+    const first = createManager(runsDir, {
+      createModel: () => ({}),
+      waitUntilWakeup: () => abandonedWakeupGate.promise,
+      runAgent,
+    });
+    const started = first.start({
+      runId: 'run-restart-waiting',
+      sessionId: 'session-restart-waiting',
+      replyId: 'reply-restart-waiting',
+      messages: [{ role: 'user', content: 'start the long task' }],
+      modelConfig: { provider: 'openai', model: 'test', apiKey: 'test' },
+      runtimeContext: { memorySnapshot: { memory: null, user: null } },
+    });
+    const waiting = await waitForRunStatus(first, started.id, 'waiting');
+    assert.equal(waiting.wakeup.prompt, 'continue the long task');
+
+    // The wake-up timer is in-memory only; a restart must not lose the run.
+    const second = createManager(runsDir, {
+      createModel: () => ({}),
+      waitUntilWakeup: () => restartedWakeupGate.promise,
+      runAgent,
+    });
+    const reloaded = second.get(started.id);
+    assert.equal(reloaded.status, 'waiting');
+    assert.equal(reloaded.wakeup.prompt, 'continue the long task');
+    assert.equal(reloaded.error, null);
+    assert.equal(second.list('session-restart-waiting')[0].status, 'waiting');
+
+    // The abandoned pre-restart process is gone for good: its in-memory gate
+    // is never resolved. Only the re-armed run may continue.
+    restartedWakeupGate.resolve();
+    const completed = await waitForRunStatus(second, started.id, 'completed');
+    assert.equal(completed.result.content, 'resumed after restart');
+    assert.equal(completed.wakeup, null);
+
+    // The resumed turn replays the saved conversation plus the continuation.
+    assert.equal(resumedMessages[0].content, 'start the long task');
+    assert.match(resumedMessages.at(-2).content, /Tool history from the turn|Sleeping until the job finishes\./);
+    assert.match(resumedMessages.at(-1).content, /continue the long task/);
+
+    // A restarted manager must not resurrect the run a second time.
+    const third = createManager(runsDir, {
+      createModel: () => ({}),
+      waitUntilWakeup: () => restartedWakeupGate.promise,
+      runAgent,
+    });
+    assert.equal(third.get(started.id).status, 'completed');
+    assert.equal(turns, 2);
+  } finally {
+    restartedWakeupGate.resolve();
+    rmSync(runsDir, { recursive: true, force: true });
+  }
+});
+
+test('a restart can cancel a re-armed waiting run and it does not resume twice', async () => {
+  const runsDir = mkdtempSync(join(tmpdir(), 'cherry-runs-'));
+  const abandonedWakeupGate = deferred();
+  const restartedWakeupGate = deferred();
+  let turns = 0;
+
+  const runAgent = async ({ scheduleWakeup }) => {
+    turns += 1;
+    if (turns === 1) {
+      await scheduleWakeup({ delaySeconds: 60, prompt: 'check again' });
+      return { content: 'sleeping', toolCalls: [] };
+    }
+    return { content: 'should never run', toolCalls: [] };
+  };
+
+  try {
+    const first = createManager(runsDir, {
+      createModel: () => ({}),
+      waitUntilWakeup: () => abandonedWakeupGate.promise,
+      runAgent,
+    });
+    const started = first.start({
+      runId: 'run-restart-cancel',
+      sessionId: 'session-restart-cancel',
+      replyId: 'reply-restart-cancel',
+      messages: [{ role: 'user', content: 'start' }],
+      modelConfig: { provider: 'openai', model: 'test', apiKey: 'test' },
+    });
+    await waitForRunStatus(first, started.id, 'waiting');
+
+    const second = createManager(runsDir, {
+      createModel: () => ({}),
+      waitUntilWakeup: () => restartedWakeupGate.promise,
+      runAgent,
+    });
+    assert.equal(second.get(started.id).status, 'waiting');
+    const aborted = await second.abort(started.id);
+    assert.equal(aborted.status, 'aborted');
+    assert.equal(turns, 1);
+
+    // Even the wake-up firing after cancellation cannot resurrect the turn.
+    restartedWakeupGate.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(second.get(started.id).status, 'aborted');
+    assert.equal(turns, 1);
+  } finally {
+    restartedWakeupGate.resolve();
+    rmSync(runsDir, { recursive: true, force: true });
+  }
+});
+
+test('a legacy waiting run without resume state stays interrupted after restart', () => {
+  const runsDir = mkdtempSync(join(tmpdir(), 'cherry-runs-'));
+  try {
+    writeFileSync(join(runsDir, 'run-legacy-waiting.json'), JSON.stringify({
+      id: 'run-legacy-waiting',
+      sessionId: 'session-legacy',
+      status: 'waiting',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      sequence: 0,
+      wakeup: { id: 'wake-legacy', runAtMs: Date.now() + 60_000, prompt: 'legacy' },
+    }));
+    const manager = createManager(runsDir);
+    assert.equal(manager.get('run-legacy-waiting').status, 'interrupted');
+  } finally {
+    rmSync(runsDir, { recursive: true, force: true });
+  }
+});
