@@ -1,15 +1,72 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { useI18n } from '../../i18n/context';
 import { Plus, X, Menu, ChevronLeft, ChevronRight, Bug, Clock } from '../Icons/Icons';
+import {
+  formatWakeupCountdown,
+  getNextScheduledWakeup,
+  hasScheduledWakeup,
+} from './wakeupCountdown';
 import './SessionList.css';
 
 // Breakpoint for mobile/tablet
 const MOBILE_BREAKPOINT = 768;
 
-const hasScheduledWakeup = (session) => (
-  (session.wakeups || []).length > 0
-  || (session.remoteRun?.status === 'waiting' && Boolean(session.remoteRun.wakeup))
-);
+const WakeupCancelButton = ({ sessionId, wakeup, onCancelWakeup }) => {
+  const { t } = useI18n();
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const runAtMs = wakeup?.runAtMs;
+
+  useEffect(() => {
+    if (!Number.isFinite(runAtMs)) return undefined;
+    const timerId = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(timerId);
+  }, [runAtMs]);
+
+  const countdown = formatWakeupCountdown(runAtMs, nowMs);
+  const label = countdown
+    ? `${t('session.cancelWakeup')} · ${countdown}`
+    : t('session.cancelWakeup');
+
+  return (
+    <button
+      type="button"
+      className="session-wakeup-cancel"
+      title={label}
+      aria-label={label}
+      onClick={(event) => {
+        event.stopPropagation();
+        onCancelWakeup?.(sessionId);
+      }}
+    >
+      <span className="session-wakeup-icon" aria-hidden="true">
+        <Clock width={14} height={14} />
+        <X
+          width={8}
+          height={8}
+          className="session-wakeup-cancel-x"
+        />
+      </span>
+      {countdown && (
+        <span className="session-wakeup-countdown" role="timer" aria-live="off">
+          {countdown}
+        </span>
+      )}
+    </button>
+  );
+};
+
+const SessionWakeupControl = ({ session, onCancelWakeup }) => {
+  const wakeup = getNextScheduledWakeup(session);
+
+  return (
+    <WakeupCancelButton
+      key={`${wakeup?.id || 'wakeup'}:${wakeup?.runAtMs ?? 'pending'}`}
+      sessionId={session.id}
+      wakeup={wakeup}
+      onCancelWakeup={onCancelWakeup}
+    />
+  );
+};
 
 const SessionList = ({
   sessions,
@@ -161,24 +218,10 @@ const SessionList = ({
                       />
                     )}
                     {hasScheduledWakeup(session) && (
-                      <button
-                        type="button"
-                        className="session-wakeup-cancel"
-                        title={t('session.cancelWakeup')}
-                        aria-label={t('session.cancelWakeup')}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          onCancelWakeup?.(session.id);
-                        }}
-                      >
-                        <Clock width={14} height={14} aria-hidden="true" />
-                        <X
-                          width={8}
-                          height={8}
-                          className="session-wakeup-cancel-x"
-                          aria-hidden="true"
-                        />
-                      </button>
+                      <SessionWakeupControl
+                        session={session}
+                        onCancelWakeup={onCancelWakeup}
+                      />
                     )}
                     {session.title}
                     {sessionAgents[session.id] && (

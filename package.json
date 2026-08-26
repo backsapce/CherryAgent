@@ -22,7 +22,7 @@
     "build": "vite build",
     "build:pages": "cross-env VITE_BASE=/CherryAgent/ vite build",
     "lint": "eslint .",
-    "test:sync": "node --test src/config/*.test.js src/components/FileManage/*.test.js src/components/MessagePanel/*.test.js src/components/Settings/*.test.js src/models/*.test.js src/sync/*.test.js src/vfs/*.test.js src/remoteRunPresentation.test.js src/remoteRunState.test.js src/sessionRefresh.test.js src/sessionPersistence.test.js src/sessionRuns.test.js",
+    "test:sync": "node --test src/config/*.test.js src/components/FileManage/*.test.js src/components/MessagePanel/*.test.js src/components/SessionList/*.test.js src/components/Settings/*.test.js src/models/*.test.js src/sync/*.test.js src/vfs/*.test.js src/remoteRunPresentation.test.js src/remoteRunState.test.js src/sessionRefresh.test.js src/sessionPersistence.test.js src/sessionRuns.test.js",
     "test:agent": "node --test src/agent/*.test.js src/remoteRunState.test.js src/sessionRuns.test.js",
     "test:runtime": "node --test server/agent-runtime.test.js server/agent-state.test.js server/command-executor.test.js server/command-jobs.test.js server/file-path-policy.test.js",
     "preview": "vite preview",
