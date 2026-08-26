@@ -328,14 +328,14 @@
 }
 
 .session-wakeup-cancel {
-  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 4px;
   flex-shrink: 0;
-  width: 20px;
+  min-width: 20px;
   height: 20px;
-  padding: 0;
+  padding: 0 4px 0 3px;
   border: 0;
   border-radius: 6px;
   background: transparent;
@@ -343,6 +343,23 @@
   cursor: pointer;
   overflow: visible;
   transition: color 0.15s, background 0.15s;
+}
+
+.session-wakeup-icon {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.session-wakeup-countdown {
+  font-family: 'SF Mono', 'Fira Code', ui-monospace, monospace;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .session-wakeup-cancel:hover,
@@ -358,8 +375,8 @@
 
 .session-wakeup-cancel-x {
   position: absolute;
-  top: 0;
-  right: 0;
+  top: -4px;
+  right: -4px;
   box-sizing: content-box;
   padding: 1px;
   border-radius: 50%;
