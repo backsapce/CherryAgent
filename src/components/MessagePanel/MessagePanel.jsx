@@ -13,8 +13,10 @@ import { splitTaggedReasoningContent } from '../../agent/reasoningTags';
 import { searchSkills } from '../../agent/skills';
 import { ChevronRight, Settings as SettingsIcon, Folder, File, FileEdit, Copy, MessageSquare, Plus, X, Send, Stop, Plug, PieChart, Cloud, User, ImageGenerate, Refresh } from '../Icons/Icons';
 import { getSkillCommandRange } from './skillCommand';
+import { getScheduleWakeupRunAtMs } from './toolWakeupCountdown';
 import { stripLegacyContextFileSummary } from '../../contextFiles';
 import { hasRenderableTranscript } from './transcriptVisibility';
+import { formatWakeupCountdown } from '../SessionList/wakeupCountdown';
 import {
   collectAgentWorkspaceFiles,
   collectSandboxFiles,
@@ -620,6 +622,37 @@ const ToolImageReference = ({ reference, agentId, sandboxUrl }) => {
   );
 };
 
+const ScheduleWakeupToolLabel = ({ label, runAtMs }) => {
+  const [nowMs, setNowMs] = useState(() => Date.now());
+
+  useEffect(() => {
+    const remainingMs = runAtMs - Date.now();
+    if (!Number.isFinite(runAtMs) || remainingMs <= 0) return undefined;
+
+    let timerId;
+    const tick = () => {
+      const nextNowMs = Date.now();
+      setNowMs(nextNowMs);
+      const nextRemainingMs = runAtMs - nextNowMs;
+      if (nextRemainingMs > 0) {
+        timerId = setTimeout(tick, Math.min(1000, nextRemainingMs));
+      }
+    };
+
+    timerId = setTimeout(tick, Math.min(1000, remainingMs));
+    return () => clearTimeout(timerId);
+  }, [runAtMs]);
+
+  return (
+    <span className="tool-label">
+      {label}
+      <span className="tool-wakeup-countdown" role="timer" aria-live="off">
+        {' · '}{formatWakeupCountdown(runAtMs, nowMs)}
+      </span>
+    </span>
+  );
+};
+
 const ToolBlock = ({ toolCall, onStopStreaming, agentId, sandboxUrl }) => {
   const { t } = useI18n();
   const isLegacyExecute = !!toolCall?.cmd;
@@ -664,6 +697,7 @@ const ToolBlock = ({ toolCall, onStopStreaming, agentId, sandboxUrl }) => {
   const isImageGeneration = isImageGenerationToolName(name);
   const imageReference = parseImageReference(toolCall);
   const label = renderTerminal ? t('message.execute') : (isImageGeneration ? t('message.imageGeneration') : name);
+  const wakeupRunAtMs = getScheduleWakeupRunAtMs(toolCall);
   const controlInput = name === 'schedule_wakeup'
     ? (parsedArgs ? JSON.stringify(parsedArgs, null, 2) : rawArgs || '')
     : '';
@@ -674,7 +708,11 @@ const ToolBlock = ({ toolCall, onStopStreaming, agentId, sandboxUrl }) => {
       <div className="tool-header" onClick={() => setExpanded((v) => !v)}>
         <ChevronRight className={effectiveExpanded ? 'expanded' : ''} width={14} height={14} />
         {isImageGeneration && <ImageGenerate width={16} height={16} className="tool-kind-icon" />}
-        <span className="tool-label">{label}</span>
+        {Number.isFinite(wakeupRunAtMs) ? (
+          <ScheduleWakeupToolLabel key={wakeupRunAtMs} label={label} runAtMs={wakeupRunAtMs} />
+        ) : (
+          <span className="tool-label">{label}</span>
+        )}
         {renderTerminal && command && <span className="tool-cmd" title={command}>{command}</span>}
         {summary && <span className="tool-summary">{summary}</span>}
         {status === 'pending' && <span className="tool-exit-code">{t('message.running')}</span>}
