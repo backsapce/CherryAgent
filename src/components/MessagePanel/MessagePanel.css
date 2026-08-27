@@ -892,6 +892,12 @@
   flex-shrink: 0;
 }
 
+.tool-wakeup-countdown {
+  font-family: 'SF Mono', 'Fira Code', ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .tool-cmd {
   flex: 0 1 min(54ch, 58%);
   min-width: 0;
