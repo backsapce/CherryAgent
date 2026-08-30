@@ -91,7 +91,9 @@
         "autoTitleModel": "标题生成模型",
         "autoTitleFirstModel": "第一个已配置的 LLM（当前为 {model}）",
         "autoTitleNoModel": "暂无可用的 LLM 配置",
-        "autoTitleModelHint": "保留默认项会始终使用第一个已配置的 LLM，也可以选择更快、更便宜的配置。"
+        "autoTitleModelHint": "保留默认项会始终使用第一个已配置的 LLM，也可以选择更快、更便宜的配置。",
+        "autoTitlePrompt": "标题生成 Prompt 模板",
+        "autoTitlePromptHint": "自定义生成标题时使用的系统提示词。内容留空时，将使用占位符中显示的系统默认模板。"
     },
     "llmSettings": {
         "title": "LLM 配置",

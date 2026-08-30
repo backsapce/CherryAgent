@@ -3,16 +3,27 @@ import assert from 'node:assert/strict';
 import {
   buildSessionTitleRequest,
   cleanGeneratedSessionTitle,
+  getDefaultSessionTitlePrompt,
   normalizeAutoTitleConfig,
   selectAutoTitleProfileId,
 } from './sessionTitle.js';
 
-test('auto title is enabled by default and has no fixed profile', () => {
-  assert.deepEqual(normalizeAutoTitleConfig(), { enabled: true, llmProfileId: null });
-  assert.deepEqual(normalizeAutoTitleConfig({ enabled: false, llmProfileId: 'cheap' }), {
+test('auto title is enabled by default and has no fixed profile or custom prompt', () => {
+  assert.deepEqual(normalizeAutoTitleConfig(), {
+    enabled: true,
+    llmProfileId: null,
+    promptTemplate: '',
+  });
+  assert.deepEqual(normalizeAutoTitleConfig({
     enabled: false,
     llmProfileId: 'cheap',
+    promptTemplate: 'Use a terse title.',
+  }), {
+    enabled: false,
+    llmProfileId: 'cheap',
+    promptTemplate: 'Use a terse title.',
   });
+  assert.equal(normalizeAutoTitleConfig({ promptTemplate: '  \n' }).promptTemplate, '');
 });
 
 test('auto title profile uses a valid preference or the first configured profile', () => {
@@ -35,6 +46,18 @@ test('title request asks for the selected language and includes both sides of th
   assert.match(request.systemPrompt, /at most one relevant emoji/);
   assert.match(request.messages[0].content, /帮我分析日志/);
   assert.match(request.messages[0].content, /问题来自无效配置/);
+});
+
+test('title request uses a custom prompt and falls back to the localized system template when empty', () => {
+  assert.equal(
+    buildSessionTitleRequest([], 'ja', 'Use exactly three words.').systemPrompt,
+    'Use exactly three words.'
+  );
+  assert.equal(
+    buildSessionTitleRequest([], 'ja', '  \n').systemPrompt,
+    getDefaultSessionTitlePrompt('ja')
+  );
+  assert.match(getDefaultSessionTitlePrompt('ja'), /Japanese/);
 });
 
 test('generated titles are reduced to plain concise text', () => {

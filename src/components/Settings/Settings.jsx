@@ -29,7 +29,10 @@ import { X, Lock, Plug, Sun, Moon, Monitor, UploadCloud, DownloadCloud, AlertTri
 import { listAllSkills, setSkillEnabled } from '../../agent/skills';
 import { listAllTools, setToolEnabled } from '../../agent/tools';
 import { createAgent, deleteAgent, updateAgentName, updateAgentConfig, listAgents } from '../../agents/agents';
-import { normalizeAutoTitleConfig } from '../../models/sessionTitle';
+import {
+  getDefaultSessionTitlePrompt,
+  normalizeAutoTitleConfig,
+} from '../../models/sessionTitle';
 import {
   normalizeShowHiddenFiles,
   SHOW_HIDDEN_FILES_CONFIG_PATH,
@@ -141,7 +144,7 @@ const Settings = ({
   onBeforeStorageSync,
   storageVersion = 0,
 }) => {
-  const { t, localePref, changeLocale } = useI18n();
+  const { t, locale, localePref, changeLocale } = useI18n();
   const [settingsTab, setSettingsTab] = useState('llm');
   const [llmSettingsTab, setLlmSettingsTab] = useState('llms');
   const [settingsForm, setSettingsForm] = useState({
@@ -189,7 +192,11 @@ const Settings = ({
   const [localNickname, setLocalNickname] = useState(userNickname || '');
   const [localAvatar, setLocalAvatar] = useState(avatar || '');
   const [avatarError, setAvatarError] = useState(null);
-  const [autoTitleForm, setAutoTitleForm] = useState({ enabled: true, llmProfileId: null });
+  const [autoTitleForm, setAutoTitleForm] = useState({
+    enabled: true,
+    llmProfileId: null,
+    promptTemplate: '',
+  });
   const [showHiddenFilesForm, setShowHiddenFilesForm] = useState(false);
   const avatarInputRef = useRef(null);
   const [agentAddMode, setAgentAddMode] = useState('server'); // 'server' | 'e2b'
@@ -504,6 +511,7 @@ const Settings = ({
       autoTitle: {
         enabled: autoTitleForm.enabled,
         llmProfileId: effectiveAutoTitleProfileId,
+        promptTemplate: autoTitleForm.promptTemplate.trim(),
       },
       showHiddenFiles: showHiddenFilesForm,
     });
@@ -1310,6 +1318,20 @@ const Settings = ({
                 ))}
               </select>
               <p className="settings-hint">{t('generalSettings.autoTitleModelHint')}</p>
+
+              <label>{t('generalSettings.autoTitlePrompt')}</label>
+              <textarea
+                className="settings-prompt-textarea"
+                rows={7}
+                value={autoTitleForm.promptTemplate}
+                disabled={!autoTitleForm.enabled}
+                placeholder={getDefaultSessionTitlePrompt(locale)}
+                onChange={(e) => setAutoTitleForm((form) => ({
+                  ...form,
+                  promptTemplate: e.target.value,
+                }))}
+              />
+              <p className="settings-hint">{t('generalSettings.autoTitlePromptHint')}</p>
 
               <div className="settings-actions">
                 <button className="settings-cancel" onClick={onClose}>{t('settings.cancel')}</button>

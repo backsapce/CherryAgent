@@ -155,7 +155,8 @@
 .settings-section select,
 .settings-section input[type="text"],
 .settings-section input[type="password"],
-.settings-section input[type="number"] {
+.settings-section input[type="number"],
+.settings-section textarea {
   width: 100%;
   padding: 10px 11px;
   background: color-mix(in srgb, var(--color-bg) 72%, var(--color-surface));
@@ -169,9 +170,21 @@
 }
 
 .settings-section select:focus,
-.settings-section input:focus {
+.settings-section input:focus,
+.settings-section textarea:focus {
   border-color: var(--color-border-focus);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-border-focus) 16%, transparent);
+}
+
+.settings-prompt-textarea {
+  min-height: 132px;
+  resize: vertical;
+  line-height: 1.5;
+}
+
+.settings-prompt-textarea::placeholder {
+  color: var(--color-text-quaternary);
+  opacity: 1;
 }
 
 .settings-hint {
@@ -1477,6 +1490,11 @@
 }
 
 .settings-section select:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.settings-section textarea:disabled {
   cursor: not-allowed;
   opacity: 0.6;
 }

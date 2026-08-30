@@ -1208,7 +1208,7 @@ function App() {
       ? `${sourceFirstUser.id || ''}\n${String(sourceFirstUser.content || '')}`
       : null;
     const locale = resolveLocale(localePrefRef.current);
-    const request = buildSessionTitleRequest(completedMessages, locale);
+    const request = buildSessionTitleRequest(completedMessages, locale, settings.promptTemplate);
     const controller = new AbortController();
     titleGenerationControllersRef.current.set(sessionId, controller);
 
