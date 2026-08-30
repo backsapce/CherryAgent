@@ -91,7 +91,9 @@
         "autoTitleModel": "Title Generation Model",
         "autoTitleFirstModel": "First configured LLM (currently {model})",
         "autoTitleNoModel": "No configured LLM available",
-        "autoTitleModelHint": "Keep the default to follow the first configured LLM, or choose a faster, lower-cost profile."
+        "autoTitleModelHint": "Keep the default to follow the first configured LLM, or choose a faster, lower-cost profile.",
+        "autoTitlePrompt": "Title Prompt Template",
+        "autoTitlePromptHint": "Customize the system prompt used to generate titles. Leave it empty to use the system template shown as the placeholder."
     },
     "llmSettings": {
         "title": "LLM Configuration",

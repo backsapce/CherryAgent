@@ -91,7 +91,9 @@
         "autoTitleModel": "タイトル生成モデル",
         "autoTitleFirstModel": "最初に設定された LLM（現在：{model}）",
         "autoTitleNoModel": "利用可能な LLM 設定がありません",
-        "autoTitleModelHint": "デフォルトでは最初に設定された LLM を使用します。より高速で低コストなプロファイルも選択できます。"
+        "autoTitleModelHint": "デフォルトでは最初に設定された LLM を使用します。より高速で低コストなプロファイルも選択できます。",
+        "autoTitlePrompt": "タイトル生成プロンプトテンプレート",
+        "autoTitlePromptHint": "タイトル生成に使用するシステムプロンプトをカスタマイズします。空欄にすると、プレースホルダーに表示されるシステム既定テンプレートを使用します。"
     },
     "llmSettings": {
         "title": "LLM 設定",
