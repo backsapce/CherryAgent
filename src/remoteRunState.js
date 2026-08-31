@@ -72,6 +72,27 @@ export function findSessionReply(messages, replyId) {
     : null;
 }
 
+export function finishReplyRunTiming(messages, replyId, finishedAt, fallbackStartedAt = null) {
+  if (!Array.isArray(messages) || !replyId || !finishedAt) return messages;
+  let changed = false;
+  const next = messages.map((message) => {
+    if (message?.id !== replyId) return message;
+    changed = true;
+    const transcript = Array.isArray(message.transcript)
+      ? message.transcript.map((segment) => segment?.status === 'streaming'
+          ? { ...segment, status: 'finished', finishedAt }
+          : segment)
+      : null;
+    return {
+      ...message,
+      runStartedAt: message.runStartedAt ?? fallbackStartedAt,
+      runFinishedAt: finishedAt,
+      ...(transcript ? { transcript } : {}),
+    };
+  });
+  return changed ? next : messages;
+}
+
 /**
  * A saved reducer state is only safe to reuse when it has the matching durable
  * event cursor. Legacy replies have no cursor, so they must be rebuilt from the

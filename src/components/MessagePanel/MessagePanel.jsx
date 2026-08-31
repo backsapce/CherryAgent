@@ -16,6 +16,7 @@ import { getSkillCommandRange } from './skillCommand';
 import { getScheduleWakeupRunAtMs } from './toolWakeupCountdown';
 import { stripLegacyContextFileSummary } from '../../contextFiles';
 import { hasRenderableTranscript } from './transcriptVisibility';
+import { resolveThinkingElapsed, timestampOf } from './thinkingElapsed';
 import { formatWakeupCountdown } from '../SessionList/wakeupCountdown';
 import {
   collectAgentWorkspaceFiles,
@@ -370,24 +371,24 @@ function formatDuration(seconds) {
 const ThinkingBlock = ({ thinking, isThinking, startedAt, finishedAt, round }) => {
   const { t } = useI18n();
   const [expanded, setExpanded] = useState(false);
-  const startTimeRef = useRef(null);
-  const [elapsed, setElapsed] = useState(() => elapsedBetween(startedAt, finishedAt));
+  const [fallbackStartedAt] = useState(() => Date.now());
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const effectiveStartedAt = timestampOf(startedAt) ?? fallbackStartedAt;
 
   useEffect(() => {
-    if (isThinking) {
-      if (!startTimeRef.current) startTimeRef.current = timestampOf(startedAt) || Date.now();
-      const timer = setInterval(() => {
-        setElapsed(Math.floor((Date.now() - startTimeRef.current) / 1000));
-      }, 200);
-      return () => clearInterval(timer);
-    } else {
-      startTimeRef.current = null;
-    }
-  }, [isThinking, thinking, startedAt, finishedAt]);
+    if (!isThinking) return undefined;
+    const timer = setInterval(() => setNowMs(Date.now()), 200);
+    return () => clearInterval(timer);
+  }, [isThinking, startedAt]);
 
   if (!thinking && !isThinking) return null;
 
-  const shownElapsed = elapsedBetween(startedAt, finishedAt) || elapsed;
+  const shownElapsed = resolveThinkingElapsed({
+    startedAt: effectiveStartedAt,
+    finishedAt,
+    isThinking,
+    nowMs,
+  }) ?? 0;
   const labelText = isThinking
     ? round ? t('message.thinkingRound', { round }) : t('message.thinking')
     : thinking
@@ -417,17 +418,6 @@ const ThinkingBlock = ({ thinking, isThinking, startedAt, finishedAt, round }) =
     </div>
   );
 };
-
-function timestampOf(value) {
-  const timestamp = value ? Date.parse(value) : NaN;
-  return Number.isFinite(timestamp) ? timestamp : 0;
-}
-
-function elapsedBetween(startedAt, finishedAt) {
-  const start = timestampOf(startedAt);
-  const finish = timestampOf(finishedAt);
-  return start && finish ? Math.max(0, Math.floor((finish - start) / 1000)) : 0;
-}
 
 const normalizeTerminalOutput = (value) => String(value || '').replace(/\r?\n/g, '\r\n');
 
@@ -1672,7 +1662,12 @@ const MessagePanel = forwardRef(({
                   <span>{msg.role === 'user' ? userName : assistantName}</span>
                 </div>
                 {msg.role === 'assistant' && !hasTranscript && !showImageGenerationStatus && (msg.thinking || (streaming && msg.content === '')) && (
-                  <ThinkingBlock thinking={msg.thinking} isThinking={streaming && msg === messages[messages.length - 1]} />
+                  <ThinkingBlock
+                    thinking={msg.thinking}
+                    isThinking={streaming && msg === messages[messages.length - 1]}
+                    startedAt={msg.runStartedAt}
+                    finishedAt={msg.runFinishedAt}
+                  />
                 )}
                 {showImageGenerationStatus && <ImageGenerationStatus />}
                 {msg.contextFiles?.length > 0 && (

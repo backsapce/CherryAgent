@@ -4,6 +4,7 @@ import {
   assertRemoteRunSnapshot,
   captureRemoteReplyFields,
   findSessionReply,
+  finishReplyRunTiming,
   isSlowRemoteRetryError,
   markConfirmedRemoteRunFailure,
   markRemoteRunPollError,
@@ -44,6 +45,38 @@ test('an explicitly loaded conversation takes precedence over a stale fallback',
   const messages = upsertSessionReply(current, fallback, 'reply-1');
 
   assert.deepEqual(messages.map((message) => message.id), ['current', 'reply-1']);
+});
+
+test('force-detaching a run seals its reply timing without resetting its start', () => {
+  const messages = [
+    {
+      id: 'reply-1',
+      role: 'assistant',
+      content: '',
+      runStartedAt: '2026-01-01T00:00:00.000Z',
+      transcript: [{
+        id: 'reasoning-1',
+        type: 'reasoning',
+        content: 'Partial reasoning.',
+        status: 'streaming',
+        startedAt: '2026-01-01T00:00:00.000Z',
+      }],
+    },
+    { id: 'reply-2', role: 'assistant', content: 'untouched' },
+  ];
+  const finished = finishReplyRunTiming(
+    messages,
+    'reply-1',
+    '2026-01-01T00:00:09.000Z',
+    '2026-01-01T00:00:01.000Z'
+  );
+
+  assert.equal(finished[0].runStartedAt, '2026-01-01T00:00:00.000Z');
+  assert.equal(finished[0].runFinishedAt, '2026-01-01T00:00:09.000Z');
+  assert.equal(finished[0].transcript[0].status, 'finished');
+  assert.equal(finished[0].transcript[0].finishedAt, '2026-01-01T00:00:09.000Z');
+  assert.strictEqual(finished[1], messages[1]);
+  assert.strictEqual(finishReplyRunTiming(messages, 'missing', '2026-01-01T00:00:09.000Z'), messages);
 });
 
 test('legacy replies rebuild from event zero instead of duplicating their saved transcript', () => {

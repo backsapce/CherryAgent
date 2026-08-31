@@ -51,6 +51,7 @@ import {
   assertRemoteRunSnapshot,
   captureRemoteReplyFields,
   findSessionReply,
+  finishReplyRunTiming,
   isSlowRemoteRetryError,
   markConfirmedRemoteRunFailure,
   markRemoteRunPollError,
@@ -232,6 +233,8 @@ function expandMessagesForLlm(messages) {
       toolCalls,
       transcript: _transcript,
       usage: _usage,
+      runStartedAt: _runStartedAt,
+      runFinishedAt: _runFinishedAt,
       remoteEventSequence: _remoteEventSequence,
       remoteReasoningParsers: _remoteReasoningParsers,
       ...rest
@@ -815,7 +818,28 @@ function App() {
           // A broken provider/tool may ignore AbortSignal forever. Detach its
           // UI generation after a bounded grace period; identity checks in the
           // stream callbacks prevent that late task from touching a newer run.
-          if (!settled) sessionRunsRef.current.finish(sessionId, run);
+          if (!settled) {
+            const detachedAt = new Date().toISOString();
+            if (run.rafId) {
+              cancelAnimationFrame(run.rafId);
+              run.rafId = null;
+            }
+            sessionRunsRef.current.enqueueIfCurrent(sessionId, run, () => {
+              setSessions((prev) => sortSessions(prev.map((session) => {
+                if (session.id !== sessionId) return session;
+                const messages = finishReplyRunTiming(
+                  session.messages,
+                  run.replyId,
+                  detachedAt,
+                  run.runStartedAt
+                );
+                return messages === session.messages
+                  ? session
+                  : { ...session, messages, ...sessionTimeFields() };
+              })));
+            });
+            sessionRunsRef.current.finish(sessionId, run);
+          }
         })
       : Promise.resolve();
     const stopPromise = Promise.allSettled([remoteAbort, localStop])
@@ -1307,9 +1331,19 @@ function App() {
     }
 
     const replyId = opts.replyId || generateId();
+    const seedReply = findSessionReply(
+      sessionSnapshot?.messages || sessionMessages,
+      replyId
+    );
+    // The fallback thinking block unmounts when chat history changes. Keep its
+    // clock anchor on the durable reply so remounting does not restart at 0s.
+    const fallbackRunStartedAt = seedReply?.runStartedAt ?? new Date().toISOString();
+    const fallbackRunFinishedAt = seedReply?.runFinishedAt ?? null;
     const run = runRegistry.begin(sessionId, {
       remoteRun: null,
       wakeupId: opts.wakeupId || null,
+      replyId,
+      runStartedAt: fallbackRunStartedAt,
       streamingContent: '',
       streamingThinking: '',
       rafId: null,
@@ -1341,7 +1375,11 @@ function App() {
             messages: upsertSessionReply(
               session.messages,
               sessionMessages,
-              replyId
+              replyId,
+              {
+                runStartedAt: fallbackRunStartedAt,
+                runFinishedAt: fallbackRunFinishedAt,
+              }
             ),
           }
         : session
@@ -1357,16 +1395,16 @@ function App() {
     let confirmedRemoteFailureStatus = null;
 
     // Track tool calls for this message
-    const seedReply = findSessionReply(
-      sessionSnapshot?.messages || sessionMessages,
-      replyId
-    );
     const remoteEventReplay = prepareRemoteEventReplay(
       seedReply,
       Boolean(opts.resumeRunId)
     );
     const toolCalls = [...(remoteEventReplay.seed?.toolCalls || [])];
-    let agentEventState = createAgentEventState(remoteEventReplay.seed || {});
+    let agentEventState = createAgentEventState({
+      ...(remoteEventReplay.seed || {}),
+      runStartedAt: fallbackRunStartedAt,
+      runFinishedAt: fallbackRunFinishedAt,
+    });
     let lastRemoteEventSequence = remoteEventReplay.cursor;
     let hasAppliedRemoteEvents = remoteEventReplay.cursor > 0;
     run.streamingContent = agentEventState.content;
@@ -1395,8 +1433,15 @@ function App() {
       // functional update. Reading these mutable closure values inside the
       // updater could pair older text with a newer cursor and skip events on
       // the next resume.
+      const timedFields = {
+        ...fields,
+        // Write a complete timing snapshot: run-start must clear a previous
+        // wake-up turn's finish instead of retaining it through object merge.
+        runStartedAt: agentEventState.startedAt ?? fallbackRunStartedAt,
+        runFinishedAt: agentEventState.finishedAt ?? null,
+      };
       const replyFields = captureRemoteReplyFields(
-        fields,
+        timedFields,
         lastRemoteEventSequence,
         agentEventState.reasoningParsers
       );
@@ -1721,6 +1766,19 @@ function App() {
       // our signal is still live those errors must be visible in the message.
       if (run.controller.signal.aborted || !isRunCurrent()) {
         runOutcome = { status: 'aborted', error: err };
+        const ownsAbortedRun = isRunCurrent() && run.controller.signal.aborted;
+        const abortedAt = ownsAbortedRun ? new Date().toISOString() : null;
+        // Once AbortSignal is set, applyStreamEvent intentionally ignores late
+        // provider/runtime events, including the loop's run-abort event. Seal
+        // the owned reply here so responsive cancellation records the same
+        // terminal timing as the force-detach fallback in stopSessionRun().
+        if (ownsAbortedRun) {
+          agentEventState = applyAgentEvent(agentEventState, {
+            type: 'run-abort',
+            at: abortedAt,
+            reason: err?.message || 'aborted',
+          });
+        }
         toolCalls.splice(0, toolCalls.length, ...toolCalls.map((tc) => (
           ['pending', 'running', 'writing'].includes(tc.status)
             ? { ...tc, status: 'aborted', result: tc.result || 'Aborted' }
@@ -1732,6 +1790,22 @@ function App() {
           savedReply: seedReply,
         })) {
           updateMessage({ content: run.streamingContent, thinking: run.streamingThinking, toolCalls: [...toolCalls], transcript: agentEventState.transcript }, { touch: true });
+        } else if (ownsAbortedRun) {
+          // A legacy remote reply cannot be replaced with an empty replay seed
+          // when cancellation happens before its first event arrives. Update
+          // only its terminal fields and retain the saved visible content.
+          updateSessionsForRun((prev) => sortSessions(prev.map((session) => {
+            if (session.id !== sessionId) return session;
+            const messages = finishReplyRunTiming(
+              session.messages,
+              replyId,
+              abortedAt,
+              fallbackRunStartedAt
+            );
+            return messages === session.messages
+              ? session
+              : { ...session, messages, ...sessionTimeFields() };
+          })));
         }
       } else {
         const slowRemoteRetry = isSlowRemoteRetryError(err);
