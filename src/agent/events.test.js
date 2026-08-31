@@ -271,7 +271,12 @@ test('persisted assistant state seeds incremental remote event replay', () => {
     toolCalls: [{ id: 'turn-1:call', name: 'schedule_wakeup', status: 'completed' }],
     transcript: [],
     usage: { total_tokens: 10 },
+    runStartedAt: '2026-01-01T00:00:00.000Z',
+    runFinishedAt: '2026-01-01T00:00:05.000Z',
   });
+
+  assert.equal(state.startedAt, '2026-01-01T00:00:00.000Z');
+  assert.equal(state.finishedAt, '2026-01-01T00:00:05.000Z');
 
   state = applyAgentEvent(state, {
     type: 'text-start',
@@ -293,6 +298,50 @@ test('persisted assistant state seeds incremental remote event replay', () => {
   assert.equal(state.thinking, 'Initial reasoning.');
   assert.deepEqual(state.toolCalls.map((toolCall) => toolCall.id), ['turn-1:call']);
   assert.equal(state.sequence, 12);
+  assert.equal(state.startedAt, '2026-01-01T00:00:00.000Z');
+  assert.equal(state.finishedAt, '2026-01-01T00:00:05.000Z');
+});
+
+test('a resumed run replaces seeded start timing and clears the previous finish', () => {
+  let state = createAgentEventState({
+    runStartedAt: '2026-01-01T00:00:00.000Z',
+    runFinishedAt: '2026-01-01T00:00:05.000Z',
+  });
+
+  state = applyAgentEvent(state, {
+    type: 'run-start',
+    runId: 'turn-2',
+    sequence: 13,
+    at: '2026-01-01T00:01:00.000Z',
+  });
+
+  assert.equal(state.startedAt, '2026-01-01T00:01:00.000Z');
+  assert.equal(state.finishedAt, null);
+});
+
+test('run terminal events seal an in-progress reasoning segment', () => {
+  for (const type of ['run-finish', 'run-error', 'run-abort']) {
+    let state = createAgentEventState();
+    state = applyAgentEvent(state, {
+      type: 'reasoning-start',
+      segmentId: 'reasoning-1',
+      at: '2026-01-01T00:00:00.000Z',
+    });
+    state = applyAgentEvent(state, {
+      type: 'reasoning-delta',
+      segmentId: 'reasoning-1',
+      text: 'Partial reasoning.',
+    });
+    state = applyAgentEvent(state, {
+      type,
+      at: '2026-01-01T00:00:04.000Z',
+      ...(type === 'run-error' ? { error: new Error('transport failed') } : {}),
+    });
+
+    const reasoning = state.transcript.find((segment) => segment.type === 'reasoning');
+    assert.equal(reasoning.status, 'finished', type);
+    assert.equal(reasoning.finishedAt, '2026-01-01T00:00:04.000Z', type);
+  }
 });
 
 test('incremental replay restores tagged-reasoning parser checkpoints', () => {

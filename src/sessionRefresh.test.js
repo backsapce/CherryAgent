@@ -152,6 +152,8 @@ test('remote reply checkpoints merge atomically by durable event sequence', () =
     toolCalls: [{ id: `call-${sequence}`, status: 'completed' }],
     transcript: [{ id: `text-${sequence}`, type: 'text', content }],
     usage: { total_tokens: sequence },
+    runStartedAt: `2026-01-01T00:00:${sequence}.000Z`,
+    runFinishedAt: sequence === 12 ? null : `2026-01-01T00:00:${sequence + 1}.000Z`,
     remoteEventSequence: sequence,
     remoteReasoningParsers: { reasoning: { mode: sequence === 12 ? 'text' : 'reasoning' } },
     reaction: sequence === 10 ? 'saved-metadata' : 'local-metadata',
@@ -179,6 +181,8 @@ test('remote reply checkpoints merge atomically by durable event sequence', () =
     'toolCalls',
     'transcript',
     'usage',
+    'runStartedAt',
+    'runFinishedAt',
     'remoteEventSequence',
     'remoteReasoningParsers',
   ]) {
@@ -198,6 +202,8 @@ test('remote reply checkpoints merge atomically by durable event sequence', () =
     'toolCalls',
     'transcript',
     'usage',
+    'runStartedAt',
+    'runFinishedAt',
     'remoteEventSequence',
     'remoteReasoningParsers',
   ]) {

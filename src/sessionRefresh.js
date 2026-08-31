@@ -26,6 +26,8 @@ const REMOTE_REPLY_CHECKPOINT_FIELDS = [
   'toolCalls',
   'transcript',
   'usage',
+  'runStartedAt',
+  'runFinishedAt',
   'remoteEventSequence',
   'remoteReasoningParsers',
 ];

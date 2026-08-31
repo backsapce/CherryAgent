@@ -46,8 +46,8 @@ export function createAgentEventState(seed = {}) {
     status: 'idle',
     runId: null,
     sequence: 0,
-    startedAt: null,
-    finishedAt: null,
+    startedAt: seed?.runStartedAt ?? null,
+    finishedAt: seed?.runFinishedAt ?? null,
     finishReason: null,
     error: null,
     content,
@@ -200,19 +200,19 @@ export function applyAgentEvent(state, event) {
     case 'finish':
       return finishRun(next, event);
     case 'run-error':
-      return {
+      return finishTerminalTranscript({
         ...next,
         status: 'error',
         finishedAt: event.at || next.finishedAt,
         error: errorMessage(event.error),
-      };
+      });
     case 'run-abort':
-      return {
+      return finishTerminalTranscript({
         ...next,
         status: 'aborted',
         finishedAt: event.at || next.finishedAt,
         finishReason: event.reason || 'aborted',
-      };
+      });
     case 'text-start':
       return startTranscriptSegment(next, event, 'text');
     case 'text-end':
@@ -275,12 +275,19 @@ function finishStep(state, event) {
 }
 
 function finishRun(state, event) {
-  return {
+  return finishTerminalTranscript({
     ...state,
     status: 'finished',
     finishedAt: event.at || state.finishedAt,
     finishReason: event.finishReason || state.finishReason,
     ...(event.usage ? { usage: event.usage } : {}),
+  });
+}
+
+function finishTerminalTranscript(state) {
+  return {
+    ...state,
+    transcript: finishOpenTranscriptSegments(state.transcript, state.finishedAt),
   };
 }
 
