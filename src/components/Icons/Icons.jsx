@@ -68,6 +68,19 @@ export const FileEdit = ({ width = 18, height = 18, className = '' }) => (
   </IconBase>
 );
 
+export const ChevronUp = ({ width = 14, height = 14, className = '' }) => (
+  <IconBase width={width} height={height} viewBox="0 0 24 24" className={className}>
+    <polyline points="18 15 12 9 6 15" />
+  </IconBase>
+);
+
+export const Eye = ({ width = 18, height = 18, className = '' }) => (
+  <IconBase width={width} height={height} viewBox="0 0 24 24" className={className}>
+    <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z" />
+    <circle cx="12" cy="12" r="3" />
+  </IconBase>
+);
+
 export const Copy = ({ width = 18, height = 18, className = '' }) => (
   <IconBase width={width} height={height} viewBox="0 0 24 24" className={className}>
     <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />

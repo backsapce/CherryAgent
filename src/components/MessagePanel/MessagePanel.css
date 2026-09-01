@@ -1019,6 +1019,11 @@
 .tool-image-link {
   display: inline-block;
   max-width: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  cursor: zoom-in;
 }
 
 .tool-image {
@@ -1112,6 +1117,23 @@
   border-radius: 8px;
   border: 1px solid var(--color-border);
   object-fit: contain;
+}
+
+.message-image-trigger {
+  display: flex;
+  max-width: 300px;
+  max-height: 200px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  cursor: zoom-in;
+}
+
+.message-image-trigger:focus-visible,
+.tool-image-link:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
 }
 
 .message-file-attachments {
