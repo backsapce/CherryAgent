@@ -10,8 +10,10 @@ import {
 } from '../../config/fileVisibility';
 import { suspendAutoSync, waitForSyncIdle } from '../../sync/syncManager';
 import { enqueueStorageOperation } from '../Settings/storageOperationQueue';
-import { ChevronRight, ChevronDown, Folder, File, FilePlus, FolderPlus, Refresh, X, Upload, Cloud, HardDrive, Trash, Download, FileEdit, Spinner, MultiSelect } from '../Icons/Icons';
+import { ChevronRight, ChevronDown, Folder, File, FilePlus, FolderPlus, Refresh, X, Upload, Cloud, HardDrive, Trash, Download, Eye, FileEdit, Spinner, MultiSelect } from '../Icons/Icons';
 import FileEditor from './FileEditor';
+import ImagePreview from '../ImagePreview/ImagePreview';
+import { directoryImageNames, isImageFile } from './imagePreviewUtils';
 import { isCurrentAgentWorkspace, isOrphanedAgentWorkspace, joinFileManagerPath, normalizeFileManagerPath } from './pathUtils';
 import { createUploadBatch, readDroppedUploadBatch, uploadBatchToDestination } from './uploadUtils';
 import './FileManage.css';
@@ -95,6 +97,7 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandb
   const dropZoneRef = useRef(null);
   const [editorOpen, setEditorOpen] = useState(false);
   const [editingFile, setEditingFile] = useState(null);
+  const [previewingImage, setPreviewingImage] = useState(null);
   const agentIds = useMemo(() => (
     Array.isArray(agents) ? new Set(agents.map((agent) => agent.id)) : null
   ), [agents]);
@@ -417,6 +420,20 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandb
 
   const handleEditorClose = useCallback(() => { setEditorOpen(false); setEditingFile(null); }, []);
   const handleEditorSave = useCallback(() => refreshTree(), [refreshTree]);
+  const handlePreviewImage = useCallback((fileName, filePath, directoryEntries) => {
+    const imageNames = directoryImageNames(directoryEntries);
+    const images = imageNames.includes(fileName) ? imageNames : [fileName];
+    setPreviewingImage({ fileName, filePath, images, index: images.indexOf(fileName) });
+  }, []);
+  const handlePreviewClose = useCallback(() => setPreviewingImage(null), []);
+  const handlePreviewNavigate = useCallback((offset) => {
+    setPreviewingImage((current) => {
+      if (!current) return null;
+      const nextIndex = current.index + offset;
+      if (nextIndex < 0 || nextIndex >= current.images.length) return current;
+      return { ...current, fileName: current.images[nextIndex], index: nextIndex };
+    });
+  }, []);
 
   const canDropItemOnDirectory = useCallback((item, targetPath) => {
     const targetDir = normalizeFileManagerPath(targetPath);
@@ -602,7 +619,7 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandb
     return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
   };
 
-  const renderTreeNode = (node, depth = 0, parentDir = '') => {
+  const renderTreeNode = (node, depth = 0, parentDir = '', siblingNodes = []) => {
     if (node.type === 'directory') {
       const isExpanded = expandedDirs.has(node.id);
       const nodeParentDir = normalizeFileManagerPath(parentDir || node.parentDir || '');
@@ -672,7 +689,7 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandb
           </div>
           {isExpanded && Array.isArray(node.children) && node.children.length > 0 && (
             <div className="tree-children">
-              {node.children.map((child) => renderTreeNode(child, depth + 1, dirPath))}
+              {node.children.map((child) => renderTreeNode(child, depth + 1, dirPath, node.children))}
             </div>
           )}
         </div>
@@ -684,6 +701,7 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandb
       const isSelected = selectedItemKey === itemKey;
       const isMultiSelected = multiSelectMode && multiSelectedItems.has(itemKey);
       const isDragging = draggedItem?.key === itemKey;
+      const isImage = isImageFile(node.name);
       const selectableItem = {
         key: itemKey,
         name: node.name,
@@ -708,7 +726,10 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandb
             }}
             onDoubleClick={(e) => {
               e.stopPropagation();
-              if (!multiSelectMode) handleEditFile(node.name, nodeParentDir);
+              if (!multiSelectMode) {
+                if (isImage) handlePreviewImage(node.name, nodeParentDir, siblingNodes);
+                else handleEditFile(node.name, nodeParentDir);
+              }
             }}
             onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); handleSelectItem(nodeParentDir, node.name, 'file'); }}
           >
@@ -718,6 +739,7 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandb
             {node.size && <span className="tree-size">{formatFileSize(node.size)}</span>}
             {(isSelected || isMultiSelected) && <span className="tree-selected-badge">✓</span>}
             <div className={`file-actions ${multiSelectMode ? 'multi-hidden' : ''}`} aria-hidden={multiSelectMode}>
+              {isImage && <button className="file-action-btn" onClick={(e) => { e.stopPropagation(); handlePreviewImage(node.name, nodeParentDir, siblingNodes); }} title={t('filemanage.preview')}><Eye width={16} height={16} /></button>}
               <button className="file-action-btn" onClick={(e) => { e.stopPropagation(); handleEditFile(node.name, nodeParentDir); }} title={t('filemanage.edit')}><FileEdit width={16} height={16} /></button>
               <button className="file-action-btn" onClick={(e) => { e.stopPropagation(); handleDownloadFile(node.name, nodeParentDir); }} title={t('filemanage.download')}><Download width={16} height={16} /></button>
               <button className="file-action-btn delete-btn" onClick={(e) => { e.stopPropagation(); handleDeleteFile(node.name, nodeParentDir, false); }} title={t('filemanage.delete')}><Trash width={16} height={16} /></button>
@@ -809,6 +831,21 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandb
       )}
       <FileEditor show={editorOpen} onClose={handleEditorClose} fileName={editingFile?.fileName} filePath={editingFile?.filePath} fileSource={fileSource} sandboxUrl={sandboxUrl} onSave={handleEditorSave} />
     </div>
+      {previewingImage && (
+        <ImagePreview
+          key={`${fileSource}:${previewingImage.filePath || ''}/${previewingImage.fileName}`}
+          fileName={previewingImage.fileName}
+          filePath={previewingImage.filePath}
+          loadBlob={fileOps.download}
+          position={previewingImage.index + 1}
+          total={previewingImage.images.length}
+          hasPrevious={previewingImage.index > 0}
+          hasNext={previewingImage.index < previewingImage.images.length - 1}
+          onPrevious={() => handlePreviewNavigate(-1)}
+          onNext={() => handlePreviewNavigate(1)}
+          onClose={handlePreviewClose}
+        />
+      )}
     </>
   );
 };

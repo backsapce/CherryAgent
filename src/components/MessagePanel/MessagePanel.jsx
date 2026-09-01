@@ -18,6 +18,7 @@ import { stripLegacyContextFileSummary } from '../../contextFiles';
 import { hasRenderableTranscript } from './transcriptVisibility';
 import { resolveThinkingElapsed, timestampOf } from './thinkingElapsed';
 import { formatWakeupCountdown } from '../SessionList/wakeupCountdown';
+import ImagePreview from '../ImagePreview/ImagePreview';
 import {
   collectAgentWorkspaceFiles,
   collectSandboxFiles,
@@ -606,9 +607,9 @@ const ToolImageReference = ({ reference, agentId, sandboxUrl }) => {
   if (error) return <div className="tool-image-error">{error}</div>;
   if (!imageUrl) return <div className="tool-image-loading">Loading image…</div>;
   return (
-    <a className="tool-image-link" href={imageUrl} download={downloadName} title={downloadName}>
-      <img className="tool-image" src={imageUrl} alt={reference.alt} />
-    </a>
+    <button className="tool-image-link" type="button" data-history-image-trigger title={reference.alt}>
+      <img className="tool-image" src={imageUrl} alt={reference.alt} data-history-image data-download-name={downloadName} />
+    </button>
   );
 };
 
@@ -882,6 +883,7 @@ const MessagePanel = forwardRef(({
   const { t } = useI18n();
   const [composerDrafts, setComposerDrafts] = useState({});
   const [copiedMessageId, setCopiedMessageId] = useState(null);
+  const [historyImagePreview, setHistoryImagePreview] = useState(null);
   const [showSettings, setShowSettings] = useState(false);
   const [showHiddenFiles, setShowHiddenFiles] = useState(
     () => normalizeShowHiddenFiles(config.get(SHOW_HIDDEN_FILES_CONFIG_PATH))
@@ -1507,6 +1509,44 @@ const MessagePanel = forwardRef(({
     requestAnimationFrame(() => resetEmptyTextareaCaret(e.currentTarget));
   };
 
+  const historyPreviewSessionKey = activeSessionId || draftKey;
+  const handleHistoryImageClick = (event) => {
+    const trigger = event.target.closest?.('[data-history-image-trigger]');
+    if (!trigger || !messageListRef.current?.contains(trigger)) return;
+
+    const clickedImage = trigger.matches('img[data-history-image]')
+      ? trigger
+      : trigger.querySelector('img[data-history-image]');
+    if (!clickedImage) return;
+
+    const imageElements = Array.from(messageListRef.current.querySelectorAll('img[data-history-image]'));
+    const index = imageElements.indexOf(clickedImage);
+    if (index < 0) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    const images = imageElements.map((image) => ({
+      src: image.currentSrc || image.src,
+      name: image.dataset.downloadName || image.alt || t('filemanage.preview'),
+      downloadName: image.dataset.downloadName || '',
+    }));
+    setHistoryImagePreview({ sessionId: historyPreviewSessionKey, images, index });
+  };
+
+  const handleHistoryPreviewNavigate = (offset) => {
+    setHistoryImagePreview((current) => {
+      if (!current || current.sessionId !== historyPreviewSessionKey) return current;
+      const nextIndex = current.index + offset;
+      if (nextIndex < 0 || nextIndex >= current.images.length) return current;
+      return { ...current, index: nextIndex };
+    });
+  };
+
+  const activeHistoryImagePreview = historyImagePreview?.sessionId === historyPreviewSessionKey
+    ? historyImagePreview
+    : null;
+  const currentHistoryImage = activeHistoryImagePreview?.images[activeHistoryImagePreview.index];
+
 
   return (
     <div className={`message-panel${showCenteredInput ? ' empty-input-state' : ''}`}>
@@ -1615,7 +1655,7 @@ const MessagePanel = forwardRef(({
         </div>
       </div>
 
-      <div className="message-list" ref={messageListRef} onScroll={handleMessageListScroll}>
+      <div className="message-list" ref={messageListRef} onScroll={handleMessageListScroll} onClickCapture={handleHistoryImageClick}>
         {messages.length === 0 ? (
           <div className="message-empty">
             <div className="message-empty-icon">
@@ -1680,7 +1720,9 @@ const MessagePanel = forwardRef(({
                 {msg.images && msg.images.length > 0 && (
                   <div className="message-images">
                     {msg.images.map((img, i) => (
-                      <img key={i} src={img.dataUrl} alt={img.name || t('message.uploaded')} className="message-image" />
+                      <button key={i} className="message-image-trigger" type="button" data-history-image-trigger title={t('filemanage.preview')}>
+                        <img src={img.dataUrl} alt={img.name || t('message.uploaded')} className="message-image" data-history-image data-download-name={img.name || ''} />
+                      </button>
                     ))}
                   </div>
                 )}
@@ -1990,6 +2032,21 @@ const MessagePanel = forwardRef(({
           </div>
         </div>
       </div>
+      {currentHistoryImage && (
+        <ImagePreview
+          key={`${historyPreviewSessionKey}:${activeHistoryImagePreview.index}`}
+          fileName={currentHistoryImage.name}
+          sourceUrl={currentHistoryImage.src}
+          downloadName={currentHistoryImage.downloadName}
+          position={activeHistoryImagePreview.index + 1}
+          total={activeHistoryImagePreview.images.length}
+          hasPrevious={activeHistoryImagePreview.index > 0}
+          hasNext={activeHistoryImagePreview.index < activeHistoryImagePreview.images.length - 1}
+          onPrevious={() => handleHistoryPreviewNavigate(-1)}
+          onNext={() => handleHistoryPreviewNavigate(1)}
+          onClose={() => setHistoryImagePreview(null)}
+        />
+      )}
     </div>
   );
 });
