@@ -13,6 +13,11 @@ import { splitTaggedReasoningContent } from '../../agent/reasoningTags';
 import { searchSkills } from '../../agent/skills';
 import { ChevronRight, Settings as SettingsIcon, Folder, File, FileEdit, Copy, MessageSquare, Plus, X, Send, Stop, Plug, PieChart, Cloud, User, ImageGenerate, Refresh } from '../Icons/Icons';
 import { getSkillCommandRange } from './skillCommand';
+import {
+  clampRestoredScrollTop,
+  isContentVisibilityRendered,
+  resolveSessionScrollSwitch,
+} from './sessionScrollRestore';
 import { getScheduleWakeupRunAtMs } from './toolWakeupCountdown';
 import { stripLegacyContextFileSummary } from '../../contextFiles';
 import { hasRenderableTranscript } from './transcriptVisibility';
@@ -42,6 +47,7 @@ const MESSAGE_HISTORY_PAGE_SIZE = 100;
 const MOBILE_MESSAGE_HISTORY_PAGE_SIZE = 40;
 const AUTO_SCROLL_BOTTOM_THRESHOLD = 48;
 const LOAD_HISTORY_TOP_THRESHOLD = 24;
+const SCROLL_CAPTURE_SETTLE_DELAY_MS = 120;
 const SCROLL_DIRECTION_EPSILON = 2;
 const EMPTY_COMPOSER_DRAFT = Object.freeze({
   input: '',
@@ -895,6 +901,12 @@ const MessagePanel = forwardRef(({
   const scrollRafRef = useRef(null);
   const lastScrollTopRef = useRef(0);
   const pendingHistoryScrollRestoreRef = useRef(null);
+  const sessionScrollStatesRef = useRef(new Map());
+  const pendingSessionScrollRestoreRef = useRef(null);
+  const suppressSessionScrollSaveRef = useRef(false);
+  const scrollCaptureTimerRef = useRef(null);
+  const activeSessionIdRef = useRef(activeSessionId);
+  const captureSessionScrollStateRef = useRef(null);
   const copiedTimerRef = useRef(null);
   const mentionSourceKeysRef = useRef(new Map());
   const textareaRef = useRef(null);
@@ -997,6 +1009,7 @@ const MessagePanel = forwardRef(({
     },
     discardSessionDraft(sessionId) {
       if (!sessionId) return;
+      sessionScrollStatesRef.current.delete(sessionId);
       setComposerDrafts((prev) => {
         if (!Object.prototype.hasOwnProperty.call(prev, sessionId)) return prev;
         const next = { ...prev };
@@ -1026,23 +1039,134 @@ const MessagePanel = forwardRef(({
         list.scrollTop = list.scrollHeight;
         lastScrollTopRef.current = list.scrollTop;
       }
-      scrollRafRef.current = null;
+      shouldAutoScrollRef.current = true;
+      suppressSessionScrollSaveRef.current = false;
+      // content-visibility: auto only expands messages to their real heights
+      // once they sit near the viewport, so the first pin lands short of the
+      // true bottom; re-pin across the next frames until heights settle.
+      let settleSteps = 6;
+      const settleToBottom = () => {
+        scrollRafRef.current = requestAnimationFrame(() => {
+          if (!shouldAutoScrollRef.current || settleSteps <= 0) {
+            scrollRafRef.current = null;
+            return;
+          }
+          settleSteps -= 1;
+          const settledList = messageListRef.current;
+          if (settledList) {
+            settledList.scrollTop = settledList.scrollHeight;
+            lastScrollTopRef.current = settledList.scrollTop;
+          }
+          settleToBottom();
+        });
+      };
+      settleToBottom();
     });
   }, [messages]);
 
+  const captureSessionScrollState = (list) => {
+    const listRect = list.getBoundingClientRect();
+    let anchorMessageId = null;
+    let anchorOffset = 0;
+    for (const element of list.querySelectorAll('.message')) {
+      const rect = element.getBoundingClientRect();
+      if (rect.bottom <= listRect.top) continue;
+      // `.message` uses content-visibility: auto, so right after a jump
+      // scroll the messages near the new viewport can still carry estimated
+      // 160px heights. Only a message the browser has really rendered gives
+      // an anchor geometry that can be restored; skip placeholders and keep
+      // scanning forward.
+      if (!isContentVisibilityRendered(element)) continue;
+      anchorMessageId = element.getAttribute('data-message-id');
+      anchorOffset = rect.top - listRect.top;
+      break;
+    }
+    return {
+      scrollTop: list.scrollTop,
+      visibleMessageCount,
+      atBottom: shouldAutoScrollRef.current,
+      anchorMessageId,
+      anchorOffset,
+    };
+  };
+
   useEffect(() => {
-    shouldAutoScrollRef.current = true;
-    setVisibleMessageCount(messageHistoryPageSize());
-    if (scrollRafRef.current) cancelAnimationFrame(scrollRafRef.current);
-    scrollRafRef.current = requestAnimationFrame(() => {
-      const list = messageListRef.current;
-      if (list) {
-        list.scrollTop = list.scrollHeight;
+    activeSessionIdRef.current = activeSessionId;
+    captureSessionScrollStateRef.current = captureSessionScrollState;
+  });
+
+  const applySessionScrollRestore = (list, state) => {
+    const anchor = state.anchorMessageId
+      ? list.querySelector(`.message[data-message-id="${CSS.escape(state.anchorMessageId)}"]`)
+      : null;
+    if (!anchor) {
+      list.scrollTop = clampRestoredScrollTop(state.scrollTop, list.scrollHeight, list.clientHeight);
+      lastScrollTopRef.current = list.scrollTop;
+      suppressSessionScrollSaveRef.current = false;
+      return;
+    }
+    const alignToAnchor = () => {
+      const delta = (anchor.getBoundingClientRect().top - list.getBoundingClientRect().top) - state.anchorOffset;
+      if (Math.abs(delta) >= 1) {
+        list.scrollTop += delta;
         lastScrollTopRef.current = list.scrollTop;
       }
-      scrollRafRef.current = null;
+    };
+    alignToAnchor();
+    // `.message` uses content-visibility: auto, so heights near the restored
+    // position only settle to their real values on the next frames; re-align
+    // once they do.
+    if (scrollRafRef.current) cancelAnimationFrame(scrollRafRef.current);
+    scrollRafRef.current = requestAnimationFrame(() => {
+      scrollRafRef.current = requestAnimationFrame(() => {
+        scrollRafRef.current = null;
+        alignToAnchor();
+        suppressSessionScrollSaveRef.current = false;
+      });
     });
+  };
+
+  useLayoutEffect(() => {
+    if (scrollRafRef.current) {
+      cancelAnimationFrame(scrollRafRef.current);
+      scrollRafRef.current = null;
+    }
+    if (scrollCaptureTimerRef.current) {
+      clearTimeout(scrollCaptureTimerRef.current);
+      scrollCaptureTimerRef.current = null;
+    }
+    pendingHistoryScrollRestoreRef.current = null;
+    pendingSessionScrollRestoreRef.current = null;
+    // Content swaps fire clamped scroll events that are not user scrolling;
+    // ignore them until the newly selected session has been positioned.
+    suppressSessionScrollSaveRef.current = true;
+    // Chat-history scroll positions only need to survive in-app session
+    // switches; nothing is persisted across browser reloads.
+    const savedState = activeSessionId
+      ? sessionScrollStatesRef.current.get(activeSessionId)
+      : null;
+    const switchPlan = resolveSessionScrollSwitch(savedState, messageHistoryPageSize());
+    shouldAutoScrollRef.current = switchPlan.shouldAutoScroll;
+    setVisibleMessageCount(switchPlan.visibleMessageCount);
+    if (switchPlan.restoreScrollTop != null) {
+      pendingSessionScrollRestoreRef.current = { sessionId: activeSessionId, state: savedState };
+    }
+    // The bottom case is handled by the [messages] auto-scroll effect for
+    // this commit; its rAF callback re-enables scroll-state recording.
   }, [activeSessionId]);
+
+  useLayoutEffect(() => {
+    const pending = pendingSessionScrollRestoreRef.current;
+    if (!pending || pending.sessionId !== activeSessionId) return;
+    // Wait until the restored history window has committed and, for sessions
+    // whose messages load asynchronously from OPFS, real messages render.
+    if (visibleMessageCount !== pending.state.visibleMessageCount) return;
+    if (messages.length === 0) return;
+    const list = messageListRef.current;
+    if (!list) return;
+    pendingSessionScrollRestoreRef.current = null;
+    applySessionScrollRestore(list, pending.state);
+  }, [activeSessionId, messages, visibleMessageCount]);
 
   useLayoutEffect(() => {
     const restore = pendingHistoryScrollRestoreRef.current;
@@ -1061,6 +1185,7 @@ const MessagePanel = forwardRef(({
 
   useEffect(() => () => {
     if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
+    if (scrollCaptureTimerRef.current) clearTimeout(scrollCaptureTimerRef.current);
   }, []);
 
   const handleMessageListScroll = (e) => {
@@ -1079,6 +1204,23 @@ const MessagePanel = forwardRef(({
       shouldAutoScrollRef.current = false;
     } else if (distanceFromBottom <= AUTO_SCROLL_BOTTOM_THRESHOLD) {
       shouldAutoScrollRef.current = true;
+    }
+    if (activeSessionId && !suppressSessionScrollSaveRef.current) {
+      sessionScrollStatesRef.current.set(activeSessionId, captureSessionScrollState(list));
+      // Right after a jump scroll, content-visibility may still be serving
+      // estimated heights near the new viewport; re-capture once scrolling
+      // settles so the saved anchor geometry is real.
+      if (scrollCaptureTimerRef.current) clearTimeout(scrollCaptureTimerRef.current);
+      const capturedSessionId = activeSessionId;
+      scrollCaptureTimerRef.current = setTimeout(() => {
+        scrollCaptureTimerRef.current = null;
+        if (suppressSessionScrollSaveRef.current) return;
+        if (activeSessionIdRef.current !== capturedSessionId) return;
+        const capture = captureSessionScrollStateRef.current;
+        const settledList = messageListRef.current;
+        if (!capture || !settledList) return;
+        sessionScrollStatesRef.current.set(capturedSessionId, capture(settledList));
+      }, SCROLL_CAPTURE_SETTLE_DELAY_MS);
     }
     lastScrollTopRef.current = list.scrollTop;
   };
@@ -1689,7 +1831,7 @@ const MessagePanel = forwardRef(({
             const displayContent = stripLegacyContextFileSummary(msg.content, msg.contextFiles);
 
             return (
-            <div key={msg.id} className={`message ${msg.role}`}>
+            <div key={msg.id} data-message-id={msg.id} className={`message ${msg.role}`}>
               <div className="message-avatar">
                 {msg.role === 'assistant' && avatar ? (
                   <img src={avatar} alt="" />
