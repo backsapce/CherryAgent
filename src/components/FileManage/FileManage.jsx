@@ -16,13 +16,13 @@ import ImagePreview from '../ImagePreview/ImagePreview';
 import { directoryImageNames, isImageFile } from './imagePreviewUtils';
 import { isCurrentAgentWorkspace, isOrphanedAgentWorkspace, joinFileManagerPath, normalizeFileManagerPath } from './pathUtils';
 import { createUploadBatch, readDroppedUploadBatch, uploadBatchToDestination } from './uploadUtils';
+import { FILE_MANAGER_DRAG_TYPE, readFileManagerDragItem } from './fileDrag';
 import './FileManage.css';
 
 // Breakpoint for mobile/tablet
 const MOBILE_BREAKPOINT = 768;
 
 const ROOT_ID = 'root';
-const FILE_MANAGER_DRAG_TYPE = 'application/x-cherry-filemanager-item';
 
 function getTreeItemPath(parentDir, name) {
   return joinFileManagerPath(parentDir, name);
@@ -41,16 +41,6 @@ function triggerDownload(blob, fileName) {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
-}
-
-function readDraggedTreeItem(dataTransfer) {
-  const raw = dataTransfer?.getData(FILE_MANAGER_DRAG_TYPE);
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return null;
-  }
 }
 
 const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandboxUrl, agents, activeAgentId }) => {
@@ -457,12 +447,16 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandb
     }
 
     e.stopPropagation();
-    const dragItem = { ...item, source: fileSource };
-    e.dataTransfer.effectAllowed = 'move';
+    const dragItem = {
+      ...item,
+      source: fileSource,
+      ...(fileSource === 'remote' && sandboxUrl ? { sandboxUrl } : {}),
+    };
+    e.dataTransfer.effectAllowed = item.type === 'file' ? 'copyMove' : 'move';
     e.dataTransfer.setData(FILE_MANAGER_DRAG_TYPE, JSON.stringify(dragItem));
     e.dataTransfer.setData('text/plain', dragItem.path);
     setDraggedItem(dragItem);
-  }, [fileSource, movingItem, multiSelectMode]);
+  }, [fileSource, movingItem, multiSelectMode, sandboxUrl]);
 
   const handleTreeDragEnd = useCallback(() => {
     setDraggedItem(null);
@@ -505,7 +499,7 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandb
 
   const handleDirectoryDrop = useCallback(async (e, targetPath) => {
     const targetDir = normalizeFileManagerPath(targetPath);
-    const transferItem = readDraggedTreeItem(e.dataTransfer) || draggedItem;
+    const transferItem = readFileManagerDragItem(e.dataTransfer) || draggedItem;
     dropZoneRef.current?.classList.remove('drag-over');
 
     if (transferItem) {

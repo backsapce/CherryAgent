@@ -35,6 +35,7 @@
         "exitCode": "終了コード {code}",
         "remove": "削除",
         "uploadImage": "画像をアップロード",
+        "dropImage": "ここに画像をドロップして添付",
         "edit": "編集",
         "copy": "コピー",
         "copied": "コピーしました",

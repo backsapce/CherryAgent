@@ -1528,6 +1528,28 @@
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-border-focus) 18%, transparent), 0 14px 34px var(--color-shadow-soft);
 }
 
+.message-input-wrapper.drag-active {
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-primary) 22%, transparent), 0 14px 34px var(--color-shadow-soft);
+}
+
+.composer-drop-overlay {
+  position: absolute;
+  inset: 4px;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px dashed color-mix(in srgb, var(--color-primary) 72%, transparent);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--color-surface-raised) 88%, transparent);
+  color: var(--color-primary);
+  font-size: 13px;
+  font-weight: 650;
+  pointer-events: none;
+  backdrop-filter: blur(5px);
+}
+
 .file-mention-popover,
 .skill-command-popover {
   position: absolute;
