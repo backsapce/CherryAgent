@@ -18,6 +18,7 @@
         "clickToStart": "+ をクリックして新しいセッションを開始"
     },
     "message": {
+        "cacheHitRate": "キャッシュヒット率",
         "you": "あなた",
         "assistant": "Cherry Agent",
         "thinking": "思考中",

@@ -1874,61 +1874,15 @@
 
 /* Context budget pie chart indicator */
 .context-budget {
-  position: relative;
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
   color: var(--color-text-secondary);
-  cursor: default;
-  flex-shrink: 0;
-}
-
-.context-budget-pie {
-  position: relative;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 26px;
-}
-
-.context-budget-pie svg {
-  position: absolute;
-  top: 0;
-  left: 0;
-}
-
-.context-budget-pct {
-  position: relative;
-  z-index: 1;
-  font-size: 9px;
-  font-weight: 600;
-  line-height: 1;
-  text-align: center;
-}
-
-.context-budget-tooltip {
-  position: absolute;
-  bottom: calc(100% + 6px);
-  right: 0;
-  background: var(--color-surface-modal, #1e1e1e);
-  color: var(--color-text, #e0e0e0);
+  font-family: monospace;
   font-size: 11px;
-  font-weight: 500;
-  padding: 4px 8px;
-  border-radius: 6px;
-  white-space: nowrap;
-  pointer-events: none;
-  opacity: 0;
-  transform: translateY(4px);
-  transition: opacity 0.15s, transform 0.15s;
-  border: 1px solid var(--color-border-subtle);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-  z-index: 10;
-}
-
-.context-budget:hover .context-budget-tooltip {
-  opacity: 1;
-  transform: translateY(0);
+  font-variant-numeric: tabular-nums;
+  cursor: default;
 }
 
 /* Sandbox inline selector in input hint area */
