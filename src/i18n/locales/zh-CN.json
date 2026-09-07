@@ -35,6 +35,7 @@
         "exitCode": "退出码 {code}",
         "remove": "移除",
         "uploadImage": "上传图片",
+        "dropImage": "拖放图片到此处添加",
         "edit": "编辑",
         "copy": "复制",
         "copied": "已复制",

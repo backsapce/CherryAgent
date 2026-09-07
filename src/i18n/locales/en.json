@@ -35,6 +35,7 @@
         "exitCode": "exit {code}",
         "remove": "Remove",
         "uploadImage": "Upload image",
+        "dropImage": "Drop images here to attach",
         "edit": "Edit",
         "copy": "Copy",
         "copied": "Copied",

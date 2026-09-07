@@ -1,13 +1,15 @@
 import { forwardRef, lazy, Suspense, useImperativeHandle, useState, useRef, useEffect, useLayoutEffect, useMemo } from 'react';
 import { useI18n } from '../../i18n/context';
-import { getAgentDir, normalizeWorkspaceRelativePath, readAgentFileBlob } from '../../vfs/opfs';
-import { downloadE2bFile, downloadRemoteFile, E2B_AGENT_ID, listFiles, readFileText } from '../../models/agent';
+import { getAgentDir, getFileBlob, normalizeWorkspaceRelativePath, readAgentFileBlob } from '../../vfs/opfs';
+import { downloadE2bFile, downloadFile, downloadRemoteFile, E2B_AGENT_ID, listFiles, readFileText } from '../../models/agent';
 import config from '../../config/config';
 import {
   normalizeShowHiddenFiles,
   SHOW_HIDDEN_FILES_CONFIG_PATH,
 } from '../../config/fileVisibility';
 import { getSyncStatus, subscribeSyncStatus } from '../../sync/syncManager';
+import { FILE_MANAGER_DRAG_TYPE, readFileManagerDragItem } from '../FileManage/fileDrag';
+import { imageMimeFromFileName } from '../FileManage/imagePreviewUtils';
 import { imageDownloadName } from './imageDownload';
 import { splitTaggedReasoningContent } from '../../agent/reasoningTags';
 import { searchSkills } from '../../agent/skills';
@@ -891,6 +893,7 @@ const MessagePanel = forwardRef(({
   const [copiedMessageId, setCopiedMessageId] = useState(null);
   const [historyImagePreview, setHistoryImagePreview] = useState(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [composerDragActive, setComposerDragActive] = useState(false);
   const [showHiddenFiles, setShowHiddenFiles] = useState(
     () => normalizeShowHiddenFiles(config.get(SHOW_HIDDEN_FILES_CONFIG_PATH))
   );
@@ -1461,17 +1464,73 @@ const MessagePanel = forwardRef(({
     ta.style.height = Math.min(ta.scrollHeight, 180) + 'px';
   };
 
+  const addImageFiles = async (files) => {
+    const images = Array.from(files || []).filter(
+      (file) => file?.type?.startsWith('image/') || imageMimeFromFileName(file?.name)
+    );
+    if (images.length === 0) return;
+
+    const compressed = await Promise.all(images.map(async (file) => ({
+      dataUrl: await compressImage(file),
+      name: file.name,
+    })));
+    setPendingImages((prev) => [...prev, ...compressed]);
+  };
+
   const handleImageUpload = (e) => {
-    const files = Array.from(e.target.files || []);
-    if (!files.length) return;
-    files.forEach((file) => {
-      if (!file.type.startsWith('image/')) return;
-      compressImage(file).then((dataUrl) => {
-        setPendingImages((prev) => [...prev, { dataUrl, name: file.name }]);
-      });
-    });
+    void addImageFiles(e.target.files);
     // Reset so the same file can be re-selected
     if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const canDropComposerImage = (dataTransfer) => {
+    const types = Array.from(dataTransfer?.types || []);
+    return types.includes('Files') || types.includes(FILE_MANAGER_DRAG_TYPE);
+  };
+
+  const handleComposerDragOver = (e) => {
+    if (streaming || inputDisabled || !canDropComposerImage(e.dataTransfer)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = 'copy';
+    setComposerDragActive(true);
+  };
+
+  const handleComposerDragLeave = (e) => {
+    if (e.currentTarget.contains(e.relatedTarget)) return;
+    setComposerDragActive(false);
+  };
+
+  const handleComposerDrop = async (e) => {
+    if (streaming || inputDisabled || !canDropComposerImage(e.dataTransfer)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    setComposerDragActive(false);
+
+    const externalImages = Array.from(e.dataTransfer.files || []).filter(
+      (file) => file.type.startsWith('image/') || imageMimeFromFileName(file.name)
+    );
+    if (externalImages.length > 0) {
+      await addImageFiles(externalImages);
+      return;
+    }
+
+    const item = readFileManagerDragItem(e.dataTransfer);
+    const mimeType = imageMimeFromFileName(item?.name);
+    if (!item || item.type !== 'file' || !mimeType) return;
+
+    try {
+      const blob = item.source === 'local'
+        ? await getFileBlob(item.name, item.parentDir || null)
+        : item.source === 'remote' && (item.sandboxUrl || activeSandboxUrl)
+          ? await downloadFile(item.path, item.sandboxUrl || activeSandboxUrl)
+          : null;
+      if (!blob) return;
+      const file = new File([blob], item.name, { type: blob.type || mimeType });
+      await addImageFiles([file]);
+    } catch (err) {
+      console.warn(`Failed to attach dropped image ${item.path}:`, err);
+    }
   };
 
   const removeImage = (index) => {
@@ -1985,7 +2044,16 @@ const MessagePanel = forwardRef(({
             ))}
           </div>
         )}
-        <div className={`message-input-wrapper${pendingImages.length > 0 || pendingContextFiles.length > 0 ? ' has-attachments' : ''}`}>
+        <div
+          className={`message-input-wrapper${pendingImages.length > 0 || pendingContextFiles.length > 0 ? ' has-attachments' : ''}${composerDragActive ? ' drag-active' : ''}`}
+          onDragEnter={handleComposerDragOver}
+          onDragOver={handleComposerDragOver}
+          onDragLeave={handleComposerDragLeave}
+          onDrop={handleComposerDrop}
+        >
+          {composerDragActive && (
+            <div className="composer-drop-overlay">{t('message.dropImage')}</div>
+          )}
           {(pendingImages.length > 0 || pendingContextFiles.length > 0) && (
             <div className="composer-attachment-strip">
               {pendingImages.map((img, i) => (
