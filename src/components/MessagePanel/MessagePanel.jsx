@@ -13,7 +13,7 @@ import { imageMimeFromFileName } from '../FileManage/imagePreviewUtils';
 import { imageDownloadName } from './imageDownload';
 import { splitTaggedReasoningContent } from '../../agent/reasoningTags';
 import { searchSkills } from '../../agent/skills';
-import { ChevronRight, Settings as SettingsIcon, Folder, File, FileEdit, Copy, MessageSquare, Plus, X, Send, Stop, Plug, PieChart, Cloud, User, ImageGenerate, Refresh } from '../Icons/Icons';
+import { ChevronRight, Settings as SettingsIcon, Folder, File, FileEdit, Copy, MessageSquare, Plus, X, Send, Stop, Plug, Cloud, User, ImageGenerate, Refresh } from '../Icons/Icons';
 import { getSkillCommandRange } from './skillCommand';
 import {
   clampRestoredScrollTop,
@@ -326,46 +326,34 @@ function compressImage(file) {
 }
 
 const ContextBudget = ({ messages, llmConfig }) => {
-  // Check if the last assistant message has real usage data from the API
+  const { t } = useI18n();
   const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant' && m.usage);
   const usage = lastAssistant?.usage;
-  // Prefer the window recorded by the run itself (usage.content_len): the
-  // active profile may have changed since the message was produced.
-  const runWindow = Number(usage?.content_len);
-  const configWindow = Number(llmConfig?.contextWindow);
-  const total = [runWindow, configWindow].find((v) => Number.isFinite(v) && v > 0) ?? null;
+  const cached = usage?.cached_tokens ?? usage?.prompt_tokens_details?.cached_tokens;
+  const inputTokens = usage?.prompt_tokens ?? usage?.input_tokens;
+  const outputTokens = usage?.completion_tokens ?? usage?.output_tokens;
+  const cacheRate = Number.isFinite(cached) && cached >= 0 && inputTokens > 0
+    ? `${(Math.min(cached / inputTokens, 1) * 100).toFixed(1)}%`
+    : '—';
+  // Prefer the context window recorded by the run over the current profile.
+  const total = [Number(usage?.content_len), Number(llmConfig?.contextWindow)]
+    .find((value) => Number.isFinite(value) && value > 0);
+  const used = usage?.total_tokens || (inputTokens || 0) + (outputTokens || 0);
+  const contextRate = total ? `${(Math.min(used / total, 1) * 100).toFixed(1)}%` : '—';
 
-  let used = null;
-  if (total && usage) {
-    const u = usage;
-    used = u.total_tokens
-      || (u.prompt_tokens || 0) + (u.completion_tokens || u.output_tokens || 0)
-      || (u.input_tokens || 0) + (u.output_tokens || 0);
-  }
-  const ratio = total && used ? Math.min(used / total, 1) : 0;
-  const tooltip = total
-    ? `${used != null ? formatTokens(used) : '0'} / ${formatTokens(total)}`
-    : 'Context window not configured';
-
-  const percent = Math.round(ratio * 100);
-
-  // Color based on usage
-  let color = 'var(--color-primary)';
-  if (ratio > 0.85) color = 'var(--color-error, #e53935)';
-  else if (ratio > 0.6) color = 'var(--color-warning, #fb8c00)';
-
-  function formatTokens(n) {
-    if (n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k';
-    return n.toString();
+  function formatTokens(value) {
+    if (!Number.isFinite(value)) return '—';
+    if (value >= 1000) return (value / 1000).toFixed(1).replace(/\.0$/, '') + 'k';
+    return value.toString();
   }
 
   return (
     <div className="context-budget">
-      <div className="context-budget-tooltip">{tooltip}</div>
-      <div className="context-budget-pie">
-        <PieChart size={26} ratio={ratio} color={color} />
-        <span className="context-budget-pct" style={{ color }}>{percent}</span>
-      </div>
+      <span>↑{formatTokens(inputTokens)}</span>
+      <span>↓{formatTokens(outputTokens)}</span>
+      <span>R{formatTokens(cached)}</span>
+      <span aria-label={`${t('message.cacheHitRate')}: ${cacheRate}`}>CH{cacheRate}</span>
+      <span>{contextRate}/{formatTokens(total)}</span>
     </div>
   );
 };

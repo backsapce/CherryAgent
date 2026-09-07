@@ -73,3 +73,18 @@ test('AI message conversion preserves image payloads and usage fields', () => {
     total_tokens: 14,
   });
 });
+
+test('usage preserves cache reads including zero and leaves unknown cache usage absent', () => {
+  for (const cached of [0, 75]) {
+    const normalized = normalizeAiUsage({
+      inputTokens: 100,
+      outputTokens: 10,
+      inputTokenDetails: { cacheReadTokens: cached, cacheWriteTokens: 20 },
+    });
+    assert.equal(normalized.cached_tokens, cached);
+    assert.equal(normalized.prompt_tokens, 100);
+    assert.equal(normalizeAiUsage(normalized).cached_tokens, cached);
+  }
+  assert.equal(normalizeAiUsage({ inputTokens: 100 }).cached_tokens, undefined);
+  assert.equal(normalizeAiUsage({ inputTokens: 100, cachedInputTokens: 50 }).cached_tokens, 50);
+});

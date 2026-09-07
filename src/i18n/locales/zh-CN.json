@@ -18,6 +18,7 @@
         "clickToStart": "点击 + 开始新会话"
     },
     "message": {
+        "cacheHitRate": "缓存命中率",
         "you": "你",
         "assistant": "Cherry Agent",
         "thinking": "思考中",

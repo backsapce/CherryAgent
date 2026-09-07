@@ -18,6 +18,7 @@
         "clickToStart": "Click + to start a new session"
     },
     "message": {
+        "cacheHitRate": "Cache hit rate",
         "you": "You",
         "assistant": "Cherry Agent",
         "thinking": "Thinking",

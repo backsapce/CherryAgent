@@ -76,7 +76,13 @@ export function normalizeAiUsage(usage) {
   const prompt = numberOrZero(usage?.inputTokens ?? usage?.prompt_tokens ?? usage?.input_tokens);
   const completion = numberOrZero(usage?.outputTokens ?? usage?.completion_tokens ?? usage?.output_tokens);
   const total = numberOrZero(usage?.totalTokens ?? usage?.total_tokens) || prompt + completion;
+  const cached = usage?.inputTokenDetails?.cacheReadTokens
+    ?? usage?.cachedInputTokens
+    ?? usage?.prompt_tokens_details?.cached_tokens
+    ?? usage?.cache_read_input_tokens
+    ?? usage?.cached_tokens;
   return {
+    ...(Number.isFinite(cached) && cached >= 0 ? { cached_tokens: cached } : {}),
     prompt_tokens: prompt,
     completion_tokens: completion,
     total_tokens: total,
