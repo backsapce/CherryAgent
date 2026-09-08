@@ -98,6 +98,13 @@
         "autoTitlePromptHint": "自定义生成标题时使用的系统提示词。内容留空时，将使用占位符中显示的系统默认模板。"
     },
     "llmSettings": {
+    "reasoningEffort": "思考强度",
+    "defaultReasoningEffort": "默认思考强度",
+    "reasoningAuto": "模型默认",
+    "reasoningInherit": "使用默认设置",
+    "reasoning_low": "低",
+    "reasoning_medium": "中",
+    "reasoning_high": "高",
         "title": "LLM 配置",
         "desc": "先配置可复用的服务商，再添加 LLM，并为每个会话选择使用哪一个。",
         "llmTab": "LLM",

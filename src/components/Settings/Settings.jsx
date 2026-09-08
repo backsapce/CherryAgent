@@ -1,3 +1,4 @@
+import ReasoningSelect from './ReasoningSelect';
 import { useState, useRef, useEffect } from 'react';
 import { checkAgentAvailable, connectAgent } from '../../models/agent';
 import { exportToZip, getOpfsDataStats, importFromZip } from '../../vfs/opfs';
@@ -1120,6 +1121,10 @@ const Settings = ({
                         onChange={(e) => setSettingsForm((form) => ({ ...form, contextWindow: e.target.value }))}
                       />
                       <p className="settings-hint">{t('llmSettings.contextWindowHint')}</p>
+                      <ReasoningSelect
+                        defaultSetting
+                        profile={{ provider: selectedProviderConfig?.type, model: settingsForm.model.trim() }}
+                      />
                     </>
                   )}
                 </>

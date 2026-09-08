@@ -1,3 +1,5 @@
+import { wrapLanguageModel } from 'ai';
+import { resolveReasoningLevels, reasoningProviderOptions } from './reasoning.js';
 /**
  * AI SDK model factory.
  *
@@ -26,6 +28,24 @@ const DEFAULT_BASE_URLS = {
  * change at runtime and each request must use the selected session profile.
  */
 export function createLanguageModel(config = {}) {
+  const model = createBaseLanguageModel(config);
+  if (!config.reasoningEffort) return model;
+  return wrapLanguageModel({ model, middleware: {
+    specificationVersion: 'v3',
+    async transformParams({ params }) {
+      const levels = await resolveReasoningLevels(config.provider, config.model);
+      if (!levels.includes(config.reasoningEffort)) return params;
+      const options = reasoningProviderOptions(config.provider, config.reasoningEffort);
+      const providerOptions = { ...params.providerOptions };
+      for (const [key, value] of Object.entries(options)) {
+        providerOptions[key] = { ...value, ...providerOptions[key] };
+      }
+      return { ...params, providerOptions };
+    },
+  } });
+}
+
+function createBaseLanguageModel(config = {}) {
   const provider = config.provider;
   const apiKey = config.apiKey;
   const model = config.model;
