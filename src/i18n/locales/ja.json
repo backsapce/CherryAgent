@@ -98,6 +98,13 @@
         "autoTitlePromptHint": "タイトル生成に使用するシステムプロンプトをカスタマイズします。空欄にすると、プレースホルダーに表示されるシステム既定テンプレートを使用します。"
     },
     "llmSettings": {
+    "reasoningEffort": "思考の強度",
+    "defaultReasoningEffort": "既定の思考強度",
+    "reasoningAuto": "モデルの既定値",
+    "reasoningInherit": "既定の設定を使用",
+    "reasoning_low": "低",
+    "reasoning_medium": "中",
+    "reasoning_high": "高",
         "title": "LLM 設定",
         "desc": "再利用可能なプロバイダーを先に設定し、LLM を追加してセッションごとに選択します。",
         "llmTab": "LLM",

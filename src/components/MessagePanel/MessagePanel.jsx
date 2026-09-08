@@ -1,3 +1,4 @@
+import ReasoningSelect from '../Settings/ReasoningSelect';
 import { forwardRef, lazy, Suspense, useImperativeHandle, useState, useRef, useEffect, useLayoutEffect, useMemo } from 'react';
 import { useI18n } from '../../i18n/context';
 import { getAgentDir, getFileBlob, normalizeWorkspaceRelativePath, readAgentFileBlob } from '../../vfs/opfs';
@@ -1825,6 +1826,7 @@ const MessagePanel = forwardRef(({
               </select>
             </div>
           </div>
+          <ReasoningSelect profile={selectedLlmProfile} onChange={onConfigureLLM} />
         </div>
 
         <div className="header-buttons">

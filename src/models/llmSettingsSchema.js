@@ -1,3 +1,4 @@
+import { normalizeReasoningEffort } from './reasoning.js';
 export const LLM_SETTINGS_SCHEMA_VERSION = 2;
 
 function isRecord(value) {
@@ -92,6 +93,7 @@ export function normalizeLlmConfig(id, value = {}, providers = {}) {
     name: nullableString(value.name) || defaultLlmName(provider, model),
     providerId,
     model,
+    reasoningEffort: normalizeReasoningEffort(value.reasoningEffort),
     contextWindow: Number.isFinite(contextWindow) && contextWindow > 0
       ? Math.floor(contextWindow)
       : null,

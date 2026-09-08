@@ -1,3 +1,4 @@
+import config from '../config/config.js';
 /**
  * Unified LLM Service for Cherry Agent.
  *
@@ -152,6 +153,7 @@ function publicLlm(llmConfig) {
     provider: providerConfig?.type || null,
     model,
     contextWindow,
+    reasoningEffort: llmConfig.reasoningEffort || null,
     baseUrl: providerConfig?.baseUrl || null,
     configured: Boolean(providerIsConfigured(providerConfig) && model),
     hasApiKey: Boolean(providerConfig?.apiKey),
@@ -358,6 +360,7 @@ const llm = {
       apiKey: providerConfig.apiKey,
       baseUrl: providerConfig.baseUrl || provider.defaultBaseUrl || null,
       model,
+      reasoningEffort: llmConfig.reasoningEffort || config.get('reasoning.defaultEffort') || null,
       contextWindow: llmConfig.contextWindow || null,
     };
   },
@@ -389,6 +392,7 @@ const llm = {
       apiKey: providerConfig.apiKey,
       baseUrl: providerConfig.baseUrl || provider.defaultBaseUrl,
       model,
+      reasoningEffort: llmConfig.reasoningEffort || config.get('reasoning.defaultEffort') || null,
     });
   },
 
@@ -512,6 +516,7 @@ const llm = {
       name,
       model,
       contextWindow,
+      reasoningEffort: hasOwn(cfg, 'reasoningEffort') ? cfg.reasoningEffort : (modelChanged ? null : previous?.reasoningEffort),
       updatedAtMs: Date.now(),
     }, providerConfigs);
     llms = { ...llms, [id]: next };

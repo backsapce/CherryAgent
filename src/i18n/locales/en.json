@@ -98,6 +98,13 @@
         "autoTitlePromptHint": "Customize the system prompt used to generate titles. Leave it empty to use the system template shown as the placeholder."
     },
     "llmSettings": {
+    "reasoningEffort": "Reasoning effort",
+    "defaultReasoningEffort": "Default reasoning effort",
+    "reasoningAuto": "Model default",
+    "reasoningInherit": "Use default setting",
+    "reasoning_low": "Low",
+    "reasoning_medium": "Medium",
+    "reasoning_high": "High",
         "title": "LLM Configuration",
         "desc": "Configure reusable providers first, then add LLMs and choose one per session.",
         "llmTab": "LLMs",
