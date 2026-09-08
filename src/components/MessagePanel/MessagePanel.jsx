@@ -10,6 +10,7 @@ import {
 import { getSyncStatus, subscribeSyncStatus } from '../../sync/syncManager';
 import { FILE_MANAGER_DRAG_TYPE, readFileManagerDragItem } from '../FileManage/fileDrag';
 import { imageMimeFromFileName } from '../FileManage/imagePreviewUtils';
+import { loadDroppedImage } from './droppedImage';
 import { imageDownloadName } from './imageDownload';
 import { splitTaggedReasoningContent } from '../../agent/reasoningTags';
 import { searchSkills } from '../../agent/skills';
@@ -1504,20 +1505,12 @@ const MessagePanel = forwardRef(({
     }
 
     const item = readFileManagerDragItem(e.dataTransfer);
-    const mimeType = imageMimeFromFileName(item?.name);
-    if (!item || item.type !== 'file' || !mimeType) return;
-
     try {
-      const blob = item.source === 'local'
-        ? await getFileBlob(item.name, item.parentDir || null)
-        : item.source === 'remote' && (item.sandboxUrl || activeSandboxUrl)
-          ? await downloadFile(item.path, item.sandboxUrl || activeSandboxUrl)
-          : null;
-      if (!blob) return;
-      const file = new File([blob], item.name, { type: blob.type || mimeType });
+      const file = await loadDroppedImage(item, { getFileBlob, downloadFile });
+      if (!file) return;
       await addImageFiles([file]);
     } catch (err) {
-      console.warn(`Failed to attach dropped image ${item.path}:`, err);
+      console.warn(`Failed to attach dropped image ${item?.path}:`, err);
     }
   };
 
