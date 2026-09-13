@@ -8,6 +8,7 @@ import {
   readSync,
   readdirSync,
   renameSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
@@ -18,11 +19,38 @@ const DEFAULT_MAX_LOG_BYTES = 50 * 1024 * 1024;
 const DEFAULT_MAX_READ_BYTES = 64 * 1024;
 const DEFAULT_MAX_ACTIVE_JOBS = 16;
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'stopped', 'interrupted']);
+const DEFAULT_JOB_RETENTION_MS = 7 * 24 * 60 * 60_000;
+const DEFAULT_JOB_PRUNE_INTERVAL_MS = 60 * 60_000;
+const MAX_RETAINED_TERMINAL_JOBS = 200;
 
 function abortError() {
   const error = new Error('Command wait aborted');
   error.name = 'AbortError';
   return error;
+}
+
+/** Trim a trailing incomplete UTF-8 sequence so segment boundaries stay valid. */
+function utf8SafeLength(buffer) {
+  let end = buffer.length;
+  if (end === 0) return 0;
+  const last = buffer[end - 1];
+  if ((last & 0xc0) === 0x80) {
+    // Continuation byte: locate its lead byte and drop the partial sequence
+    // when not all of its continuation bytes have arrived yet.
+    let lead = end - 1;
+    let steps = 0;
+    while (lead > 0 && (buffer[lead] & 0xc0) === 0x80 && steps < 3) {
+      lead -= 1;
+      steps += 1;
+    }
+    const leadByte = buffer[lead];
+    const expected = leadByte >= 0xf0 ? 4 : leadByte >= 0xe0 ? 3 : leadByte >= 0xc0 ? 2 : 0;
+    if (expected === 0 || end - lead < expected) end = lead;
+  } else if ((last & 0xc0) === 0xc0) {
+    // Lead byte without any continuation yet.
+    end -= 1;
+  }
+  return end;
 }
 
 function clampInteger(value, min, max) {
@@ -37,10 +65,13 @@ export function createCommandJobManager({
   maxLogBytes = DEFAULT_MAX_LOG_BYTES,
   maxReadBytes = DEFAULT_MAX_READ_BYTES,
   maxActiveJobs = DEFAULT_MAX_ACTIVE_JOBS,
+  jobRetentionMs = DEFAULT_JOB_RETENTION_MS,
+  jobPruneIntervalMs = DEFAULT_JOB_PRUNE_INTERVAL_MS,
+  maxRetainedTerminalJobs = MAX_RETAINED_TERMINAL_JOBS,
 } = {}) {
   if (!jobsDir) throw new Error('jobsDir is required');
   if (!executor?.start) throw new Error('executor is required');
-  mkdirSync(jobsDir, { recursive: true });
+  mkdirSync(jobsDir, { recursive: true, mode: 0o700 });
 
   const jobs = new Map();
   const waiters = new Map();
@@ -48,11 +79,43 @@ export function createCommandJobManager({
   const metadataPath = (id) => join(jobsDir, `${id}.json`);
   const logPath = (id) => join(jobsDir, `${id}.log`);
 
+  const removeJobFiles = (id) => {
+    if (!/^[\w.-]+$/.test(String(id || ''))) return;
+    for (const suffix of ['.json', '.json.tmp', '.log']) {
+      try {
+        rmSync(join(jobsDir, `${id}${suffix}`), { force: true });
+      } catch {
+        // Best effort; the next prune pass retries.
+      }
+    }
+  };
+
+  // Terminal job records and their logs are useful for replay, not forever:
+  // each log can reach maxLogBytes, so unbounded retention eventually fills
+  // the disk on a long-lived server.
+  const pruneExpiredJobs = () => {
+    const cutoff = Date.now() - Math.max(1, jobRetentionMs);
+    const terminal = [...jobs.values()]
+      .filter((job) => TERMINAL_STATUSES.has(job.status))
+      .sort((a, b) => String(a.updatedAt || '').localeCompare(String(b.updatedAt || '')));
+    const overflow = terminal.slice(0, Math.max(0, terminal.length - maxRetainedTerminalJobs));
+    const expired = terminal.filter((job) => Date.parse(job.updatedAt || '') < cutoff);
+    for (const job of [...overflow, ...expired]) {
+      jobs.delete(job.id);
+      removeJobFiles(job.id);
+    }
+  };
+
+  const pruneTimer = typeof jobPruneIntervalMs === 'number' && jobPruneIntervalMs > 0
+    ? setInterval(pruneExpiredJobs, jobPruneIntervalMs)
+    : null;
+  pruneTimer?.unref?.();
+
   const persist = (job) => {
     const target = metadataPath(job.id);
     const temporary = `${target}.tmp`;
     const { handle: _handle, ...serializable } = job;
-    writeFileSync(temporary, JSON.stringify(serializable, null, 2), 'utf8');
+    writeFileSync(temporary, JSON.stringify(serializable, null, 2), { encoding: 'utf8', mode: 0o600 });
     renameSync(temporary, target);
   };
 
@@ -79,6 +142,7 @@ export function createCommandJobManager({
       // A damaged job record must not prevent other jobs from loading.
     }
   }
+  pruneExpiredJobs();
 
   const appendLog = (job, chunk) => {
     if (!chunk || job.logTruncated) return;
@@ -86,7 +150,7 @@ export function createCommandJobManager({
     const remaining = maxLogBytes - job.logBytes;
     if (remaining > 0) {
       const accepted = buffer.subarray(0, remaining);
-      appendFileSync(logPath(job.id), accepted);
+      appendFileSync(logPath(job.id), accepted, { mode: 0o600 });
       job.logBytes += accepted.length;
     }
     if (buffer.length > remaining || job.logBytes >= maxLogBytes) {
@@ -112,12 +176,15 @@ export function createCommandJobManager({
     } finally {
       closeSync(descriptor);
     }
+    // Never hand out a trailing partial UTF-8 sequence: the log is append-only,
+    // so backing the cursor up re-reads those bytes once they are complete.
+    const safeLength = utf8SafeLength(buffer);
     return {
-      log: buffer.toString(),
+      log: buffer.subarray(0, safeLength).toString('utf8'),
       logCursor: start,
-      nextCursor: start + length,
+      nextCursor: start + safeLength,
       logSize: size,
-      hasMore: start + length < size,
+      hasMore: start + safeLength < size,
     };
   };
 

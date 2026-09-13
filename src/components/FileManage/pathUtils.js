@@ -4,7 +4,7 @@ export function normalizeFileManagerPath(path) {
     .replace(/\/+/g, '/')
     .replace(/^\/+|\/+$/g, '')
     .split('/')
-    .filter((part) => part && part !== '.')
+    .filter((part) => part && part !== '.' && part !== '..')
     .join('/');
 }
 

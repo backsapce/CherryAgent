@@ -150,15 +150,16 @@ const SessionList = ({
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [isMobile, mobileOpen]);
 
-  // Global mouse event listeners for resizing
+  // Only carry the mousemove cost while a resize drag is active.
   useEffect(() => {
+    if (!isResizing) return;
     window.addEventListener('mousemove', handleMouseMove);
     window.addEventListener('mouseup', handleMouseUp);
     return () => {
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [handleMouseMove, handleMouseUp]);
+  }, [isResizing, handleMouseMove, handleMouseUp]);
 
   // Toggle mobile panel
   const toggleMobile = useCallback(() => {

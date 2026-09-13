@@ -10,6 +10,7 @@
 import llm from '../models/llm.js';
 import { buildMemorySection } from './memory.js';
 import { COMMAND_EXECUTION_GUIDANCE } from './commandGuidance.js';
+import { estimateTextTokens } from './tokenEstimate.js';
 
 const CONTEXT_WINDOW_FALLBACK = 128_000;
 const PACKING_THRESHOLD_RATIO = 0.72;
@@ -19,7 +20,6 @@ const PREFERRED_TAIL_KEEP = 36;
 const RESPONSE_RESERVE_RATIO = 0.14;
 const MIN_RESPONSE_RESERVE = 4096;
 const MAX_RESPONSE_RESERVE = 24_000;
-const TOKENS_PER_CHAR = 4;
 const MAX_SUMMARY_SOURCE_CHARS = 80_000;
 
 const AGENT_RUNTIME_PROMPT = `You are CherryAgent, an autonomous coding and browser-work agent.
@@ -137,6 +137,7 @@ export async function assembleApiMessages(opts) {
     };
     packed = packMessages(messages, fullSystemPrompt, contextWindow, summaryState);
   }
+  summaryState = stampSummaryAnchor(summaryState, messages);
 
   return {
     apiMessages: packed.apiMessages,
@@ -305,28 +306,34 @@ function buildAgentIdentitySection(content) {
 // ─── Token estimation and formatting ────────────────────────────────────────
 
 export function estimateTokens(messages, systemPrompt = '') {
-  let total = systemPrompt ? systemPrompt.length : 0;
+  let total = estimateTextTokens(systemPrompt);
   for (const msg of messages || []) {
-    total += estimateMessageChars(msg);
+    total += estimateMessageTokens(msg);
   }
-  return Math.max(1, Math.floor(total / TOKENS_PER_CHAR));
+  return Math.max(1, total);
 }
 
 function estimateMessageTokens(message) {
-  return Math.max(1, Math.floor(estimateMessageChars(message) / TOKENS_PER_CHAR));
+  if (!message) return 0;
+  let total = estimateTextTokens(message.role) + estimateTextTokens(message.name);
+  if (typeof message.content === 'string') total += estimateTextTokens(message.content);
+  else if (message.content != null) total += estimateTextTokens(jsonText(message.content));
+  total += estimateTextTokens(message.thinking);
+  total += estimateTextTokens(message.reasoning_content);
+  if (message.tool_calls) total += estimateTextTokens(jsonText(message.tool_calls));
+  total += estimateTextTokens(message.tool_call_id);
+  if (message.images?.length) {
+    total += message.images.reduce((sum, img) => sum + estimateTextTokens(img.dataUrl), 0);
+  }
+  return Math.max(1, total);
 }
 
-function estimateMessageChars(message) {
-  if (!message) return 0;
-  let total = String(message.role || '').length + String(message.name || '').length;
-  if (typeof message.content === 'string') total += message.content.length;
-  else if (message.content != null) total += JSON.stringify(message.content).length;
-  if (message.thinking) total += String(message.thinking).length;
-  if (message.reasoning_content) total += String(message.reasoning_content).length;
-  if (message.tool_calls) total += JSON.stringify(message.tool_calls).length;
-  if (message.tool_call_id) total += String(message.tool_call_id).length;
-  if (message.images?.length) total += message.images.reduce((sum, img) => sum + String(img.dataUrl || '').length, 0);
-  return total;
+function jsonText(value) {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return '';
+  }
 }
 
 function formatMessages(messages) {
@@ -351,7 +358,36 @@ function normalizeSummaryState(summaryState, legacySummary) {
   return {
     content: String(summaryState?.content || legacySummary || '').trim(),
     coveredUntil: Number.isFinite(summaryState?.coveredUntil) ? summaryState.coveredUntil : 0,
+    anchorId: summaryState?.anchorId ?? null,
   };
+}
+
+/**
+ * Bind a summary to the message it covers. `coveredUntil` is an index into the
+ * caller's message array; if the user later edits or deletes history (indices
+ * shift), the anchor id lets the next run detect the mismatch and regenerate
+ * instead of applying a summary to the wrong turns.
+ */
+function stampSummaryAnchor(summaryState, messages) {
+  if (!summaryState?.content) return summaryState;
+  const coveredUntil = Number(summaryState.coveredUntil);
+  if (!Number.isInteger(coveredUntil) || coveredUntil <= 0) return summaryState;
+  return { ...summaryState, anchorId: messages?.[coveredUntil - 1]?.id ?? null };
+}
+
+/**
+ * Whether a persisted summary can still be applied to this message history.
+ * Append-only growth keeps indices valid; any edit or truncation does not.
+ */
+export function summaryStateMatchesHistory(summaryState, messages) {
+  if (!summaryState?.content || summaryState.coveredUntil == null) return false;
+  const coveredUntil = Number(summaryState.coveredUntil);
+  if (!Number.isInteger(coveredUntil) || coveredUntil <= 0) return false;
+  if (coveredUntil > (messages?.length || 0)) return false;
+  const anchorId = summaryState.anchorId;
+  if (anchorId == null) return true;
+  const anchor = messages[coveredUntil - 1];
+  return anchor?.id != null && anchor.id === anchorId;
 }
 
 function truncateText(text, maxChars) {

@@ -145,7 +145,7 @@ export function applyAgentEvent(state, event) {
     case 'step-finish':
       return finishStep(next, event);
     case 'text-delta':
-      return syncTranscriptText(appendTranscriptText(next, event, 'text'));
+      return appendTranscriptText(next, event, 'text');
     case 'reasoning-delta':
       return appendReasoningDelta(next, event);
     case 'tool-input-start':
@@ -386,11 +386,25 @@ function appendTranscriptText(state, event, type) {
     index = transcript.length - 1;
   }
   const segments = [...transcript];
+  const previousContent = segments[index].content || '';
+  const appended = event.text || '';
   segments[index] = {
     ...segments[index],
-    content: `${segments[index].content || ''}${event.text || ''}`,
+    content: `${previousContent}${appended}`,
   };
-  return { ...state, transcript: segments };
+  const next = { ...state, transcript: segments };
+  if (!appended) return next;
+
+  // The modified segment is always the last transcript element (continuations
+  // and type switches append a fresh segment), so it is also the last
+  // same-type segment with content. Maintain the joined content/thinking
+  // fields incrementally instead of re-joining every segment per delta.
+  const field = type === 'text' ? 'content' : 'thinking';
+  const currentField = state[field] || '';
+  next[field] = previousContent
+    ? currentField + appended
+    : (currentField ? `${currentField}\n\n${appended}` : appended);
+  return next;
 }
 
 function appendReasoningDelta(state, event) {
@@ -415,7 +429,8 @@ function appendReasoningDelta(state, event) {
     }, emission.type);
   }
 
-  return syncTranscriptText(next);
+  // appendTranscriptText maintains content/thinking incrementally.
+  return next;
 }
 
 function reasoningSourceKey(state, event) {

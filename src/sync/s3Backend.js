@@ -718,7 +718,15 @@ export function createS3Backend(config, dependencies = {}) {
         }
         return true;
       } finally {
-        if (uploaded) await deleteObject(key);
+        // Cleanup is best effort: a transient DELETE failure must not fail an
+        // already-proven connection test (the probe object is inert).
+        if (uploaded) {
+          try {
+            await deleteObject(key);
+          } catch {
+            // A leftover probe object is overwritten by the next test run.
+          }
+        }
       }
     },
 

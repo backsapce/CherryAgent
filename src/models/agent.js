@@ -23,6 +23,38 @@ const AGENT_RUN_POST_GRACE_BYTES = 1024 * 1024;
 const AGENT_RUN_POST_BYTES_PER_SECOND = 1024 * 1024;
 const FILE_REQUEST_TIMEOUT_MS = 15_000;
 
+const LOOPBACK_HOSTNAMES = new Set(['localhost', '127.0.0.1', '::1']);
+
+function isLoopbackHostname(hostname) {
+  const host = String(hostname || '').toLowerCase();
+  return LOOPBACK_HOSTNAMES.has(host) || host.endsWith('.localhost');
+}
+
+/**
+ * Reject unencrypted agent endpoints outside the loopback. Requests to the
+ * agent server carry its long-lived bearer token and, for sandbox runs, the
+ * caller's LLM API key — sending either over plain http to a LAN or remote
+ * host leaks a credential that cannot be scoped or expired from the UI.
+ * Relative URLs ride the page origin and are always allowed.
+ */
+export function assertSecureAgentUrl(url) {
+  if (typeof url !== 'string' || !url.trim()) return;
+  let parsed;
+  try {
+    parsed = new URL(url.trim());
+  } catch {
+    return; // Relative path: same origin as the page.
+  }
+  if (parsed.protocol !== 'http:') return;
+  if (isLoopbackHostname(parsed.hostname)) return;
+  const error = new Error(
+    `Refusing to contact agent server over unencrypted http://${parsed.hostname}. Agent requests carry the auth token (and sandbox runs carry the LLM API key), so use an https:// URL; plain http is only allowed for localhost.`
+  );
+  error.name = 'AgentUrlSecurityError';
+  error.code = 'AGENT_INSECURE_URL';
+  throw error;
+}
+
 /**
  * Normalise a host URL into a full agent endpoint.
  * - If the url already contains '/agent', use as-is.
@@ -32,6 +64,7 @@ const FILE_REQUEST_TIMEOUT_MS = 15_000;
  */
 function resolveAgentUrl(url) {
   if (!url) return DEFAULT_AGENT_PATH;
+  assertSecureAgentUrl(url);
   const u = url.replace(/\/+$/, '');
   const endpoint = u.endsWith('/agent') ? u : `${u}/agent`;
   return isLoopbackAgentUrl(endpoint) ? DEFAULT_AGENT_PATH : endpoint;

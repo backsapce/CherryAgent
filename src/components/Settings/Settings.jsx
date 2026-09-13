@@ -1,6 +1,6 @@
 import ReasoningSelect from './ReasoningSelect';
 import { useState, useRef, useEffect } from 'react';
-import { checkAgentAvailable, connectAgent } from '../../models/agent';
+import { assertSecureAgentUrl, checkAgentAvailable, connectAgent } from '../../models/agent';
 import { exportToZip, getOpfsDataStats, importFromZip } from '../../vfs/opfs';
 import {
   getStoragePersistenceStatus,
@@ -210,6 +210,7 @@ const Settings = ({
   const [toolsLoading, setToolsLoading] = useState(false);
   const [agentsTabList, setAgentsTabList] = useState([]);
   const [agentsLoading, setAgentsLoading] = useState(false);
+  const [agentsError, setAgentsError] = useState(null);
   const [editingAgentId, setEditingAgentId] = useState(null);
   const [editingAgentName, setEditingAgentName] = useState('');
   const [syncForm, setSyncForm] = useState({
@@ -223,6 +224,8 @@ const Settings = ({
     secretAccessKey: '',
     sessionToken: '',
     clearSessionToken: false,
+    clearSecretAccessKey: false,
+    includeSecrets: false,
     forcePathStyle: false,
     bucketEndpoint: false,
     autoOnStart: false,
@@ -250,19 +253,31 @@ const Settings = ({
     }
   }, [settingsTab]);
 
-  const handleCreateAgent = async () => {
-    await createAgent();
+  const refreshAgentsList = async () => {
     const updated = await listAgents();
     setAgentsTabList(updated);
     onAgentListChange?.(updated);
   };
 
+  const handleCreateAgent = async () => {
+    try {
+      setAgentsError(null);
+      await createAgent();
+      await refreshAgentsList();
+    } catch (err) {
+      setAgentsError(err.message || String(err));
+    }
+  };
+
   const handleDeleteAgent = async (id) => {
     if (agentsTabList.length <= 1) return;
-    await deleteAgent(id);
-    const updated = await listAgents();
-    setAgentsTabList(updated);
-    onAgentListChange?.(updated);
+    try {
+      setAgentsError(null);
+      await deleteAgent(id);
+      await refreshAgentsList();
+    } catch (err) {
+      setAgentsError(err.message || String(err));
+    }
   };
 
   const handleStartEditAgent = (agent) => {
@@ -272,19 +287,25 @@ const Settings = ({
 
   const handleSaveAgentName = async (id) => {
     if (!editingAgentName.trim()) return;
-    await updateAgentName(id, editingAgentName.trim());
-    setEditingAgentId(null);
-    setEditingAgentName('');
-    const updated = await listAgents();
-    setAgentsTabList(updated);
-    onAgentListChange?.(updated);
+    try {
+      setAgentsError(null);
+      await updateAgentName(id, editingAgentName.trim());
+      setEditingAgentId(null);
+      setEditingAgentName('');
+      await refreshAgentsList();
+    } catch (err) {
+      setAgentsError(err.message || String(err));
+    }
   };
 
   const handleAgentDefaultChange = async (id, patch) => {
-    await updateAgentConfig(id, patch);
-    const updated = await listAgents();
-    setAgentsTabList(updated);
-    onAgentListChange?.(updated);
+    try {
+      setAgentsError(null);
+      await updateAgentConfig(id, patch);
+      await refreshAgentsList();
+    } catch (err) {
+      setAgentsError(err.message || String(err));
+    }
   };
 
   // Load skills when tab changes to skills
@@ -299,15 +320,26 @@ const Settings = ({
   }, [settingsTab, activeAgentId, selectedAgentUrl]);
 
   const handleSkillToggle = async (skillName, enabled) => {
-    await setSkillEnabled(skillName, enabled);
-    setSkillsList((prev) => prev.map((s) => (s.name === skillName ? { ...s, enabled } : s)));
+    try {
+      await setSkillEnabled(skillName, enabled);
+      setSkillsList((prev) => prev.map((s) => (s.name === skillName ? { ...s, enabled } : s)));
+    } catch (err) {
+      console.warn('Failed to toggle skill:', err);
+    }
   };
 
   const handleBulkToggle = async (enabled) => {
+    const applied = [];
     for (const skill of skillsList) {
-      await setSkillEnabled(skill.name, enabled);
+      try {
+        await setSkillEnabled(skill.name, enabled);
+        applied.push(skill.name);
+      } catch (err) {
+        console.warn(`Failed to toggle skill ${skill.name}:`, err);
+      }
     }
-    setSkillsList((prev) => prev.map((s) => ({ ...s, enabled })));
+    // Reflect what actually changed; a mid-loop failure must not mark the rest.
+    setSkillsList((prev) => prev.map((s) => (applied.includes(s.name) ? { ...s, enabled } : s)));
   };
 
   // Load tools when tab changes to tools
@@ -379,6 +411,8 @@ const Settings = ({
       secretAccessKey: '',
       sessionToken: '',
       clearSessionToken: false,
+      clearSecretAccessKey: false,
+      includeSecrets: savedSync.includeSecrets === true,
       forcePathStyle: pathStyleForProviderPreset(
         providerPreset,
         savedSync.forcePathStyle
@@ -402,7 +436,8 @@ const Settings = ({
     getStoragePersistenceStatus()
       .then((status) => {
         if (!canceled) setStoragePersistence(status);
-      });
+      })
+      .catch((err) => console.warn('Storage persistence check failed:', err));
     return () => { canceled = true; };
   }, [show, settingsTab]);
 
@@ -526,6 +561,12 @@ const Settings = ({
     if (!url) return;
     if (agents.some((a) => a.url === url)) {
       setNewAgentError(t('sandboxSettings.alreadyAdded'));
+      return;
+    }
+    try {
+      assertSecureAgentUrl(url);
+    } catch {
+      setNewAgentError(t('sandboxSettings.insecureUrl'));
       return;
     }
     setNewAgentChecking(true);
@@ -791,12 +832,15 @@ const Settings = ({
         providerPreset
       ),
       accessKeyId: syncForm.accessKeyId.trim(),
-      secretAccessKey: syncForm.secretAccessKey || saved.secretAccessKey || '',
+      secretAccessKey: syncForm.clearSecretAccessKey
+        ? ''
+        : (syncForm.secretAccessKey || saved.secretAccessKey || ''),
       sessionToken: syncForm.clearSessionToken
         ? ''
         : (syncForm.sessionToken || saved.sessionToken || ''),
       forcePathStyle: Boolean(syncForm.forcePathStyle),
       bucketEndpoint: Boolean(syncForm.bucketEndpoint),
+      includeSecrets: Boolean(syncForm.includeSecrets),
       autoOnStart: Boolean(syncForm.autoOnStart),
       autoIntervalMinutes: intervalText && Number.isFinite(interval) && interval >= 0 ? Math.floor(interval) : null,
       maxConcurrentRequests: concurrencyText && Number.isFinite(concurrency) && concurrency >= 1
@@ -848,6 +892,7 @@ const Settings = ({
         secretAccessKey: '',
         sessionToken: '',
         clearSessionToken: false,
+        clearSecretAccessKey: false,
       }));
       setSyncMessage({ type: 'success', text: t('syncSettings.saveSuccess') });
     } catch (err) {
@@ -1787,10 +1832,30 @@ const Settings = ({
                     type="password"
                     placeholder={config.get('sync.secretAccessKey') ? t('syncSettings.secretSaved') : ''}
                     value={syncForm.secretAccessKey}
-                    onChange={(e) => setSyncForm((f) => ({ ...f, secretAccessKey: e.target.value }))}
+                    disabled={syncForm.clearSecretAccessKey}
+                    onChange={(e) => setSyncForm((f) => ({
+                      ...f,
+                      secretAccessKey: e.target.value,
+                      clearSecretAccessKey: false,
+                    }))}
                   />
                 </label>
               </div>
+
+              {config.get('sync.secretAccessKey') && (
+                <label className="settings-checkbox-row">
+                  <input
+                    type="checkbox"
+                    checked={syncForm.clearSecretAccessKey}
+                    onChange={(e) => setSyncForm((f) => ({
+                      ...f,
+                      clearSecretAccessKey: e.target.checked,
+                      ...(e.target.checked ? { secretAccessKey: '' } : {}),
+                    }))}
+                  />
+                  <span>{t('syncSettings.clearSecretAccessKey')}</span>
+                </label>
+              )}
 
               <label>
                 {t('syncSettings.sessionToken')}
@@ -1820,6 +1885,16 @@ const Settings = ({
                   <span>{t('syncSettings.clearSessionToken')}</span>
                 </label>
               )}
+
+              <label className="settings-checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={syncForm.includeSecrets}
+                  onChange={(e) => setSyncForm((f) => ({ ...f, includeSecrets: e.target.checked }))}
+                />
+                <span>{t('syncSettings.includeSecrets')}</span>
+              </label>
+              <p className="settings-hint">{t('syncSettings.includeSecretsHint')}</p>
 
               <label className="settings-checkbox-row">
                 <input
@@ -1986,6 +2061,10 @@ const Settings = ({
 
               {agentsLoading && (
                 <div className="skills-loading">{t('filemanage.loading')}</div>
+              )}
+
+              {agentsError && (
+                <div className="settings-error">{agentsError}</div>
               )}
 
               {!agentsLoading && agentsTabList.length === 0 && (

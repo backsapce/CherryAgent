@@ -14,9 +14,20 @@ function sessionTimestamp(session) {
   return latest;
 }
 
+// Key-order-insensitive serialization: the three-way merge reassembles keys
+// from a Set, so plain JSON.stringify can report false differences between
+// identical data and trigger spurious persists/syncs.
+function stableStringify(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'undefined';
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  return `{${Object.keys(value).sort().map(
+    (key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`
+  ).join(',')}}`;
+}
+
 function sessionDataChanged(left, right) {
   if (left === right) return false;
-  return JSON.stringify(left) !== JSON.stringify(right);
+  return stableStringify(left) !== stableStringify(right);
 }
 
 const MISSING = Symbol('missing-session-value');
@@ -48,7 +59,7 @@ function stableValueKey(value) {
   return `${typeof value}:${JSON.stringify(value)}`;
 }
 
-function mergeValueThreeWay(baseline, local, remote) {
+function mergeValueThreeWay(baseline, local, remote, conflictPreference = null) {
   if (local === MISSING) return baseline === MISSING ? remote : MISSING;
   if (remote === MISSING) {
     return sessionDataChanged(local, baseline) ? local : MISSING;
@@ -56,6 +67,11 @@ function mergeValueThreeWay(baseline, local, remote) {
   if (baseline !== MISSING && !sessionDataChanged(local, baseline)) return remote;
   if (baseline !== MISSING && !sessionDataChanged(remote, baseline)) return local;
   if (!isRecord(local) || !isRecord(remote)) {
+    // Both sides changed the same scalar. Honor the session that records the
+    // later edit (threaded in by mergeSessionThreeWay) instead of an
+    // arbitrary stable-key comparison, so the newest title/profile wins.
+    if (conflictPreference === 'local') return local;
+    if (conflictPreference === 'remote') return remote;
     return stableValueKey(local) >= stableValueKey(remote) ? local : remote;
   }
 
@@ -70,7 +86,8 @@ function mergeValueThreeWay(baseline, local, remote) {
     const value = mergeValueThreeWay(
       Object.prototype.hasOwnProperty.call(baseRecord, key) ? baseRecord[key] : MISSING,
       Object.prototype.hasOwnProperty.call(local, key) ? local[key] : MISSING,
-      Object.prototype.hasOwnProperty.call(remote, key) ? remote[key] : MISSING
+      Object.prototype.hasOwnProperty.call(remote, key) ? remote[key] : MISSING,
+      conflictPreference
     );
     if (value !== MISSING) {
       // Assignment to the magic `__proto__` setter would change the merged
@@ -197,7 +214,13 @@ function mergeMessages(baselineMessages, localMessages, remoteMessages) {
 }
 
 function mergeSessionThreeWay(baseline, local, remote) {
-  const merged = mergeValueThreeWay(baseline, local, remote);
+  const conflictPreference = (() => {
+    const localAt = sessionTimestamp(local);
+    const remoteAt = sessionTimestamp(remote);
+    if (!localAt || !remoteAt || localAt === remoteAt) return null;
+    return localAt > remoteAt ? 'local' : 'remote';
+  })();
+  const merged = mergeValueThreeWay(baseline, local, remote, conflictPreference);
   if (!isRecord(merged)) return local;
   const hasMessages = [baseline, local, remote].some(
     (session) => Object.prototype.hasOwnProperty.call(session || {}, 'messages')

@@ -100,3 +100,78 @@
     opacity: 0.18;
   }
 }
+
+/* ── Tool permission approval cards ─────────────────────────────────────── */
+
+.permission-card-stack {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: min(420px, calc(100vw - 40px));
+}
+
+.permission-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  box-shadow: 0 6px 24px var(--color-shadow-soft);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.permission-card-title {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--color-text);
+}
+
+.permission-card-body {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--color-text-secondary, var(--color-text));
+}
+
+.permission-card-command {
+  margin: 0;
+  padding: 8px 10px;
+  background: var(--color-surface-alt);
+  border-radius: 6px;
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 120px;
+  overflow: auto;
+}
+
+.permission-card-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.permission-card-actions button {
+  border-radius: 6px;
+  border: 1px solid var(--color-border);
+  padding: 6px 14px;
+  font-size: 13px;
+  cursor: pointer;
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+
+.permission-approve {
+  background: var(--color-accent) !important;
+  border-color: var(--color-accent) !important;
+  color: var(--color-accent-contrast, #fff) !important;
+}
+
+.permission-deny:hover {
+  border-color: var(--color-border-focus);
+}

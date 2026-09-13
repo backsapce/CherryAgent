@@ -10,12 +10,14 @@ import { jsonSchema, stepCountIs, streamText, tool } from 'ai';
 import llm from '../models/llm.js';
 import { normalizeAiUsage, toModelMessages } from '../models/ai.js';
 import { getEnabledToolSchemas, registry } from './tools.js';
-import { assembleApiMessages } from './context.js';
+import { assembleApiMessages, summaryStateMatchesHistory } from './context.js';
 import { loadMemory } from './memory.js';
 import { buildSandboxSkillFiles, buildSkillsSection } from './skills.js';
 import { compactToolResultForModel } from './toolObservation.js';
 import { AGENT_EVENT_VERSION, createAgentEventState, applyAgentEvent } from './events.js';
 import { createToolLoopGuard } from './loopSafety.js';
+import { assessToolCommandDanger } from './dangerousCommand.js';
+import { estimateTextTokens } from './tokenEstimate.js';
 import { getStaticContextWindow } from '../models/contextWindow.js';
 import { readAgentAgentsFile } from '../vfs/opfs.js';
 import { getAgent, getWorkspaceDirName } from '../agents/agents.js';
@@ -67,7 +69,10 @@ const EMPTY_RESPONSE_RETRY_PROMPT =
  * @param {number} [opts.maxRounds]
  * @param {number} [opts.modelMaxRetries]
  * @param {number|{totalMs?: number, stepMs?: number, chunkMs?: number}|null} [opts.modelTimeout]
- * @returns {Promise<{ content: string, thinking: string, toolCalls: Array, usage: Object|null }>}
+ * @param {{ content?: string, coveredUntil?: number, anchorId?: string|null }} [opts.summaryState]
+ *   Persisted summary from the previous turn. Reused only while the history it
+ *   indexes is unchanged; returned (updated) on the result for persistence.
+ * @returns {Promise<{ content: string, thinking: string, toolCalls: Array, usage: Object|null, summaryState: Object|null }>}
  */
 export async function runAgentLoop(opts) {
   const {
@@ -105,6 +110,11 @@ export async function runAgentLoop(opts) {
     subAgentDepth,
     scheduleWakeup: opts.scheduleWakeup,
   });
+  // A persisted summary is only reusable while the history it indexes is
+  // unchanged (append-only). Any edit or truncation regenerates it.
+  const reusableSummaryState = summaryStateMatchesHistory(opts.summaryState, messages)
+    ? opts.summaryState
+    : undefined;
   const packed = await assembleApiMessages({
     messages,
     systemPrompt,
@@ -112,7 +122,7 @@ export async function runAgentLoop(opts) {
     skillsList,
     agentIdentity,
     contextWindow,
-    summaryState: { content: '', coveredUntil: 0 },
+    summaryState: reusableSummaryState,
     llmProfileId: opts.llmProfileId,
     signal,
     autoSummarize: opts.autoSummarize !== false,
@@ -315,7 +325,7 @@ export async function runAgentLoop(opts) {
       modelCallCount,
     });
 
-    return buildAgentLoopResult({ state, runId, usage });
+    return buildAgentLoopResult({ state, runId, usage, summaryState: packed.summaryState });
   } catch (caughtError) {
     const err = enrichEmptyCauseMessage(asError(caughtError));
     if (err?.code === 'MODEL_TIMEOUT') {
@@ -340,7 +350,7 @@ export async function runAgentLoop(opts) {
         finishReason: 'tool-calls',
         modelCallCount: Math.max(1, lifecycle.stepIndex),
       });
-      return buildAgentLoopResult({ state, runId, usage });
+      return buildAgentLoopResult({ state, runId, usage, summaryState: packed.summaryState });
     }
     if (signal?.aborted) {
       emit({ type: 'run-abort', reason: err?.message || 'aborted' });
@@ -482,6 +492,44 @@ async function executeAgentTool({ toolCallId, toolName, input, signal, toolConte
       throwIfAborted(signal);
       if (!approved) {
         const output = formatDoomLoopBlock(toolName, guardResult.threshold);
+        const summary = formatToolCallSummary(toolName, input);
+        emit({ type: 'tool-blocked', ...baseEvent, output, summary });
+        return compactToolResultForModel({ name: toolName, parsedArgs: input }, output, {
+          contextWindow: toolContext.contextWindow,
+        });
+      }
+    }
+
+    // Destructive or privilege-escalating shell work asks the user first in
+    // interactive runtimes. Unattended runtimes (durable sandbox runs, tools
+    // with no approval channel) proceed — catastrophic patterns are already
+    // blocked by the agent server — but the decision is still recorded.
+    const danger = assessToolCommandDanger(toolName, input);
+    if (danger?.dangerous) {
+      const permission = {
+        id: toolCallId,
+        kind: 'dangerous-command',
+        toolCallId,
+        toolName,
+        input,
+        reason: danger.reason,
+      };
+      emit({ type: 'permission-request', requestId: toolCallId, toolCallId, kind: permission.kind, permission });
+      const hasApprovalChannel = typeof toolContext.onPermissionRequest === 'function';
+      const approved = hasApprovalChannel
+        ? await requestToolApproval(toolContext.onPermissionRequest, permission)
+        : true;
+      emit({
+        type: 'permission-resolved',
+        requestId: toolCallId,
+        toolCallId,
+        kind: permission.kind,
+        approved,
+        ...(hasApprovalChannel ? {} : { auto: true }),
+      });
+      throwIfAborted(signal);
+      if (!approved) {
+        const output = formatDangerousCommandBlock(toolName, input, danger.reason);
         const summary = formatToolCallSummary(toolName, input);
         emit({ type: 'tool-blocked', ...baseEvent, output, summary });
         return compactToolResultForModel({ name: toolName, parsedArgs: input }, output, {
@@ -865,12 +913,15 @@ function isWakeupScheduledControl(error) {
   return error?.[WAKEUP_SCHEDULED_CONTROL_BRAND] === true;
 }
 
-function buildAgentLoopResult({ state, runId, usage }) {
+function buildAgentLoopResult({ state, runId, usage, summaryState }) {
   return {
     content: state.content,
     thinking: state.thinking,
     toolCalls: state.toolCalls,
     usage,
+    // Conversation summary to persist on the assistant reply so the next turn
+    // resumes from it instead of re-summarizing the same middle turns.
+    summaryState: summaryState || null,
     run: {
       id: runId,
       status: state.status,
@@ -953,14 +1004,26 @@ function hasNativeToolCall(message) {
     && message.content.some((part) => part?.type === 'tool-call');
 }
 
+// prepareStep runs on every model call and re-estimates the whole loop
+// history. Message objects are immutable once appended, so cache each
+// message's serialized token estimate instead of re-stringifying it.
+const aiMessageTokenCache = new WeakMap();
+
 function estimateAiMessageTokens(messages) {
-  return Math.max(1, Math.floor((messages || []).reduce((total, message) => {
-    try {
-      return total + JSON.stringify(message).length;
-    } catch {
-      return total + 256;
+  return Math.max(1, (messages || []).reduce((total, message) => {
+    let tokens = aiMessageTokenCache.get(message);
+    if (tokens === undefined) {
+      let serialized;
+      try {
+        serialized = JSON.stringify(message);
+      } catch {
+        serialized = '';
+      }
+      tokens = serialized ? estimateTextTokens(serialized) : 64;
+      aiMessageTokenCache.set(message, tokens);
     }
-  }, 0) / 4));
+    return total + tokens;
+  }, 0));
 }
 
 function formatToolCallSummary(name, args = {}, result = '') {
@@ -1020,6 +1083,14 @@ function formatDoomLoopBlock(toolName, threshold) {
   return [
     `Tool execution blocked: ${toolName} was requested ${threshold} consecutive times with identical input.`,
     'This call was not run to prevent a doom loop. Change the approach, inspect the prior result, or request explicit user approval before retrying.',
+  ].join('\n');
+}
+
+function formatDangerousCommandBlock(toolName, input, reason) {
+  return [
+    `Tool execution blocked by the user: ${toolName} would run a command that ${reason}.`,
+    `Command: ${typeof input?.command === 'string' ? input.command : '(unknown)'}`,
+    'The user declined to run it. Do not retry the same command. Choose a safer alternative, narrow the scope, or explain what you intended so the user can run it manually.',
   ].join('\n');
 }
 

@@ -14,11 +14,14 @@
  *   5. All subsequent POST /agent requests must include Authorization: Bearer <token>
  *
  * Security features:
+ *   - Binds to 127.0.0.1 by default (set AGENT_HOST to expose)
  *   - Command validation (blocks destructive patterns)
  *   - Rate limiting on connect and command endpoints
  *   - CORS restricted to allowed origins (not wildcard)
+ *   - Origin enforcement on mutating requests (CSRF guard when auth is disabled)
  *   - Path traversal protection with normalized comparison
  *   - Higher-entropy temp tokens (8 bytes = 16 hex chars)
+ *   - Bounded request bodies and WebSocket frame sizes
  */
 
 import { createServer } from 'node:http';
@@ -55,9 +58,33 @@ const STATIC_DIR = join(__dirname, '..', 'dist');
 // ─── Configuration ──────────────────────────────────────────────────────────
 
 const PORT = process.env.AGENT_PORT || 3099;
+// This server executes arbitrary shell commands, so on a bare host it stays
+// loopback-only. Inside a container the published port and the container
+// network ARE the boundary (docker -p forwards to the container's eth0, not
+// its loopback), so a container runtime gets 0.0.0.0. AGENT_HOST always wins.
+function detectContainerized() {
+  try {
+    if (existsSync('/.dockerenv')) return true;          // docker
+    if (existsSync('/run/.containerenv')) return true;   // podman
+    const cgroup = readFileSync('/proc/self/cgroup', 'utf8');
+    if (/(?:docker|containerd|kubepods|lxc)/i.test(cgroup)) return true;
+  } catch {
+    /* not linux or unreadable — fall through */
+  }
+  return /^(?:true|1)$/i.test(process.env.container || '');
+}
+const HOST = process.env.AGENT_HOST
+  || (detectContainerized() ? '0.0.0.0' : '127.0.0.1');
 const MAX_TIMEOUT = 30_000;
 const MAX_OUTPUT_BYTES = 10 * 1024 * 1024;
 const MAX_AGENT_RUN_REQUEST_BYTES = 128 * 1024 * 1024;
+const MAX_JSON_BODY_BYTES = envPositiveBytes('AGENT_MAX_JSON_BODY_BYTES', 10 * 1024 * 1024);
+const MAX_CONNECT_BODY_BYTES = 4 * 1024;
+const MAX_UPLOAD_BYTES = envPositiveBytes('AGENT_MAX_UPLOAD_BYTES', 256 * 1024 * 1024);
+const MAX_WS_FRAME_BYTES = 1024 * 1024;
+const MAX_WS_BUFFER_BYTES = 8 * 1024 * 1024;
+const TEMP_TOKEN_TTL_MS = 10 * 60_000;
+const RATE_LIMIT_MAP_MAX_ENTRIES = 1_000;
 const ALLOWED_ORIGINS = (process.env.AGENT_ALLOWED_ORIGINS || 'https://127.0.0.1:5173,https://localhost:5173,http://127.0.0.1:5173,http://localhost:5173')
   .split(',')
   .map((origin) => origin.trim())
@@ -100,6 +127,22 @@ const RUN_IDLE_TIMEOUT_MS = Math.min(
   30 * 60_000,
   Math.max(30_000, Number(process.env.AGENT_RUN_IDLE_TIMEOUT_MS) || 120_000)
 );
+// Terminal runs and job records older than this are pruned from disk and memory.
+const STATE_RETENTION_MS = Math.min(
+  90 * 24 * 60 * 60_000,
+  Math.max(60_000, envPositiveMs('AGENT_STATE_RETENTION_MS', 7 * 24 * 60 * 60_000))
+);
+const STATE_PRUNE_INTERVAL_MS = 60 * 60_000;
+
+function envPositiveBytes(name, fallback) {
+  const parsed = Number(process.env[name]);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+
+function envPositiveMs(name, fallback) {
+  const parsed = Number(process.env[name]);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
 
 function printBootConfig() {
   const agentEnv = Object.fromEntries(
@@ -112,6 +155,7 @@ function printBootConfig() {
   console.log(JSON.stringify({
     env: agentEnv,
     resolved: {
+      host: HOST,
       port: PORT,
       maxTimeout: MAX_TIMEOUT,
       maxOutputBytes: MAX_OUTPUT_BYTES,
@@ -126,6 +170,9 @@ function printBootConfig() {
       runsDir: RUNS_DIR,
       jobsDir: JOBS_DIR,
       runIdleTimeoutMs: RUN_IDLE_TIMEOUT_MS,
+      stateRetentionMs: STATE_RETENTION_MS,
+      maxJsonBodyBytes: MAX_JSON_BODY_BYTES,
+      maxUploadBytes: MAX_UPLOAD_BYTES,
       staticDir: STATIC_DIR,
     },
   }, null, 2));
@@ -172,12 +219,32 @@ function resolveStaticPath(pathname) {
 
 function corsHeaders(req) {
   const origin = req.headers['origin'] || '';
-  const allowed = ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
+  // Echo the request origin only when it is allowlisted; an untrusted origin
+  // gets no Access-Control-Allow-Origin at all.
+  if (origin && ALLOWED_ORIGINS.includes(origin)) {
+    return {
+      'Access-Control-Allow-Origin': origin,
+      'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    };
+  }
   return {
-    'Access-Control-Allow-Origin': allowed,
+    'Access-Control-Allow-Origin': ALLOWED_ORIGINS[0],
     'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
   };
+}
+
+/**
+ * CSRF guard for mutating requests. Browsers always attach an Origin header to
+ * cross-origin POST/PATCH/DELETE (including no-preflight "simple" requests
+ * like text/plain forms). Non-browser clients and same-origin requests may
+ * omit it. When auth is disabled this is the only thing standing between any
+ * website and arbitrary command execution, so reject untrusted origins.
+ */
+function isAllowedHttpOrigin(req) {
+  const origin = req.headers['origin'] || '';
+  return !origin || ALLOWED_ORIGINS.includes(origin);
 }
 
 // ─── Rate limiting ──────────────────────────────────────────────────────────
@@ -185,6 +252,12 @@ function corsHeaders(req) {
 const rateLimits = new Map(); // key → { count, resetAt }
 
 function isRateLimited(key, maxRequests, windowMs) {
+  if (rateLimits.size > RATE_LIMIT_MAP_MAX_ENTRIES) {
+    const now = Date.now();
+    for (const [entryKey, entry] of rateLimits) {
+      if (now >= entry.resetAt) rateLimits.delete(entryKey);
+    }
+  }
   const now = Date.now();
   const entry = rateLimits.get(key);
   if (!entry || now >= entry.resetAt) {
@@ -198,10 +271,26 @@ function isRateLimited(key, maxRequests, windowMs) {
 // ─── Token management ───────────────────────────────────────────────────────
 
 let tempToken = null;
+let tempTokenGeneratedAt = 0;
 const validTokens = new Set();
 
 function generateToken(bytes = 32) {
   return randomBytes(bytes).toString('hex');
+}
+
+function rotateTempToken(reason) {
+  tempToken = generateToken(8);
+  tempTokenGeneratedAt = Date.now();
+  console.log(`\n[agent] ─── Temp connect token (${reason}) ───`);
+  console.log(`[agent]   ${tempToken}`);
+  console.log(`[agent]   Valid for ${Math.round(TEMP_TOKEN_TTL_MS / 60_000)} minutes or until used`);
+  console.log(`[agent] ────────────────────────────────────────\n`);
+}
+
+function ensureFreshTempToken() {
+  if (!tempToken || Date.now() - tempTokenGeneratedAt >= TEMP_TOKEN_TTL_MS) {
+    rotateTempToken('expired');
+  }
 }
 
 function loadTokens() {
@@ -211,9 +300,7 @@ function loadTokens() {
       const content = readFileSync(TOKEN_FILE, 'utf-8');
       const lines = content.split('\n').map((l) => l.trim()).filter(Boolean);
       for (const t of lines) validTokens.add(t);
-      const loaded = validTokens.size - before;
-      console.log(`[agent] Loaded ${loaded} saved token(s) from ${TOKEN_FILE}`);
-      console.log(`[agent] Current valid tokens: ${[...validTokens].join(', ')}`);
+      console.log(`[agent] Loaded ${validTokens.size - before} saved token(s) from ${TOKEN_FILE}`);
     }
   } catch (err) {
     console.warn('[agent] Could not read token file:', err.message);
@@ -222,7 +309,7 @@ function loadTokens() {
 
 function saveTokens() {
   try {
-    writeFileSync(TOKEN_FILE, [...validTokens].join('\n') + '\n', 'utf-8');
+    writeFileSync(TOKEN_FILE, [...validTokens].join('\n') + '\n', { encoding: 'utf8', mode: 0o600 });
   } catch (err) {
     console.warn('[agent] Could not save token file:', err.message);
   }
@@ -238,14 +325,14 @@ function isAuthorized(req) {
 // ─── Command validation ─────────────────────────────────────────────────────
 
 const BLOCKED_PATTERNS = [
-  /rm\s+(-rf|--recursive|--force)\s+\/\s*$/,   // rm -rf /
-  /dd\s+if=/,                                   // dd (disk operations)
-  /mkfs/,                                       // filesystem format
-  /:()\s*\{\s*:\|:\s*\}/,                         // fork bomb
-  />\s*\/dev\/sd/,                              // write to raw disk
-  /chmod\s+[0-7]*\s+\/\s*$/,                    // chmod on root
-  /curl\s+.+\s*\|\s*sh/,                        // pipe curl to shell
-  /wget\s+.+\s*\|\s*sh/,                        // pipe wget to shell
+  /rm\s+(?:-\w+\s+)+\/\s*(?:\*|$)/,      // rm -rf / and rm -rf /*
+  /dd\s+if=/,                               // dd (disk operations)
+  /mkfs/,                                   // filesystem format
+  /:\(\)\s*\{\s*:\|:\s*&?\s*\}/,            // fork bomb :(){ :|: & };:
+  />\s*\/dev\/sd/,                           // write to raw disk
+  /chmod\s+[0-7]*\s+\/\s*$/,                // chmod on root
+  /curl\s+.+\|\s*(?:ba|z|da)?sh\b/,         // pipe curl to shell
+  /wget\s+.+\|\s*(?:ba|z|da)?sh\b/,         // pipe wget to shell
 ];
 
 function validateCommand(cmd) {
@@ -386,7 +473,7 @@ function json(res, status, data, req) {
   res.end(JSON.stringify(data));
 }
 
-async function readBody(req, maxBytes = Number.POSITIVE_INFINITY) {
+async function readBody(req, maxBytes = MAX_JSON_BODY_BYTES) {
   const declaredBytes = Number(req.headers['content-length']);
   if (Number.isFinite(declaredBytes) && declaredBytes > maxBytes) {
     const error = new Error(`Request body exceeds ${maxBytes} bytes.`);
@@ -407,10 +494,24 @@ async function readBody(req, maxBytes = Number.POSITIVE_INFINITY) {
   return body;
 }
 
-async function readBodyBuffer(req) {
+async function readBodyBuffer(req, maxBytes = MAX_UPLOAD_BYTES) {
+  const declaredBytes = Number(req.headers['content-length']);
+  if (Number.isFinite(declaredBytes) && declaredBytes > maxBytes) {
+    const error = new Error(`Request body exceeds ${maxBytes} bytes.`);
+    error.statusCode = 413;
+    throw error;
+  }
   const chunks = [];
+  let receivedBytes = 0;
   for await (const chunk of req) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    receivedBytes += buffer.length;
+    if (receivedBytes > maxBytes) {
+      const error = new Error(`Request body exceeds ${maxBytes} bytes.`);
+      error.statusCode = 413;
+      throw error;
+    }
+    chunks.push(buffer);
   }
   return Buffer.concat(chunks);
 }
@@ -442,7 +543,9 @@ function sendWsFrame(socket, value) {
 
 function closeWs(socket, code = 1000, reason = '') {
   if (socket.destroyed) return;
-  const reasonBuffer = Buffer.from(reason);
+  // A close frame carries the reason in a <=123-byte payload (125 minus the
+  // 2-byte status code); longer reasons must be truncated, not wrapped.
+  const reasonBuffer = Buffer.from(String(reason || ''), 'utf8').subarray(0, 123);
   const payload = Buffer.alloc(2 + reasonBuffer.length);
   payload.writeUInt16BE(code, 0);
   reasonBuffer.copy(payload, 2);
@@ -474,6 +577,8 @@ function parseWsFrames(buffer) {
       headerLength = 10;
     }
 
+    if (length > MAX_WS_FRAME_BYTES) throw new Error('WebSocket frame too large');
+
     const maskLength = masked ? 4 : 0;
     const frameEnd = offset + headerLength + maskLength + length;
     if (frameEnd > buffer.length) break;
@@ -502,18 +607,26 @@ const server = createServer(async (req, res) => {
     return res.end();
   }
 
+  // CSRF guard: reject mutating requests whose browser-supplied Origin is not
+  // allowlisted. This matters most when AGENT_DISABLE_AUTH is set, because a
+  // no-preflight text/plain POST from any website would otherwise execute a
+  // command even though its response stays unreadable.
+  if (['POST', 'PATCH', 'DELETE'].includes(req.method) && !isAllowedHttpOrigin(req)) {
+    return json(res, 403, {
+      error: 'Origin not allowed. Add the page origin to AGENT_ALLOWED_ORIGINS and restart the agent server.',
+    }, req);
+  }
+
   const url = new URL(req.url, `http://localhost:${PORT}`);
 
   // ── Health check ───────────────────────────────────────────────────────
   if ((url.pathname === '/agent' || url.pathname === '/agent/health') && req.method === 'GET') {
     const authed = isAuthorized(req);
 
-    if (!AUTH_DISABLED && !authed) {
-      tempToken = generateToken(8);
-      console.log(`\n[agent] ─── Fresh temp connect token ───`);
-      console.log(`[agent]   ${tempToken}`);
-      console.log(`[agent] ────────────────────────────────\n`);
-    }
+    // Rotate only when the printed token has aged out. Rotating on every
+    // unauthenticated GET would let any network client invalidate the token
+    // the operator just copied from the console.
+    if (!AUTH_DISABLED && !authed) ensureFreshTempToken();
 
     return json(res, 200, {
       status: 'ok',
@@ -542,7 +655,7 @@ const server = createServer(async (req, res) => {
       return json(res, 429, { error: 'Too many connect attempts. Try again later.' }, req);
     }
 
-    const body = await readBody(req);
+    const body = await readBody(req, MAX_CONNECT_BODY_BYTES);
     let parsed;
     try { parsed = JSON.parse(body); } catch {
       return json(res, 400, { error: 'Invalid JSON body' }, req);
@@ -561,10 +674,7 @@ const server = createServer(async (req, res) => {
     validTokens.add(longLivedToken);
     saveTokens();
 
-    tempToken = generateToken(8);
-    console.log(`\n[agent] ─── New temp connect token ───`);
-    console.log(`[agent]   ${tempToken}`);
-    console.log(`[agent] ──────────────────────────────\n`);
+    rotateTempToken('rotated after connect');
 
     console.log('[agent] Client authenticated successfully.');
     return json(res, 200, { token: longLivedToken }, req);
@@ -1047,6 +1157,11 @@ server.on('upgrade', (req, socket) => {
 
   socket.on('data', (chunk) => {
     pending = Buffer.concat([pending, chunk]);
+    if (pending.length > MAX_WS_BUFFER_BYTES) {
+      fail(400, 'WebSocket message too large');
+      socket.destroy();
+      return;
+    }
     let parsed;
     try {
       parsed = parseWsFrames(pending);
@@ -1134,9 +1249,10 @@ server.on('upgrade', (req, socket) => {
 
 if (!AUTH_DISABLED) {
   loadTokens();
+  rotateTempToken('startup');
 }
 
-server.listen(PORT, () => {
+server.listen(PORT, HOST, () => {
   try {
     if (!existsSync(WORKSPACE_DIR)) {
       mkdirSync(WORKSPACE_DIR, { recursive: true });
@@ -1151,7 +1267,12 @@ server.listen(PORT, () => {
   }
 
   printBootConfig();
-  console.log(`[agent] Server listening on http://localhost:${PORT}/agent`);
+  console.log(`[agent] Server listening on http://${HOST}:${PORT}/agent`);
+  if (HOST === '127.0.0.1' || HOST === 'localhost' || HOST === '::1') {
+    console.log('[agent] Bound to loopback only (bare host default). Set AGENT_HOST=0.0.0.0 to expose to the network (not recommended without a trusted boundary).');
+  } else if (!process.env.AGENT_HOST) {
+    console.log('[agent] Container runtime detected; binding 0.0.0.0 so the published port reaches this server. AGENT_HOST overrides.');
+  }
   console.log(`[agent] Allowed origins: ${ALLOWED_ORIGINS.join(', ')}`);
   console.log(`[agent] Auth: ${AUTH_DISABLED ? 'disabled' : 'token required'}`);
   console.log(`[agent] Workspace cwd: ${WORKSPACE_DIR}`);

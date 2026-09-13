@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { beforeEach, test } from 'node:test';
 import config from '../config/config.js';
-import { buildSkillsSection, setSkillEnabled } from './skills.js';
+import { buildSkillsSection, resetDefaultSkillsCache, setSkillEnabled } from './skills.js';
 import { registry } from './tools.js';
 import { readAgentSkillFile, writeSkillFile } from '../vfs/opfs.js';
 
@@ -20,6 +20,7 @@ beforeEach(async () => {
   await config.setAll({});
   delete globalThis.fetch;
   delete globalThis.window;
+  resetDefaultSkillsCache();
 });
 
 test('skill is the only model-facing tool for skill operations', () => {

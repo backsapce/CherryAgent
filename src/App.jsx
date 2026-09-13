@@ -233,6 +233,7 @@ function expandMessagesForLlm(messages) {
       toolCalls,
       transcript: _transcript,
       usage: _usage,
+      summaryState: _summaryState,
       runStartedAt: _runStartedAt,
       runFinishedAt: _runFinishedAt,
       remoteEventSequence: _remoteEventSequence,
@@ -264,12 +265,83 @@ function expandMessagesForSandboxRuntime(messages) {
   return expandMessagesForLlm(boundContextFilesForPrompt(messages));
 }
 
+/**
+ * Find the newest persisted conversation summary. Summaries index the message
+ * array; runAgentLoop validates the anchor and discards a stale one.
+ */
+
+// Long-lived tabs accumulate ids for cancelled wakeups and resumed remote
+// runs; keep these bookkeeping Sets bounded (FIFO beyond the cap).
+const BOUNDED_ID_SET_LIMIT = 500;
+
+function addToBoundedSet(set, id) {
+  set.add(id);
+  if (set.size > BOUNDED_ID_SET_LIMIT) {
+    for (const stale of set) {
+      set.delete(stale);
+      if (set.size <= BOUNDED_ID_SET_LIMIT) break;
+    }
+  }
+}
+
+function latestReusableSummaryState(messages) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const candidate = messages[index]?.summaryState;
+    if (candidate?.content && Number.isInteger(candidate.coveredUntil) && candidate.coveredUntil > 0) {
+      return candidate;
+    }
+  }
+  return undefined;
+}
+
 function OfflineBanner() {
   const { t } = useI18n();
   return (
     <div className="offline-banner">
       <WifiOff width={16} height={16} />
       <span>{t('offline.banner')}</span>
+    </div>
+  );
+}
+
+// Rendered inside <I18nProvider> (App renders the provider itself, so this
+// must live in a child component to use the i18n context).
+function PermissionCardStack({ items, onResolve }) {
+  const { t } = useI18n();
+  if (!items?.length) return null;
+  return (
+    <div className="permission-card-stack" role="alertdialog" aria-live="assertive">
+      {items.map(({ permission }) => (
+        <div key={permission.id} className="permission-card">
+          <div className="permission-card-title">
+            {t('permissions.title')}
+          </div>
+          <div className="permission-card-body">
+            {permission.kind === 'dangerous-command' && permission.reason
+              ? t('permissions.dangerousCommand', { reason: permission.reason })
+              : t('permissions.doomLoop', { count: permission.threshold ?? 0 })}
+          </div>
+          {typeof permission.input?.command === 'string' && permission.input.command.trim() && (
+            <pre className="permission-card-command">{permission.input.command}</pre>
+          )}
+          <div className="permission-card-actions">
+            <button
+              type="button"
+              className="permission-approve"
+              onClick={() => onResolve(permission.id, true)}
+            >
+              {t('permissions.approve')}
+            </button>
+            <button
+              type="button"
+              className="permission-deny"
+              onClick={() => onResolve(permission.id, false)}
+            >
+              {t('permissions.deny')}
+            </button>
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
@@ -306,6 +378,9 @@ function App() {
   const [currentLlmProfileId, setCurrentLlmProfileId] = useState(null);
   const [storageVersion, setStorageVersion] = useState(0);
   const [messageQueue, setMessageQueue] = useState([]);
+  // Pending tool-permission prompts: { sessionId, permission, resolve }.
+  // The agent loop blocks on the resolver until the user decides.
+  const [pendingPermissions, setPendingPermissions] = useState([]);
   const sessionPersistenceReadyRef = useRef(false);
   const skipNextSessionSaveRef = useRef(null);
   const persistedSessionsRef = useRef([]);
@@ -758,6 +833,13 @@ function App() {
     const sessionIncarnation = sessionIncarnationsRef.current.get(sessionId) || 0;
     const run = sessionRunsRef.current.get(sessionId);
     if (skipAutomaticTitle && run) run.skipAutomaticTitle = true;
+    // A stopped run must not stay blocked on an unanswered approval prompt.
+    setPendingPermissions((prev) => {
+      for (const item of prev) {
+        if (item.sessionId === sessionId) item.resolve(false);
+      }
+      return prev.filter((item) => item.sessionId !== sessionId);
+    });
     const existingStop = sessionStopPromisesRef.current.get(sessionId);
     if (existingStop) return existingStop;
     const storedRemote = sessionsRef.current.find((session) => session.id === sessionId)?.remoteRun;
@@ -774,7 +856,7 @@ function App() {
       return next;
     });
     if (remote) {
-      resumedRemoteRunsRef.current.add(remote.id);
+      addToBoundedSet(resumedRemoteRunsRef.current, remote.id);
       resumingWaitingRunsRef.current.delete(remote.id);
     }
     run?.controller.abort();
@@ -872,8 +954,8 @@ function App() {
     // Fence local timers immediately, including a timer callback that was
     // already queued before React commits the metadata update below.
     for (const wakeupId of localWakeupIds) {
-      claimedWakeupIdsRef.current.add(wakeupId);
-      cancelledWakeupIdsRef.current.add(wakeupId);
+      addToBoundedSet(claimedWakeupIdsRef.current, wakeupId);
+      addToBoundedSet(cancelledWakeupIdsRef.current, wakeupId);
     }
 
     const pendingStart = pendingStreamStartsRef.current.get(sessionId);
@@ -887,7 +969,7 @@ function App() {
     );
 
     if (waitingRemote) {
-      resumedRemoteRunsRef.current.add(waitingRemote.id);
+      addToBoundedSet(resumedRemoteRunsRef.current, waitingRemote.id);
       resumingWaitingRunsRef.current.delete(waitingRemote.id);
       const timerId = waitingRemoteTimersRef.current.get(waitingRemote.id);
       if (timerId) clearTimeout(timerId);
@@ -1087,7 +1169,7 @@ function App() {
 
       const session = sessionsRef.current.find((item) => item.id === sessionId);
       if (session?.remoteRun && !sessionRunsRef.current.has(sessionId)) {
-        resumedRemoteRunsRef.current.add(session.remoteRun.id);
+        addToBoundedSet(resumedRemoteRunsRef.current, session.remoteRun.id);
         resumingWaitingRunsRef.current.delete(session.remoteRun.id);
       }
       const waitingTimer = session?.remoteRun
@@ -1275,6 +1357,21 @@ function App() {
   }, []);
 
   // Stream LLM response for a given session using the agent loop
+  // Tool-permission prompts from the agent loop. The loop's
+  // onPermissionRequest resolves when the user approves or denies here; a
+  // stopped run denies its open prompts immediately.
+  const handlePermissionRequest = useCallback((sessionId, permission) => new Promise((resolve) => {
+    setPendingPermissions((prev) => [...prev, { sessionId, permission, resolve }]);
+  }), []);
+
+  const resolvePendingPermission = useCallback((requestId, approved) => {
+    setPendingPermissions((prev) => {
+      const target = prev.find((item) => item.permission.id === requestId);
+      target?.resolve(approved);
+      return prev.filter((item) => item.permission.id !== requestId);
+    });
+  }, []);
+
   const streamResponse = useCallback(async (sessionId, sessionMessages, opts = {}) => {
     // A reset invalidates every in-memory session/message reference. Keep this
     // guard at the final entry point as well as in the timer scheduler so a
@@ -1684,6 +1781,8 @@ function App() {
           contextWindow: activeConfig.contextWindow,
           llmProfileId,
           languageModel,
+          summaryState: latestReusableSummaryState(sessionMessages),
+          onPermissionRequest: (permission) => handlePermissionRequest(sessionId, permission),
           scheduleWakeup: async ({ delaySeconds, prompt }) => {
             assertRunActive();
             const wakeup = createOrReplaceTurnWakeup({
@@ -1756,7 +1855,18 @@ function App() {
         error.code = 'EMPTY_MODEL_RESPONSE';
         throw error;
       }
-      updateMessage({ content: finalContent, thinking: finalThinking, toolCalls: [...toolCalls], transcript: agentEventState.transcript, usage: result?.usage }, { touch: true });
+      updateMessage({
+        content: finalContent,
+        thinking: finalThinking,
+        toolCalls: [...toolCalls],
+        transcript: agentEventState.transcript,
+        usage: result?.usage,
+        // Persist the conversation summary on the reply that produced it, so
+        // the next turn resumes from it instead of re-summarizing from zero.
+        ...(result?.summaryState?.content
+          ? { summaryState: result.summaryState }
+          : {}),
+      }, { touch: true });
       if (responseCompleted) {
         automaticTitleInput = { sessionId, sessionMessages, replyId, finalContent };
       }
@@ -1911,7 +2021,7 @@ function App() {
       }
     }
     return runOutcome;
-  }, [agentList, agentListReady, sessionAgents, sessionLlmProfiles, currentLlmProfileId, generateAutomaticSessionTitle, getFirstLlmProfileId]);
+  }, [handlePermissionRequest, agentList, agentListReady, sessionAgents, sessionLlmProfiles, currentLlmProfileId, generateAutomaticSessionTitle, getFirstLlmProfileId]);
 
   const scheduleStreamResponse = useCallback((sessionId, sessionMessages, opts = {}) => {
     const session = sessionsRef.current.find((item) => item.id === sessionId);
@@ -2002,7 +2112,7 @@ function App() {
     ));
     for (const session of resumable) {
       const sessionIncarnation = sessionIncarnationsRef.current.get(session.id) || 0;
-      resumedRemoteRunsRef.current.add(session.remoteRun.id);
+      addToBoundedSet(resumedRemoteRunsRef.current, session.remoteRun.id);
       void (async () => {
         try {
           const runMessages = session.messages || await loadSessionMessages(session.id);
@@ -2432,7 +2542,7 @@ function App() {
       let startAfter;
       if (canSupersedeRemoteRun(supersededRemote)) {
         startAfter = abortRemoteAgentRunBestEffort(supersededRemote.url, supersededRemote.id);
-        resumedRemoteRunsRef.current.add(supersededRemote.id);
+        addToBoundedSet(resumedRemoteRunsRef.current, supersededRemote.id);
         resumingWaitingRunsRef.current.delete(supersededRemote.id);
         const waitingTimer = waitingRemoteTimersRef.current.get(supersededRemote.id);
         if (waitingTimer) clearTimeout(waitingTimer);
@@ -2532,7 +2642,7 @@ function App() {
       ) return;
 
       const { session: scheduledSession, wakeup } = next;
-      claimedWakeupIdsRef.current.add(wakeup.id);
+      addToBoundedSet(claimedWakeupIdsRef.current, wakeup.id);
 
       void (async () => {
         try {
@@ -2711,7 +2821,12 @@ function App() {
 
   const handleSelectLLM = useCallback(async (profileId) => {
     const nextProfileId = profileId || null;
-    await llm.selectProfile(profileId || null);
+    try {
+      await llm.selectProfile(profileId || null);
+    } catch (err) {
+      console.warn('Failed to select LLM profile:', err);
+      return;
+    }
     setCurrentLlmProfileId(nextProfileId);
     setLlmReady((prev) => !prev);
     if (!activeSessionId) return;
@@ -2949,6 +3064,7 @@ function App() {
           <ChevronRight width={14} height={14} />
         </button>
       )}
+      <PermissionCardStack items={pendingPermissions} onResolve={resolvePendingPermission} />
       <MessagePanel
         ref={messagePanelRef}
         messages={messages}
@@ -3041,16 +3157,20 @@ function App() {
         agents={agents}
         selectedAgentUrl={activeSandboxUrl}
         onSelectAgent={async (url) => {
-          if (activeAgentConfig) {
-            await updateAgentConfig(activeAgentConfig.id, { sandboxUrl: url || null });
-            const updated = await listAgents();
-            setAgentList(updated);
+          try {
+            if (activeAgentConfig) {
+              await updateAgentConfig(activeAgentConfig.id, { sandboxUrl: url || null });
+              const updated = await listAgents();
+              setAgentList(updated);
+            }
+            setSelectedAgentUrl(url || null);
+            selectedAgentRef.current = url || null;
+            await config.set('selectedAgent', url);
+          } catch (err) {
+            console.warn('Failed to select agent:', err);
           }
-          setSelectedAgentUrl(url || null);
-          selectedAgentRef.current = url || null;
-          await config.set('selectedAgent', url);
         }}
-        onAgentsChange={async (newAgents) => {
+        onAgentsChange={async (newAgents) => {try {
           // Track dismissed / un-dismissed agents for auto-detect
           const dismissed = config.get('dismissedAgents') || [];
           const nonE2bAgents = newAgents.filter((a) => a.url !== E2B_AGENT_ID);
@@ -3083,6 +3203,7 @@ function App() {
             selectedAgentRef.current = next;
             await config.set('selectedAgent', next);
           }
+        } catch (err) { console.warn('Failed to update agents:', err); }
         }}
         onE2bChange={async (apiKey) => {
           const nextKey = apiKey || null;
@@ -3128,7 +3249,7 @@ function App() {
         }}
         agentList={agentList}
         agentId={activeSessionId ? sessionAgents[activeSessionId] || null : lastAgentId}
-        onAgentChange={async (sessionId, newAgentId) => {
+        onAgentChange={async (sessionId, newAgentId) => {try {
           const updatedTime = sessionTimeFields();
           const llmProfileId = getAgentDefaultLlmId(newAgentId);
           if (newAgentId) {
@@ -3154,6 +3275,7 @@ function App() {
                 : c
             )
           );
+        } catch (err) { console.warn('Failed to change session agent:', err); }
         }}
         onAgentListChange={async (newList) => {
           const changedAgentDefaults = newList.filter((nextAgent) => {

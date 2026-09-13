@@ -83,7 +83,23 @@ version: 1.0.0
 
 // ─── Public API ─────────────────────────────────────────────────────────────
 
-export async function ensureDefaultSkills() {
+// Checking the shipped default skills needs an OPFS directory scan plus a
+// read per skill; it runs on every listSkills() call (once per agent turn).
+// One check per page load is enough: a user-deleted default stays deleted
+// until reload, and a fresh write still lands on the next session.
+let defaultSkillsEnsured = null;
+
+export function ensureDefaultSkills() {
+  defaultSkillsEnsured ??= ensureDefaultSkillsUncached();
+  return defaultSkillsEnsured;
+}
+
+/** Test hook: the suite swaps in a fresh virtual OPFS root per case. */
+export function resetDefaultSkillsCache() {
+  defaultSkillsEnsured = null;
+}
+
+async function ensureDefaultSkillsUncached() {
   const existing = await listSkillDirs();
   const existingNames = new Set(existing.map((dir) => dir.name));
   for (const skill of DEFAULT_SKILLS) {

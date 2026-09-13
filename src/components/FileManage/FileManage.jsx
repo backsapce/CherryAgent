@@ -174,12 +174,17 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandb
     return { tree, expanded: nextExpanded };
   }, [listDirectoryChildren]);
 
-  // Reload tree after any mutation
+  // Reload tree after any mutation. Requests carry a token: a slow listing
+  // that finishes after a newer refresh (source switch, refreshTrigger bump)
+  // must not overwrite the newer tree.
+  const refreshTokenRef = useRef(0);
   const refreshTree = useCallback(async () => {
+    const requestToken = ++refreshTokenRef.current;
     setLoading(true);
     setError(null);
     try {
       const rootDir = await fileOps.list();
+      if (requestToken !== refreshTokenRef.current) return;
       const expandedIds = new Set(expandedDirsRef.current);
       expandedIds.add(ROOT_ID);
       if (fileSource !== 'local') {
@@ -194,17 +199,19 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandb
         }
       }
       const { tree, expanded } = await hydrateExpandedDirs(rootDir, expandedIds);
+      if (requestToken !== refreshTokenRef.current) return;
       setFileTree(tree);
       setExpandedDirs(expanded);
       expandedDirsRef.current = expanded;
     } catch (_err) {
+      if (requestToken !== refreshTokenRef.current) return;
       setError(fileSource === 'local' ? t('filemanage.loadLocalError') : t('filemanage.loadRemoteError'));
       setFileTree({ id: 'root', name: '/', type: 'directory', expanded: true, children: [] });
       const expanded = new Set([ROOT_ID]);
       setExpandedDirs(expanded);
       expandedDirsRef.current = expanded;
     } finally {
-      setLoading(false);
+      if (requestToken === refreshTokenRef.current) setLoading(false);
     }
   }, [activeAgentId, fileOps, fileSource, hydrateExpandedDirs, t]);
 
@@ -325,14 +332,16 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandb
   }, [isResizing, onWidthChange]);
   const handleMouseUp = useCallback(() => setIsResizing(false), []);
 
+  // Only carry the mousemove cost while a resize drag is active.
   useEffect(() => {
+    if (!isResizing) return;
     window.addEventListener('mousemove', handleMouseMove);
     window.addEventListener('mouseup', handleMouseUp);
     return () => {
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [handleMouseMove, handleMouseUp]);
+  }, [isResizing, handleMouseMove, handleMouseUp]);
 
   // Toggle directory expansion
   const toggleDirectory = useCallback(async (dirId, dirName, parentDir = '') => {
@@ -347,9 +356,13 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandb
 
     if (!isCurrentlyExpanded) {
       setLoadingDirs((prev) => new Set(prev).add(dirId));
+      const requestToken = refreshTokenRef.current;
       const path = joinFileManagerPath(parentDir, dirName);
       try {
         const children = await listDirectoryChildren(path);
+        // A full refresh replaced the tree while this directory loaded; its
+        // (older) children would clobber the fresh state.
+        if (requestToken !== refreshTokenRef.current) return;
         setFileTree((prevTree) => {
           const updateNode = (node) => {
             if (node.id === dirId) return { ...node, children };

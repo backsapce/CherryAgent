@@ -1241,6 +1241,8 @@ async function runSpawnedAgent(entry, total, sharedContext, maxRounds, ctx) {
     maxRounds,
     subAgentDepth: (ctx.subAgentDepth || 0) + 1,
     onEvent: createSpawnProgressReporter(subAgent, ctx),
+    // Delegate approval to the same interactive channel the parent uses.
+    onPermissionRequest: ctx.onPermissionRequest,
   });
 
   ctx.recordSubAgentUsage?.(result.usage);

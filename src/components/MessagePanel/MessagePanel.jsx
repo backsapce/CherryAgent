@@ -49,6 +49,10 @@ const MAX_IMAGE_BYTES = 4 * 1024 * 1024; // 4 MB target (well under 10 MB API li
 const MAX_DIMENSION = 2048;
 const MESSAGE_HISTORY_PAGE_SIZE = 100;
 const MOBILE_MESSAGE_HISTORY_PAGE_SIZE = 40;
+// Attached-file content is embedded in the message, persisted to OPFS, and
+// re-encoded by every sync push — bound it at attach time, not only at
+// prompt time (boundContextFilesForPrompt).
+const CONTEXT_FILE_ATTACH_MAX_BYTES = 512 * 1024;
 const AUTO_SCROLL_BOTTOM_THRESHOLD = 48;
 const LOAD_HISTORY_TOP_THRESHOLD = 24;
 const SCROLL_CAPTURE_SETTLE_DELAY_MS = 120;
@@ -83,6 +87,60 @@ const MARKDOWN_COMPONENTS = {
   pre: CodeBlock,
   img: BlockedMarkdownImage,
 };
+
+// Streaming re-renders replace the message list on every animation frame,
+// which re-parses markdown for every visible message even though only the
+// streaming one changed. Cache rendered elements (and legacy-summary strips)
+// by content; React elements are immutable descriptors, so reuse is safe.
+// The live streaming message bypasses both caches — its content mutates per
+// flush and would evict everything else.
+const RENDER_CACHE_LIMIT = 500;
+const markdownRenderCache = new Map();
+const strippedContentCache = new Map();
+
+function cacheGet(cache, key) {
+  const value = cache.get(key);
+  if (value !== undefined && cache.size > 1) {
+    cache.delete(key);
+    cache.set(key, value);
+  }
+  return value;
+}
+
+function cacheSet(cache, key, value) {
+  cache.set(key, value);
+  if (cache.size > RENDER_CACHE_LIMIT) {
+    cache.delete(cache.keys().next().value);
+  }
+}
+
+function renderMarkdownElement(content) {
+  return (
+    <ReactMarkdown
+      remarkPlugins={MARKDOWN_REMARK_PLUGINS}
+      rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
+      components={MARKDOWN_COMPONENTS}
+    >
+      {content}
+    </ReactMarkdown>
+  );
+}
+
+function cachedMarkdown(content) {
+  const cached = cacheGet(markdownRenderCache, content);
+  if (cached !== undefined) return cached;
+  const element = renderMarkdownElement(content);
+  cacheSet(markdownRenderCache, content, element);
+  return element;
+}
+
+function cachedStripLegacyContent(content) {
+  const cached = cacheGet(strippedContentCache, content);
+  if (cached !== undefined) return cached;
+  const stripped = stripLegacyContextFileSummary(content);
+  cacheSet(strippedContentCache, content, stripped);
+  return stripped;
+}
 
 function messageHistoryPageSize() {
   try {
@@ -759,14 +817,21 @@ const ImageGenerationStatus = () => {
 };
 
 const AssistantTranscript = ({ transcript, toolCalls, streaming, onStopStreaming, agentId, sandboxUrl }) => {
+  // One running counter instead of a re-slice per segment (O(n) vs O(n²)
+  // while streaming reasoning-heavy transcripts).
+  const reasoningRounds = new Map();
+  let reasoningCounter = 0;
+  for (const segment of transcript) {
+    if (segment.type === 'reasoning') {
+      reasoningCounter += 1;
+      reasoningRounds.set(segment.id, reasoningCounter);
+    }
+  }
   return (
     <div className="assistant-transcript">
-      {transcript.map((segment, segmentIndex) => {
+      {transcript.map((segment) => {
         if (segment.type === 'reasoning') {
-          const reasoningRound = transcript
-            .slice(0, segmentIndex + 1)
-            .filter((item) => item.type === 'reasoning')
-            .length;
+          const reasoningRound = reasoningRounds.get(segment.id) || 0;
           const parsedReasoning = splitTaggedReasoningContent(segment.content);
           return (
             <div className="transcript-reasoning-segment" key={segment.id}>
@@ -898,6 +963,7 @@ const MessagePanel = forwardRef(({
   const pendingSessionScrollRestoreRef = useRef(null);
   const suppressSessionScrollSaveRef = useRef(false);
   const scrollCaptureTimerRef = useRef(null);
+  const scrollCaptureRafRef = useRef(null);
   const activeSessionIdRef = useRef(activeSessionId);
   const captureSessionScrollStateRef = useRef(null);
   const copiedTimerRef = useRef(null);
@@ -1179,6 +1245,7 @@ const MessagePanel = forwardRef(({
   useEffect(() => () => {
     if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
     if (scrollCaptureTimerRef.current) clearTimeout(scrollCaptureTimerRef.current);
+    if (scrollCaptureRafRef.current != null) cancelAnimationFrame(scrollCaptureRafRef.current);
   }, []);
 
   const handleMessageListScroll = (e) => {
@@ -1199,12 +1266,22 @@ const MessagePanel = forwardRef(({
       shouldAutoScrollRef.current = true;
     }
     if (activeSessionId && !suppressSessionScrollSaveRef.current) {
-      sessionScrollStatesRef.current.set(activeSessionId, captureSessionScrollState(list));
-      // Right after a jump scroll, content-visibility may still be serving
-      // estimated heights near the new viewport; re-capture once scrolling
-      // settles so the saved anchor geometry is real.
-      if (scrollCaptureTimerRef.current) clearTimeout(scrollCaptureTimerRef.current);
+      // The geometry scan walks every rendered message; scroll events can fire
+      // several times per frame. Coalesce the capture to one per frame and
+      // re-capture once after settle, exactly as before.
       const capturedSessionId = activeSessionId;
+      if (scrollCaptureRafRef.current == null) {
+        scrollCaptureRafRef.current = requestAnimationFrame(() => {
+          scrollCaptureRafRef.current = null;
+          if (suppressSessionScrollSaveRef.current) return;
+          if (activeSessionIdRef.current !== capturedSessionId) return;
+          const capture = captureSessionScrollStateRef.current;
+          const capturedList = messageListRef.current;
+          if (!capture || !capturedList) return;
+          sessionScrollStatesRef.current.set(capturedSessionId, capture(capturedList));
+        });
+      }
+      if (scrollCaptureTimerRef.current) clearTimeout(scrollCaptureTimerRef.current);
       scrollCaptureTimerRef.current = setTimeout(() => {
         scrollCaptureTimerRef.current = null;
         if (suppressSessionScrollSaveRef.current) return;
@@ -1561,9 +1638,15 @@ const MessagePanel = forwardRef(({
       const source = file.source || CONTEXT_SOURCE_BROWSER;
       if (source === CONTEXT_SOURCE_BROWSER && !agentId) throw new Error('Select an agent first');
       if (source === CONTEXT_SOURCE_SANDBOX && !(file.sandboxUrl || activeSandboxUrl)) throw new Error('Select a sandbox first');
-      const content = source === CONTEXT_SOURCE_SANDBOX
+      const rawContent = source === CONTEXT_SOURCE_SANDBOX
         ? await readFileText(file.relativePath, file.sandboxUrl || activeSandboxUrl)
         : await readAgentWorkspaceFile(agentId, file.relativePath);
+      // Large attachments permanently inflate the session record, OPFS file,
+      // and every sync's encode/merge cost; store a bounded copy instead.
+      const contentBytes = new TextEncoder().encode(rawContent).byteLength;
+      const content = contentBytes > CONTEXT_FILE_ATTACH_MAX_BYTES
+        ? `${rawContent.slice(0, CONTEXT_FILE_ATTACH_MAX_BYTES)}\n\n[attachment truncated at ${CONTEXT_FILE_ATTACH_MAX_BYTES} bytes; original size ${contentBytes} bytes]`
+        : rawContent;
       setPendingContextFiles((prev) => {
         const key = contextFileKey(file);
         if (prev.some((item) => contextFileKey(item) === key)) return prev;
@@ -1856,6 +1939,7 @@ const MessagePanel = forwardRef(({
           )}
           {visibleMessages.map((msg, index) => {
             const previousMessage = visibleMessages[index - 1];
+            const isLiveStreamingMessage = streaming && msg === messages[messages.length - 1];
             const isLatestAssistant = msg.role === 'assistant' && msg === messages[messages.length - 1];
             const showImageGenerationStatus = isLatestAssistant
               && streaming
@@ -1868,9 +1952,11 @@ const MessagePanel = forwardRef(({
             const hasTranscript = msg.role === 'assistant' && hasRenderableTranscript(
               msg.transcript,
               msg.toolCalls,
-              streaming && msg === messages[messages.length - 1]
+              isLiveStreamingMessage
             );
-            const displayContent = stripLegacyContextFileSummary(msg.content, msg.contextFiles);
+            const displayContent = isLiveStreamingMessage || msg.contextFiles?.length
+              ? stripLegacyContextFileSummary(msg.content, msg.contextFiles)
+              : cachedStripLegacyContent(msg.content);
 
             return (
             <div key={msg.id} data-message-id={msg.id} className={`message ${msg.role}`}>
@@ -1888,7 +1974,7 @@ const MessagePanel = forwardRef(({
                 {msg.role === 'assistant' && !hasTranscript && !showImageGenerationStatus && (msg.thinking || (streaming && msg.content === '')) && (
                   <ThinkingBlock
                     thinking={msg.thinking}
-                    isThinking={streaming && msg === messages[messages.length - 1]}
+                    isThinking={isLiveStreamingMessage}
                     startedAt={msg.runStartedAt}
                     finishedAt={msg.runFinishedAt}
                   />
@@ -1914,7 +2000,7 @@ const MessagePanel = forwardRef(({
                   <AssistantTranscript
                     transcript={msg.transcript}
                     toolCalls={msg.toolCalls}
-                    streaming={streaming && msg === messages[messages.length - 1]}
+                    streaming={isLiveStreamingMessage}
                     onStopStreaming={onStopStreaming}
                     agentId={agentId}
                     sandboxUrl={selectedAgentUrl}
@@ -1958,13 +2044,9 @@ const MessagePanel = forwardRef(({
                     </div>
                   ) : (
                     !hasTranscript && <>
-                      <ReactMarkdown
-                        remarkPlugins={MARKDOWN_REMARK_PLUGINS}
-                        rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
-                        components={MARKDOWN_COMPONENTS}
-                      >
-                        {displayContent}
-                      </ReactMarkdown>
+                      {isLiveStreamingMessage
+                        ? renderMarkdownElement(displayContent)
+                        : cachedMarkdown(displayContent)}
                       {msg.role === 'assistant' && displayContent.startsWith('Error:') && !streaming && onRetry && (
                         <button className="retry-btn" onClick={() => onRetry()} title={t('message.retry')}>Retry</button>
                       )}

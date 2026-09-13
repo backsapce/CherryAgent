@@ -10,12 +10,6 @@ function abortError() {
   return error;
 }
 
-function boundedText(chunk, remainingBytes) {
-  if (remainingBytes <= 0) return '';
-  const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
-  return buffer.subarray(0, remainingBytes).toString();
-}
-
 function resultCode(reason, code) {
   if (reason === 'timeout') return 124;
   if (reason === 'aborted') return 130;
@@ -84,6 +78,10 @@ export function createCommandExecutor({
     let forceTimer = null;
     let settleTimer = null;
     let resolveResult;
+    // Stream-aware decoding keeps multi-byte UTF-8 characters intact when a
+    // chunk boundary lands in the middle of a sequence.
+    const stdoutDecoder = new TextDecoder();
+    const stderrDecoder = new TextDecoder();
 
     const child = spawnImpl(command, {
       cwd,
@@ -108,6 +106,18 @@ export function createCommandExecutor({
       if (terminationReason) {
         child.stdout?.destroy();
         child.stderr?.destroy();
+      } else {
+        // Flush any multi-byte character split across the final chunks.
+        const flushedStdout = stdoutDecoder.decode();
+        const flushedStderr = stderrDecoder.decode();
+        if (flushedStdout) {
+          stdout += flushedStdout;
+          if (captureOutput) options.onStdout?.(flushedStdout);
+        }
+        if (flushedStderr) {
+          stderr += flushedStderr;
+          if (captureOutput) options.onStderr?.(flushedStderr);
+        }
       }
       const status = terminationReason === 'timeout'
         ? 'timed_out'
@@ -150,12 +160,15 @@ export function createCommandExecutor({
 
     const handleChunk = (streamName, chunk) => {
       if (settled || terminationReason) return;
-      const chunkBytes = Buffer.byteLength(chunk);
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+      const chunkBytes = buffer.length;
       const remainingBytes = outputLimit - outputBytes;
-      const accepted = boundedText(chunk, remainingBytes);
-      const acceptedBytes = Buffer.byteLength(accepted);
+      const acceptedBuffer = remainingBytes <= 0 ? Buffer.alloc(0) : buffer.subarray(0, remainingBytes);
+      const acceptedBytes = acceptedBuffer.length;
       outputBytes += acceptedBytes;
 
+      const decoder = streamName === 'stdout' ? stdoutDecoder : stderrDecoder;
+      const accepted = acceptedBytes > 0 ? decoder.decode(acceptedBuffer, { stream: true }) : '';
       if (streamName === 'stdout') {
         if (captureOutput) stdout += accepted;
         if (accepted) options.onStdout?.(accepted);

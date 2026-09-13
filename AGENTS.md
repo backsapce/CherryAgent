@@ -1,19 +1,23 @@
 # AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to AI coding agents (ZCode, Claude Code, etc.) when working with code in this repository.
 
 ## Project Overview
 
-CherryAgent is a browser-based AI agent framework. It's a React SPA that connects to LLM providers (OpenAI, Anthropic, Gemini, OpenRouter, Qwen, custom OpenAI-compatible) for sessions, with an autonomous agent loop for tool execution. All browser data is persisted in OPFS (Origin Private File System). Optionally supports E2B cloud sandboxes for remote execution.
+CherryAgent is a browser-based AI agent framework. It's a React SPA that connects to LLM providers (OpenAI, Anthropic, Gemini, OpenRouter, Qwen, DeepSeek, any OpenAI-compatible endpoint) via the Vercel AI SDK, with an autonomous agent loop for tool execution. All browser data is persisted in OPFS (Origin Private File System). An optional Node.js agent server (`cherry-sandbox`) executes shell commands and durable sandbox runs locally; E2B cloud sandboxes are supported for remote execution.
 
 ## Commands
 
-- **Dev (both frontend):** `npm run dev` — runs Vite (port 5173) with agent server proxy (port 3099)
+- **Dev (frontend + agent server):** `npm run dev` — runs Vite (https://localhost:5173) and the agent server (loopback :3099) with a Vite proxy for `/agent`
 - **Dev frontend only:** `npm run dev:front`
 - **Dev agent server only:** `npm run dev:agent`
 - **Build:** `npm run build` — Vite production build + service worker precache injection
 - **Build for GitHub Pages:** `npm run build:pages` — sets `VITE_BASE=/CherryAgent/` base path
 - **Lint:** `npm run lint`
+- **All tests:** `npm test` (= `test:agent` + `test:runtime` + `test:sync`)
+- **Agent-loop tests:** `npm run test:agent`
+- **Agent-server tests:** `npm run test:runtime`
+- **Sync/persistence/UI tests:** `npm run test:sync`
 - **Preview production build:** `npm run preview` — serves dist/ on port 5173 (same port as dev to preserve OPFS data)
 - **Docker build:** `npm run build:docker` — multi-platform build + push
 
@@ -22,73 +26,70 @@ CherryAgent is a browser-based AI agent framework. It's a React SPA that connect
 ### Core layers
 
 1. **React UI** (`src/components/`) — SessionList, MessagePanel, Settings, FileManage (editor + file browser), Icons
-2. **Agent loop** (`src/agent/`) — autonomous multi-turn tool execution engine with context management, memory, and skills
-3. **LLM layer** (`src/models/`) — unified provider interface with streaming, native tool calling, 6 provider backends
+2. **Agent loop** (`src/agent/`) — autonomous multi-turn tool execution over Vercel AI SDK `streamText`, with context packing, summary compaction, memory, skills, and a UI-safe event protocol
+3. **LLM layer** (`src/models/`) — provider-neutral AI SDK model factory (`ai.js`), profile/connection settings (`llm.js`, `llmSettingsSchema.js`), agent-server client (`agent.js`), E2B integration (`e2b.js`)
 4. **Persistence** (`src/vfs/opfs.js`) — OPFS-backed virtual file system for sessions, files, memory, and skills
-5. **Agent server** (`server/agent.js`) — optional Node.js HTTP server for local shell command execution
-6. **E2B integration** (`src/models/e2b.js`) — cloud sandbox execution via E2B SDK
+5. **Agent server** (`server/`) — optional Node.js server for local shell execution, managed background jobs, and durable sandbox runs
+6. **Sync** (`src/sync/`) — S3/OSS-backed multi-device sync with ETag CAS, sharded causal manifests, and Yjs three-way merges
 
 ### Agent loop (`src/agent/`)
 
-The agent system replaces the old `<execute>` XML tag parsing with native LLM tool calling:
+The loop is built on the Vercel AI SDK: `streamText` owns the model → tool → model cycle and `runAgentLoop()` (loop.js) adapts it with CherryAgent's tools, context packing, bounded-loop policy, and a versioned event stream (events.js) that the browser UI and durable sandbox runs both consume.
 
-- **`loop.js`** — `runAgentLoop()` drives the multi-turn conversation: build context -> stream LLM with tool schemas -> execute tool calls -> feed results back -> repeat up to 10 rounds. Uses `tokenlens` for context window estimation with per-model overrides for Qwen variants. Accumulates usage stats across rounds.
-- **`context.js`** — `buildContext()` and `assembleApiMessages()` manage conversation context via sliding window (head protection + tail retention) with optional LLM-generated summaries of dropped messages. Compresses when usage exceeds 50% of the model's context window.
-- **`tools.js`** — Tool registry singleton with OpenAI function-calling schema format. Built-in tools: `execute_command`, `read_file`, `write_file`, `list_files`, `list_local_files`, `read_local_file`, `write_memory`, `read_memory`, `clear_memory`, `skills_list`, `skill_view`, `skill_manage`. Tools declare availability via `checkAvailable()` (e.g., file tools require `agentUrl`).
-- **`memory.js`** — Two bounded, file-backed stores in OPFS: `MEMORY.md` (agent notes, 2200 char limit) and `USER.md` (user profile, 1375 char limit). Entries delimited by `§`, oldest trimmed when over limit. Loaded once per session as a frozen snapshot, injected into system prompt.
-- **`skills.js`** — File-based skills in OPFS `skills/` directory with progressive disclosure. Each skill has a `SKILL.md` with YAML frontmatter (name, description, version) and optional `references/` subdirectory. Tier 1: name+description in system prompt. Tier 2: full SKILL.md content on demand. Tier 3: reference files. Ships with `skill-creator` default skill. Skills can be enabled/disabled via config.
+- **`loop.js`** — `runAgentLoop()` streams with tool schemas, serializes tool executions, retries empty model responses once, injects continuation guards when the model promises future tool work without calling tools, and appends a tool-free finalizer turn when the step budget ends. Rounds: default 40, hard cap 80. Accepts and returns `summaryState` for cross-turn summary persistence. `prepareStep` compacts the AI SDK loop history (head + tail, 72% of the context window) via `compactAiMessages`.
+- **`context.js`** — `assembleApiMessages()` packs conversation with head protection, an LLM-generated summary of the dropped middle, and the freshest tail. The summary is anchored to the message id it covers (`anchorId`); `summaryStateMatchesHistory()` invalidates it when history is edited or truncated. Token estimation (`tokenEstimate.js`) is CJK-aware (~1 token per CJK char, ~1 per 4 Latin chars).
+- **`tools.js`** — Tool registry singleton (OpenAI function-calling schema). Built-ins: `execute_command`, `start_command`, `get_command`, `wait_command`, `stop_command` (managed background jobs), `list/read/write_browser_file`, `display_browser_image`, `list/read/write_sandbox_file`, `display_sandbox_image`, `memory`, `skill`, `schedule_wakeup`, `spawn_agent` (depth-1 sub-agents). Tools declare availability via `checkAvailable()`; results are capped and middle-truncated for the model (`toolObservation.js`).
+- **`dangerousCommand.js`** — detects destructive/privileged shell commands (rm with force/recursive flags, sudo, disk writes, shutdown, fork bombs, curl|sh, force push). In interactive runtimes these trigger a permission request the user must approve (App.jsx renders the approval card); unattended sandbox runs proceed but record the decision. Catastrophic patterns are additionally blocklisted server-side.
+- **`loopSafety.js`** — doom-loop guard: N consecutive identical tool calls trigger the same permission flow.
+- **`memory.js`** — two bounded, structured Markdown stores in OPFS per agent: `MEMORY.md` (project facts, 8k chars) and `USER.md` (user profile, 4k chars). v2 record format with ids/tags/importance; mutation-queued to prevent lost updates. Loaded once per run as a frozen prompt snapshot.
+- **`skills.js`** — progressive-disclosure skills (OPFS global → workspace → agent/sandbox precedence). Tier 1: catalog in system prompt. Tier 2: SKILL.md via `skill` tool. Tier 3: reference files. Ships with `skill-creator`.
+- **`events.js`** — pure reducer translating stream events into an immutable run snapshot (content/thinking maintained incrementally per delta; transcript segments, tool states, permissions, compactions). Replayed identically by the browser UI and durable sandbox runs.
+- **`wakeup.js`** — schedule future continuations (5s–7d) instead of blocking or polling.
 
 ### LLM layer (`src/models/`)
 
-- **`llm.js`** — Unified LLM singleton. `streamSession()` returns an async generator of `{ content, reasoning, toolCalls, usage }` chunks. Supports native tool calling via `tools` option. `completeSession()` convenience method for non-streaming. Settings persisted to OPFS via `settings.js`.
-- **`settings.js`** — Thin adapter over `config.js` for LLM settings (`llm` key in config.yaml).
-- **Providers** (`src/models/providers/`):
-  - `openai.js` — OpenAI API, native tool calling
-  - `anthropic.js` — Anthropic API with thinking blocks, tool use
-  - `gemini.js` — Google Gemini API, native tool calling
-  - `openrouter.js` — OpenRouter proxy API
-  - `qwen.js` — Alibaba Qwen/DashScope API
-  - `custom-openai.js` — Any OpenAI-compatible endpoint
-  - `shared.js` — Common utilities shared across providers
-- **`e2b.js`** — E2B cloud sandbox integration. Persistent sandbox (tagged via localStorage ID), command execution, file CRUD, upload/download. Sandbox is created/reused based on metadata filter `cherrysandbox`.
+- **`ai.js`** — AI SDK model factory for all providers (Anthropic gets the direct-browser-access header; OpenRouter gets referer headers). `toModelMessages()` converts persisted history; assistant tool history crosses turns as XML blocks embedded in assistant content (App.jsx `expandMessagesForLlm`), not native tool-role messages.
+- **`llm.js`** — profile/connection settings: provider connections own credentials, LLM records select a model. API keys never leave `getRuntimeConfig()`/`getLanguageModel()` except over the authenticated sandbox-run channel. Context windows resolved from models.dev with a static fallback (`contextWindow.js` + tokenlens).
+- **`agent.js`** — agent-server client: temp-token connect flow (tokens persisted per-URL in config), command execution over WebSocket with HTTP fallback, managed background commands, file CRUD, durable run APIs. Enforces https for non-loopback agent URLs (`assertSecureAgentUrl`).
+
+### Agent server (`server/`)
+
+- **`agent.js`** — HTTP + WS server. Binds 127.0.0.1 on bare hosts and 0.0.0.0 when a container runtime is detected (`AGENT_HOST` overrides either). Token auth (token file mode 0600, temp token printed to console, rotates on use or every 10 min). Mutating requests enforce an Origin allowlist (CSRF guard when auth is disabled). Request bodies and WS frames are size-bounded. A small blocklist rejects catastrophic commands (fork bombs, `rm -rf /`, `curl | sh`).
+- **`command-executor.js`** — spawns commands in their own process group with tree-kill on timeout/abort/output-limit, streaming UTF-8 decoding, and a settle watchdog.
+- **`command-jobs.js`** — durable background jobs with incremental byte-cursor logs (UTF-8-boundary-safe reads), capped active jobs, and retention-based cleanup.
+- **`agent-runtime.js`** — durable sandbox runs: the server runs the agent loop itself (model calls included) with an idle watchdog, wake-up continuations that survive restarts, immutable forced cancellation, and retention-based pruning of terminal runs. Run/job state files are mode 0600 because waiting runs carry the caller's model credentials.
+- **`file-path-policy.js`** — path safety: lexical + realpath + symlink-never-followed checks for the files root and protected control-plane paths.
 
 ### OPFS VFS (`src/vfs/opfs.js`)
 
-Root directory: `cherry-agent/`. Key subdirectories:
-- `session.json` + `sessions/<id>.json` — session metadata and per-session message files
-- `memory/` — `MEMORY.md` and `USER.md` for agent memory
-- `skills/` — skill directories with `SKILL.md` and optional `references/`
-- `files/` — user-managed files
-
-Operations: session CRUD, file manager (list/create/read/write/delete, nested dirs), zip export/import, memory read/write/delete, skill CRUD with reference file support.
+Root directory: `cherry-agent/`. Key subdirectories: `config.yaml`, `session.json` + `sessions/<id>.json`, `workspace/<agent-id>/{AGENTS.md, memory/, skills/, files/}`, `skills/` (global). Session persistence is atomic (temp-swap writes, index published last) with a generation-fenced save coordinator and crash-recovery journal. Zip export/import supported.
 
 ### Config (`src/config/config.js`)
 
-YAML-based config persisted in OPFS. Dot-path access (`config.get('llm.provider')`), subscribe/notify pattern, singleton. All modules read config through this.
+YAML-based config persisted in OPFS. Dot-path access, subscribe/notify, serialized operation queue, prototype-pollution-safe path writes. All modules read config through this.
 
-### i18n
+### Sync (`src/sync/`)
 
-`src/i18n/` — React context-based. `t()` function with dot-path keys and `{param}` interpolation. Locale files in `src/i18n/locales/` (en, zh-CN, ja). Supports `auto` (browser language detection).
+S3/OSS-backed sync with ETag CAS, sharded manifests with vector clocks, Web Locks coordination, Yjs three-way merges, conflict backups under `files/Sync Conflicts/`, and a scrub journal. Sync credentials stay device-local; LLM API keys and agent tokens are redacted from synced payloads unless `sync.includeSecrets` is enabled — restored locally after every merge with destination checks so a redirected provider never inherits a local key.
 
-### PWA
+### i18n / PWA
 
-Service worker in `public/sw.js` with precache manifest injected at build time by `swPrecachePlugin` in `vite.config.js`.
+React context i18n with dot-path keys and `{param}` interpolation (en, zh-CN, ja). Service worker precaches the app shell at build time.
 
 ## Data flow
 
-1. User sends message -> messages accumulated in session state
-2. `runAgentLoop()` called -> loads memory snapshot + skills list -> assembles API messages with context window check
-3. LLM streams with tool schemas -> tool calls extracted from streaming fragments
-4. Tools dispatched via registry -> results fed back as `tool` role messages
-5. Loop continues up to `DEFAULT_MAX_ROUNDS=10` rounds
-6. Context compression triggers at 50% window: head (4 messages) + tail (20 messages) + LLM summary of dropped turns
+1. User sends message → messages accumulate in session state (persisted via the save coordinator)
+2. `runAgentLoop()` loads memory snapshot + skills catalog, packs context with the persisted `summaryState` (validated by anchor), streams with tool schemas
+3. Tool calls dispatch through the registry (dangerous commands pause for user approval in the browser); results are capped, middle-truncated, and fed back
+4. Loop continues up to the round budget; the final result carries the updated `summaryState`, persisted on the assistant reply for the next turn
+5. Sandbox-runtime sessions instead POST a durable run to the agent server and poll/replay its event log; wake-ups continue the run across disconnects and server restarts
 
 ## Important conventions
 
-- ESLint rule: `no-unused-vars` ignores variables matching `^[A-Z_]` (use uppercase prefix for intentionally unused vars)
-- Provider modules must export `{ id, name, stream, listModels, fallbackModels, defaultModel }`
-- All browser persistence goes through OPFS, not localStorage or IndexedDB directly (except E2B sandbox ID in localStorage)
-- Vite dev server port (5173) matches preview port so OPFS data survives dev/preview switches
-- Streaming accumulates content in refs, flushed to React state via `requestAnimationFrame` for frame-synced rendering
-- Tool schemas are filtered by `checkAvailable()` before sending to LLM — tools requiring `agentUrl` are hidden when no agent server is connected
-- Memory is a frozen snapshot loaded once at agent loop start — mid-session writes update disk but don't change the active system prompt
+- ESLint `no-unused-vars` ignores `^[A-Z_]`-prefixed variables (use uppercase prefix for intentionally unused destructured fields)
+- All browser persistence goes through OPFS (except the E2B sandbox id in localStorage)
+- Vite dev port (5173) matches preview port so OPFS data survives dev/preview switches
+- Streaming state is flushed to React via requestAnimationFrame; MessagePanel caches rendered markdown by content (bypassed for the live streaming message)
+- Tool schemas are filtered by `checkAvailable()` before sending to the LLM
+- Memory is a frozen snapshot loaded once per run; mid-session writes update disk but not the active prompt
+- Security invariants worth preserving: agent server stays loopback by default; secrets never sync by default; permission approval gates destructive commands; file-path policy rejects symlinks below the files root

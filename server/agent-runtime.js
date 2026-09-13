@@ -8,6 +8,13 @@ import { buildWakeupMessage, createOrReplaceTurnWakeup, wakeupDelayToSeconds } f
 
 const MAX_MESSAGES = 2_000;
 const MAX_EVENT_BYTES = 20 * 1024 * 1024;
+// Terminal runs are kept for replay/debugging, but not forever: without a
+// retention bound the runs map, the in-memory event logs, and the runs
+// directory all grow without limit on a long-lived server.
+const DEFAULT_RUN_RETENTION_MS = 7 * 24 * 60 * 60_000;
+const DEFAULT_RUN_PRUNE_INTERVAL_MS = 60 * 60_000;
+const MAX_RETAINED_TERMINAL_RUNS = 50;
+const TERMINAL_RUN_STATUSES = new Set(['completed', 'error', 'aborted', 'interrupted']);
 const MAX_RUNTIME_FILES = 500;
 const MAX_RUNTIME_FILE_BYTES = 256 * 1024;
 const MAX_RUNTIME_FILES_BYTES = 10 * 1024 * 1024;
@@ -210,11 +217,37 @@ export function createAgentRunManager({
   abortWaitMs = RUN_ABORT_WAIT_MS,
   idleTimeoutMs = 0,
   maxEventBytes = MAX_EVENT_BYTES,
+  runRetentionMs = DEFAULT_RUN_RETENTION_MS,
+  runPruneIntervalMs = DEFAULT_RUN_PRUNE_INTERVAL_MS,
+  maxRetainedTerminalRuns = MAX_RETAINED_TERMINAL_RUNS,
 }) {
-  mkdirSync(runsDir, { recursive: true });
+  mkdirSync(runsDir, { recursive: true, mode: 0o700 });
   const runs = new Map();
   const cancelledRunIds = new Map();
-  loadPersistedRuns(runsDir, runs);
+  loadPersistedRuns(runsDir, runs, { retentionMs: runRetentionMs });
+
+  // Drop terminal runs that aged out or exceed the retained count. Run files
+  // can contain the caller's model credentials, so disk cleanup matters as
+  // much as the in-memory bound.
+  const pruneExpiredRuns = () => {
+    const cutoff = Date.now() - Math.max(1, runRetentionMs);
+    const terminal = [...runs.values()]
+      .filter((run) => TERMINAL_RUN_STATUSES.has(run.status))
+      .sort((a, b) => String(a.updatedAt || '').localeCompare(String(b.updatedAt || '')));
+    // Oldest first; everything past the newest maxRetainedTerminalRuns is dropped.
+    const overflow = terminal.slice(0, Math.max(0, terminal.length - maxRetainedTerminalRuns));
+    const expired = terminal.filter((run) => Date.parse(run.updatedAt || '') < cutoff);
+    for (const run of [...overflow, ...expired]) {
+      runs.delete(run.id);
+      removeRunFiles(runsDir, run.id);
+    }
+  };
+
+  const pruneTimer = typeof runPruneIntervalMs === 'number' && runPruneIntervalMs > 0
+    ? setInterval(pruneExpiredRuns, runPruneIntervalMs)
+    : null;
+  pruneTimer?.unref?.();
+  pruneExpiredRuns();
 
   const pruneCancelledRunIds = () => {
     const now = Date.now();
@@ -232,7 +265,8 @@ export function createAgentRunManager({
     const target = join(runsDir, `${run.id}.json`);
     const temporary = `${target}.tmp`;
     try {
-      writeFileSync(temporary, JSON.stringify(stored, null, 2), 'utf8');
+      // 0600: run records can carry model credentials while a run is waiting.
+      writeFileSync(temporary, JSON.stringify(stored, null, 2), { encoding: 'utf8', mode: 0o600 });
       renameSync(temporary, target);
     } catch (error) {
       try {
@@ -262,7 +296,7 @@ export function createAgentRunManager({
     run.sequence += 1;
     run.events.push(stored);
     run.updatedAt = new Date().toISOString();
-    appendFileSync(eventPath, line, 'utf8');
+    appendFileSync(eventPath, line, { encoding: 'utf8', mode: 0o600 });
     run.eventBytes += lineBytes;
   };
 
@@ -1375,21 +1409,31 @@ function canResumeWaitingRun(saved) {
   );
 }
 
-function loadPersistedRuns(runsDir, runs) {
+function loadPersistedRuns(runsDir, runs, { retentionMs = DEFAULT_RUN_RETENTION_MS } = {}) {
+  const cutoff = Date.now() - Math.max(1, retentionMs);
   for (const name of readdirSync(runsDir).filter((entry) => entry.endsWith('.json'))) {
     try {
       const saved = JSON.parse(readFileSync(join(runsDir, name), 'utf8'));
       if (!saved?.id) continue;
+      const isTerminal = ['completed', 'error', 'aborted', 'interrupted'].includes(saved.status);
+      if (isTerminal && Date.parse(saved.updatedAt || '') < cutoff) {
+        removeRunFiles(runsDir, saved.id);
+        continue;
+      }
       const eventsPath = join(runsDir, `${saved.id}.events.ndjson`);
       const events = existsSync(eventsPath)
         ? readFileSync(eventsPath, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line))
         : [];
       const resumable = canResumeWaitingRun(saved);
+      const interruptedByRestart = ['running', 'waiting'].includes(saved.status) && !resumable;
       runs.set(saved.id, {
         ...saved,
         resume: resumable ? saved.resume : null,
-        status: ['running', 'waiting'].includes(saved.status) && !resumable ? 'interrupted' : saved.status,
-        error: ['running', 'waiting'].includes(saved.status) && !resumable ? 'Agent server restarted before the run completed.' : saved.error,
+        status: interruptedByRestart ? 'interrupted' : saved.status,
+        error: interruptedByRestart ? 'Agent server restarted before the run completed.' : saved.error,
+        // Retention counts from the restart for runs that only became terminal
+        // during this load, so a restart cannot immediately erase them.
+        ...(interruptedByRestart ? { updatedAt: new Date().toISOString() } : {}),
         events,
         eventBytes: existsSync(eventsPath) ? readFileSync(eventsPath).byteLength : 0,
         controller: null,
@@ -1397,6 +1441,17 @@ function loadPersistedRuns(runsDir, runs) {
       });
     } catch {
       // Ignore a damaged individual run record; other runs remain recoverable.
+    }
+  }
+}
+
+function removeRunFiles(runsDir, runId) {
+  if (!/^[\w.-]+$/.test(String(runId || ''))) return;
+  for (const suffix of ['.json', '.json.tmp', '.events.ndjson']) {
+    try {
+      rmSync(join(runsDir, `${runId}${suffix}`), { force: true });
+    } catch {
+      // Best effort; a leftover file ages out with the next prune pass.
     }
   }
 }

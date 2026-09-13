@@ -423,3 +423,54 @@ test('a partial legacy transcript retains visible fields during incremental repl
   assert.match(state.content, /New answer\./);
   assert.equal(state.thinking, 'Saved reasoning.');
 });
+
+test('incremental content fields always equal a full transcript re-join', () => {
+  // Deterministic PRNG so a failure is reproducible.
+  let seed = 0x2f6e2b1;
+  const random = () => {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    return seed / 0x7fffffff;
+  };
+  const pick = (items) => items[Math.floor(random() * items.length)];
+
+  const transcriptText = (transcript, type) => transcript
+    .filter((segment) => segment.type === type && segment.content)
+    .map((segment) => segment.content)
+    .join('\n\n');
+
+  for (let run = 0; run < 30; run += 1) {
+    let state = createAgentEventState();
+    let segmentCounter = 0;
+    for (let step = 0; step < 220; step += 1) {
+      const kind = pick(['text-delta', 'reasoning-delta', 'text-start', 'text-end', 'tool-call', 'step-start', 'step-finish', 'run-finish']);
+      if (kind === 'text-delta' || kind === 'reasoning-delta') {
+        state = applyAgentEvent(state, {
+          type: kind,
+          text: pick(['x', '好的', ' ', 'word ', '\n\n', '結論']),
+          ...(random() < 0.25 ? { segmentId: `seg-${segmentCounter}` } : {}),
+          newSegment: random() < 0.3,
+          sequence: step,
+        });
+        if (random() < 0.1) segmentCounter += 1;
+      } else if (kind === 'text-start' || kind === 'text-end') {
+        state = applyAgentEvent(state, { type: kind, segmentId: `seg-${segmentCounter}`, sequence: step });
+      } else if (kind === 'tool-call') {
+        state = applyAgentEvent(state, { type: kind, toolCallId: `call-${step}`, toolName: 'execute_command', input: {}, sequence: step });
+      } else if (kind === 'step-start') {
+        state = applyAgentEvent(state, { type: kind, stepId: `step-${step}`, stepIndex: step, sequence: step });
+      } else if (kind === 'step-finish') {
+        state = applyAgentEvent(state, { type: kind, stepId: `step-${step}`, sequence: step });
+      }
+    }
+    assert.equal(
+      state.content,
+      transcriptText(state.transcript, 'text'),
+      `run ${run}: content diverged from transcript re-join`
+    );
+    assert.equal(
+      state.thinking,
+      transcriptText(state.transcript, 'reasoning'),
+      `run ${run}: thinking diverged from transcript re-join`
+    );
+  }
+});

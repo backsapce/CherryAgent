@@ -92,12 +92,14 @@ export async function getWorkspaceDirName(agentId) {
 
 // ─── ID generation ────────────────────────────────────────────────────────────
 
-/** Generate a random 6-char alphanumeric ID. */
+/** Generate a random 6-char alphanumeric ID from a cryptographic source. */
 export function generateAgentId() {
   const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  const bytes = new Uint8Array(6);
+  crypto.getRandomValues(bytes);
   let out = '';
-  for (let i = 0; i < 6; i++) {
-    out += chars[Math.floor(Math.random() * chars.length)];
+  for (let index = 0; index < 6; index += 1) {
+    out += chars[bytes[index] % chars.length];
   }
   return `agent-${out}`;
 }

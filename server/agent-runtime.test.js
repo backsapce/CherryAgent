@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { simulateReadableStream } from 'ai';
@@ -849,8 +849,8 @@ test('persisted runs and event logs can be recovered after reconnect', () => {
       sessionId: 'session-one',
       replyId: 'reply-one',
       status: 'completed',
-      createdAt: '2026-01-01T00:00:00.000Z',
-      updatedAt: '2026-01-01T00:00:01.000Z',
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      updatedAt: new Date().toISOString(),
       sequence: 1,
       result: { content: 'done' },
       error: null,
@@ -862,6 +862,40 @@ test('persisted runs and event logs can be recovered after reconnect', () => {
     assert.equal(manager.list('session-one')[0].result.content, 'done');
     assert.deepEqual(manager.get(run.id, 0).events.map((event) => event.text), ['done']);
     assert.deepEqual(manager.get(run.id, 1).events, []);
+  } finally {
+    rmSync(runsDir, { recursive: true, force: true });
+  }
+});
+
+test('terminal runs older than the retention window are pruned from memory and disk', () => {
+  const runsDir = mkdtempSync(join(tmpdir(), 'cherry-runs-'));
+  try {
+    const expired = {
+      id: 'run-expired',
+      sessionId: 'session-old',
+      status: 'completed',
+      createdAt: '2020-01-01T00:00:00.000Z',
+      updatedAt: '2020-01-01T00:00:00.000Z',
+      sequence: 0,
+      result: { content: 'old' },
+      error: null,
+    };
+    writeFileSync(join(runsDir, `${expired.id}.json`), JSON.stringify(expired));
+    writeFileSync(join(runsDir, `${expired.id}.events.ndjson`), `${JSON.stringify({ type: 'run-finish', remoteSequence: 1 })}\n`);
+    const fresh = {
+      ...expired,
+      id: 'run-fresh',
+      sessionId: 'session-new',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    writeFileSync(join(runsDir, `${fresh.id}.json`), JSON.stringify(fresh));
+
+    const manager = createManager(runsDir);
+    assert.equal(manager.get('run-expired'), null);
+    assert.equal(existsSync(join(runsDir, 'run-expired.json')), false);
+    assert.equal(existsSync(join(runsDir, 'run-expired.events.ndjson')), false);
+    assert.equal(manager.get('run-fresh')?.status, 'completed');
   } finally {
     rmSync(runsDir, { recursive: true, force: true });
   }
