@@ -23,6 +23,7 @@ import {
   resolveSessionScrollSwitch,
 } from './sessionScrollRestore';
 import { getScheduleWakeupRunAtMs } from './toolWakeupCountdown';
+import { formatWaitDuration, getWaitCommandStartedAtMs, getWaitCommandWaitSeconds } from './toolWaitCountdown';
 import { stripLegacyContextFileSummary } from '../../contextFiles';
 import { formatBytes, imageMimeFromPath } from '../../utils/misc.js';
 import { hasRenderableTranscript } from './transcriptVisibility';
@@ -683,6 +684,42 @@ const ScheduleWakeupToolLabel = ({ label, runAtMs }) => {
   );
 };
 
+const WaitCommandToolLabel = ({ label, waitSeconds, startedAtMs, active }) => {
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const deadlineMs = Number.isFinite(startedAtMs) ? startedAtMs + waitSeconds * 1000 : null;
+  const countdown = active && Number.isFinite(deadlineMs);
+
+  useEffect(() => {
+    if (!countdown) return undefined;
+    const remainingMs = deadlineMs - Date.now();
+    if (!Number.isFinite(remainingMs) || remainingMs <= 0) return undefined;
+
+    let timerId;
+    const tick = () => {
+      const nextNowMs = Date.now();
+      setNowMs(nextNowMs);
+      const nextRemainingMs = deadlineMs - nextNowMs;
+      if (nextRemainingMs > 0) {
+        timerId = setTimeout(tick, Math.min(1000, nextRemainingMs));
+      }
+    };
+
+    timerId = setTimeout(tick, Math.min(1000, remainingMs));
+    return () => clearTimeout(timerId);
+  }, [countdown, deadlineMs]);
+
+  return (
+    <span className="tool-label">
+      {label}
+      <span className="tool-wakeup-countdown" role="timer" aria-live="off">
+        {countdown
+          ? ` · ${formatWakeupCountdown(deadlineMs, nowMs)}`
+          : ` · ≤${formatWaitDuration(waitSeconds)}`}
+      </span>
+    </span>
+  );
+};
+
 const ToolBlock = ({ toolCall, onStopStreaming, agentId, sandboxUrl }) => {
   const { t } = useI18n();
   const isLegacyExecute = !!toolCall?.cmd;
@@ -728,6 +765,9 @@ const ToolBlock = ({ toolCall, onStopStreaming, agentId, sandboxUrl }) => {
   const imageReference = parseImageReference(toolCall);
   const label = renderTerminal ? t('message.execute') : (isImageGeneration ? t('message.imageGeneration') : name);
   const wakeupRunAtMs = getScheduleWakeupRunAtMs(toolCall);
+  const waitSeconds = getWaitCommandWaitSeconds(toolCall);
+  const waitStartedAtMs = getWaitCommandStartedAtMs(toolCall);
+  const waitActive = waitSeconds != null && ['pending', 'running'].includes(status);
   const controlInput = name === 'schedule_wakeup'
     ? (parsedArgs ? JSON.stringify(parsedArgs, null, 2) : rawArgs || '')
     : '';
@@ -740,6 +780,8 @@ const ToolBlock = ({ toolCall, onStopStreaming, agentId, sandboxUrl }) => {
         {isImageGeneration && <ImageGenerate width={16} height={16} className="tool-kind-icon" />}
         {Number.isFinite(wakeupRunAtMs) ? (
           <ScheduleWakeupToolLabel key={wakeupRunAtMs} label={label} runAtMs={wakeupRunAtMs} />
+        ) : waitSeconds != null ? (
+          <WaitCommandToolLabel label={label} waitSeconds={waitSeconds} startedAtMs={waitStartedAtMs} active={waitActive} />
         ) : (
           <span className="tool-label">{label}</span>
         )}

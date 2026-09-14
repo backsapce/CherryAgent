@@ -53,6 +53,16 @@ const COMMAND_CONTINUATION_TOOL_NAMES = new Set([
   'stop_command',
   'wait_command',
 ]);
+// A durable sandbox run races tool execution against the model-stream timeouts
+// (see DEFAULT_SANDBOX_MODEL_TIMEOUT in loop.js: 90s inter-chunk, 5min per step)
+// and the run idle watchdog. A long blocking wait is therefore served in
+// slices: progress updates between slices emit events that keep the watchdog
+// alive, while the per-call budget keeps the whole tool call inside the stream
+// timeouts. The tool result reports the remainder so the model can wait again.
+const SANDBOX_WAIT_SLICE_MS = 20_000;
+const SANDBOX_WAIT_TOOL_BUDGET_MS = 60_000;
+const WAIT_TERMINAL_STATUSES = new Set(['completed', 'failed', 'stopped', 'interrupted']);
+const MAX_WAIT_SECONDS = 7 * 24 * 60 * 60;
 
 const REMOTE_TOOL_SCHEMAS = [
   {
@@ -72,7 +82,7 @@ const REMOTE_TOOL_SCHEMAS = [
   },
   {
     name: 'wait_command',
-    description: 'Wait at most 30 seconds for new logs or completion of a background job. Use only when completion is likely soon. For minutes or hours, use schedule_wakeup instead of repeated waits.',
+    description: 'Wait for a background job to finish or produce new logs, blocking for up to wait_seconds (default 30, at most 7 days); the user sees the remaining wait time. This runtime serves long waits in bounded slices: when a wait is cut short, the result says so and you should call wait_command again (or schedule_wakeup when the turn should end now and resume later).',
     parameters: TOOL_PARAMETER_SCHEMAS.wait_command,
   },
   {
@@ -850,6 +860,52 @@ export async function materializeMessageImages(messages = [], { fileExists, writ
   return output;
 }
 
+async function waitCommandInSlices(waitCommand, input, context) {
+  const jobId = input.job_id;
+  const cursor = Number(input.cursor) || 0;
+  const requestedSeconds = Math.min(MAX_WAIT_SECONDS, Math.max(1, Math.round(Number(input.wait_seconds) || 30)));
+  const budgetMs = Math.min(requestedSeconds * 1000, SANDBOX_WAIT_TOOL_BUDGET_MS);
+  // Surfaces the effective per-call budget so the replayed UI counts down the
+  // time this call can actually block instead of the full requested wait.
+  context?.onToolUpdate?.({ waitBudgetSeconds: Math.round(budgetMs / 1000) });
+  let waitedMs = 0;
+  let result = null;
+  while (waitedMs < budgetMs) {
+    const sliceMs = Math.min(SANDBOX_WAIT_SLICE_MS, budgetMs - waitedMs);
+    result = await waitCommand(jobId, { cursor, waitMs: sliceMs, signal: context?.signal });
+    if (!result || typeof result !== 'object') return result;
+    // The underlying wait already returns early on new output; surface that
+    // immediately instead of draining further slices.
+    if (WAIT_TERMINAL_STATUSES.has(result.status) || (result.logSize || 0) > (result.logCursor || 0)) {
+      return result;
+    }
+    waitedMs += sliceMs;
+    if (waitedMs < budgetMs) {
+      // Emits a tool-status event: keeps the run idle watchdog and the
+      // replayed UI aware that the wait is still making progress.
+      context?.onToolUpdate?.({
+        waitedSeconds: Math.round(waitedMs / 1000),
+        remainingSeconds: requestedSeconds - Math.round(waitedMs / 1000),
+      });
+    }
+  }
+  const waitedSeconds = Math.round(waitedMs / 1000);
+  const remainingSeconds = requestedSeconds - waitedSeconds;
+  if (remainingSeconds > 0) {
+    return {
+      ...result,
+      wait: {
+        requested_seconds: requestedSeconds,
+        waited_seconds: waitedSeconds,
+        remaining_seconds: remainingSeconds,
+        incomplete: true,
+        note: 'This sandbox runtime serves waits in bounded slices to stay inside stream and idle timeouts. Call wait_command again with the same job_id and cursor to keep waiting, or schedule_wakeup to end the turn now and resume when the job should be done.',
+      },
+    };
+  }
+  return result;
+}
+
 export function createRuntimeToolDispatcher({
   execCommand,
   startCommand,
@@ -889,11 +945,7 @@ export function createRuntimeToolDispatcher({
     }
     if (name === 'wait_command') {
       if (!waitCommand) throw new Error('Managed background commands are unavailable.');
-      const result = await waitCommand(input.job_id, {
-        cursor: input.cursor || 0,
-        waitMs: (input.wait_seconds || 30) * 1000,
-        signal: context?.signal,
-      });
+      const result = await waitCommandInSlices(waitCommand, input, context);
       return result ? JSON.stringify(result, null, 2) : `Background command not found: ${input.job_id}`;
     }
     if (name === 'stop_command') {

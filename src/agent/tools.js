@@ -362,7 +362,7 @@ registry.register({
   parallelSafe: true,
   schema: {
     description:
-      'Wait up to 30 seconds for new logs or completion of a managed background command. Use only when completion is likely within that brief wait. For training or other work expected to need minutes or hours, call schedule_wakeup instead of repeatedly calling wait_command.',
+      'Wait for a managed background command to finish or produce new logs, blocking for up to wait_seconds (default 30, at most 7 days). Returns early on completion or new output, so issue one wait sized to the expected remaining time instead of a tight loop of short waits; the user sees the remaining wait time while it runs. This is the right tool when the job should simply be waited out and its result reported immediately. Use schedule_wakeup only to end the turn now and resume later (freeing the session for other work or surviving restarts).',
     parameters: TOOL_PARAMETER_SCHEMAS.wait_command,
   },
   checkAvailable: managedCommandAvailable,

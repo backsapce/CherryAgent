@@ -22,6 +22,9 @@ const AGENT_RUN_POST_MAX_TIMEOUT_MS = 150_000;
 const AGENT_RUN_POST_GRACE_BYTES = 1024 * 1024;
 const AGENT_RUN_POST_BYTES_PER_SECOND = 1024 * 1024;
 const FILE_REQUEST_TIMEOUT_MS = 15_000;
+// Upper bound for a single wait_command long-poll; matches the 7-day maximum
+// of schedule_wakeup so any wait the model may declare can be served in one call.
+const MAX_COMMAND_WAIT_MS = 7 * 24 * 60 * 60_000;
 
 const LOOPBACK_HOSTNAMES = new Set(['localhost', '127.0.0.1', '::1']);
 
@@ -552,9 +555,9 @@ export function getCommand(jobId, url, cursor = 0, signal) {
   });
 }
 
-/** Long-poll briefly for command output or a terminal state. */
+/** Long-poll for command output or a terminal state. */
 export function waitCommand(jobId, url, { cursor = 0, waitMs = 30_000, signal } = {}) {
-  const query = `?cursor=${Math.max(0, Number(cursor) || 0)}&wait_ms=${Math.min(30_000, Math.max(0, Number(waitMs) || 0))}`;
+  const query = `?cursor=${Math.max(0, Number(cursor) || 0)}&wait_ms=${Math.min(MAX_COMMAND_WAIT_MS, Math.max(0, Number(waitMs) || 0))}`;
   return requestManagedCommand(url, `/${encodeURIComponent(jobId)}${query}`, {
     method: 'GET',
     ...(signal ? { signal } : {}),

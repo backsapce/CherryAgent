@@ -140,6 +140,7 @@ export function applyAgentEvent(state, event) {
         ...(event.shell !== undefined ? { shell: event.shell } : {}),
         ...(event.cwd !== undefined ? { cwd: event.cwd } : {}),
         ...(event.filesRoot !== undefined ? { filesRoot: event.filesRoot } : {}),
+        ...(event.waitBudgetSeconds !== undefined ? { waitBudgetSeconds: event.waitBudgetSeconds } : {}),
         ...(event.summary !== undefined ? { summary: event.summary } : {}),
       });
     case 'tool-result':
@@ -312,6 +313,11 @@ function withTool(state, event, patch) {
     status: 'pending',
   };
   const next = { ...(existingIndex >= 0 ? state.toolCalls[existingIndex] : base), ...patch };
+  // First move out of pending marks when execution actually began; used by the
+  // UI to count down long wait_command calls from their real start time.
+  if (event.at && !next.startedAt && next.status && next.status !== 'pending') {
+    next.startedAt = event.at;
+  }
   const toolCalls = [...state.toolCalls];
   if (existingIndex >= 0) toolCalls[existingIndex] = next;
   else toolCalls.push(next);

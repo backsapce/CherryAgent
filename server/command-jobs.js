@@ -20,6 +20,9 @@ const DEFAULT_MAX_READ_BYTES = 64 * 1024;
 const DEFAULT_MAX_ACTIVE_JOBS = 16;
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'stopped', 'interrupted']);
 const DEFAULT_JOB_RETENTION_MS = 7 * 24 * 60 * 60_000;
+// Longest single wait a caller may request (7 days, matching schedule_wakeup
+// and comfortably inside Node's ~24.8-day setTimeout range).
+const MAX_WAIT_MS = 7 * 24 * 60 * 60_000;
 const DEFAULT_JOB_PRUNE_INTERVAL_MS = 60 * 60_000;
 const MAX_RETAINED_TERMINAL_JOBS = 200;
 
@@ -305,7 +308,7 @@ export function createCommandJobManager({
       if (!waiters.has(id)) waiters.set(id, new Set());
       waiters.get(id).add(finish);
       signal?.addEventListener('abort', abort, { once: true });
-      timer = setTimeout(finish, clampInteger(waitMs, 1, 30_000));
+      timer = setTimeout(finish, clampInteger(waitMs, 1, MAX_WAIT_MS));
 
       const latest = get(id, cursor);
       if (!latest || TERMINAL_STATUSES.has(latest.status) || latest.logSize > latest.logCursor) finish();

@@ -46,7 +46,12 @@ export const TOOL_PARAMETER_SCHEMAS = {
     properties: {
       job_id: { type: 'string', description: 'The job_id returned by start_command.' },
       cursor: { type: 'integer', minimum: 0, description: 'Use nextCursor from the previous result. Defaults to 0.' },
-      wait_seconds: { type: 'integer', minimum: 1, maximum: 30, description: 'Maximum wait, from 1 through 30 seconds. Defaults to 30.' },
+      wait_seconds: {
+        type: 'integer',
+        minimum: 1,
+        maximum: 604800,
+        description: 'Maximum seconds to block waiting for output or completion, from 1 second up to 7 days. Always decide this explicitly (default 30). Size it to cover the expected remaining time of the job rather than re-waiting in a short loop; the user sees this duration while the wait runs.',
+      },
     },
     required: ['job_id'],
     additionalProperties: false,

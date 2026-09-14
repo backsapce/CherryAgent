@@ -248,6 +248,81 @@ test('sandbox background command dispatch preserves job ids, cursors, waits, and
   assert.deepEqual(calls[3], ['stop', 'job-one']);
 });
 
+test('sandbox wait_command slices long waits and reports the remainder', async () => {
+  const calls = [];
+  const updates = [];
+  const dispatch = createRuntimeToolDispatcher({
+    execCommand: async () => ({ stdout: '', stderr: '', code: 0 }),
+    waitCommand: async (id, options) => {
+      calls.push(['wait', id, options.cursor, options.waitMs]);
+      return {
+        job_id: id,
+        status: 'running',
+        log: '',
+        logCursor: options.cursor,
+        nextCursor: options.cursor,
+        logSize: options.cursor,
+      };
+    },
+    listFiles: async () => [],
+    readFile: async () => '',
+    writeFile: async () => {},
+  });
+
+  const result = JSON.parse(await dispatch('wait_command', {
+    job_id: 'job-slow', cursor: 40, wait_seconds: 90,
+  }, { onToolUpdate: (update) => updates.push(update) }));
+
+  // 90s requested, served as 20s slices up to the 60s per-call budget.
+  assert.deepEqual(calls, [
+    ['wait', 'job-slow', 40, 20_000],
+    ['wait', 'job-slow', 40, 20_000],
+    ['wait', 'job-slow', 40, 20_000],
+  ]);
+  assert.equal(result.status, 'running');
+  assert.equal(result.wait.incomplete, true);
+  assert.equal(result.wait.requested_seconds, 90);
+  assert.equal(result.wait.waited_seconds, 60);
+  assert.equal(result.wait.remaining_seconds, 30);
+  assert.match(result.wait.note, /Call wait_command again/);
+  // Progress updates keep the idle watchdog alive and tell the UI the
+  // effective per-call budget before the first slice runs.
+  assert.deepEqual(updates, [
+    { waitBudgetSeconds: 60 },
+    { waitedSeconds: 20, remainingSeconds: 70 },
+    { waitedSeconds: 40, remainingSeconds: 50 },
+  ]);
+});
+
+test('sandbox wait_command returns early when a slice surfaces new logs', async () => {
+  const calls = [];
+  const dispatch = createRuntimeToolDispatcher({
+    execCommand: async () => ({ stdout: '', stderr: '', code: 0 }),
+    waitCommand: async (id, options) => {
+      calls.push(['wait', id, options.cursor]);
+      return {
+        job_id: id,
+        status: 'running',
+        log: 'epoch 1/10\n',
+        logCursor: options.cursor,
+        nextCursor: options.cursor + 12,
+        logSize: options.cursor + 12,
+      };
+    },
+    listFiles: async () => [],
+    readFile: async () => '',
+    writeFile: async () => {},
+  });
+
+  const result = JSON.parse(await dispatch('wait_command', {
+    job_id: 'job-logs', cursor: 0, wait_seconds: 3_600,
+  }));
+
+  assert.equal(calls.length, 1);
+  assert.equal(result.log, 'epoch 1/10\n');
+  assert.equal(result.wait, undefined);
+});
+
 test('sandbox wake-up dispatch delegates scheduling to the run manager', async () => {
   const dispatch = createRuntimeToolDispatcher({
     execCommand: async () => ({ stdout: '', stderr: '', code: 0 }),

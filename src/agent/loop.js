@@ -470,6 +470,7 @@ async function executeAgentTool({ toolCallId, toolName, input, signal, toolConte
       ...(chunk?.shell ? { shell: chunk.shell } : {}),
       ...(chunk?.cwd ? { cwd: chunk.cwd } : {}),
       ...(chunk?.filesRoot ? { filesRoot: chunk.filesRoot } : {}),
+      ...(chunk?.waitBudgetSeconds !== undefined ? { waitBudgetSeconds: chunk.waitBudgetSeconds } : {}),
     });
   };
 

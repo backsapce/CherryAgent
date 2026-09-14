@@ -78,6 +78,9 @@ function detectContainerized() {
 const HOST = process.env.AGENT_HOST
   || (detectContainerized() ? '0.0.0.0' : '127.0.0.1');
 const MAX_TIMEOUT = 30_000;
+// Ceiling for one wait_command long-poll (7 days, matching schedule_wakeup).
+// Node's setTimeout accepts up to ~24.8 days, so this stays within its range.
+const MAX_COMMAND_WAIT_MS = 7 * 24 * 60 * 60_000;
 const MAX_OUTPUT_BYTES = 10 * 1024 * 1024;
 const MAX_AGENT_RUN_REQUEST_BYTES = 128 * 1024 * 1024;
 const MAX_JSON_BODY_BYTES = envPositiveBytes('AGENT_MAX_JSON_BODY_BYTES', 10 * 1024 * 1024);
@@ -777,7 +780,7 @@ const server = createServer(async (req, res) => {
     if (!isAuthorized(req)) return json(res, 401, { error: 'Unauthorized.' }, req);
     const id = decodeURIComponent(commandRoute[1]);
     const cursor = Number(url.searchParams.get('cursor')) || 0;
-    const waitMs = Math.min(30_000, Math.max(0, Number(url.searchParams.get('wait_ms')) || 0));
+    const waitMs = Math.min(MAX_COMMAND_WAIT_MS, Math.max(0, Number(url.searchParams.get('wait_ms')) || 0));
     let result;
     if (waitMs > 0) {
       const controller = new AbortController();
