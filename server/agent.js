@@ -494,6 +494,19 @@ async function readBody(req, maxBytes = MAX_JSON_BODY_BYTES) {
   return body;
 }
 
+/**
+ * Read and parse a JSON request body. Returns undefined when the body is not
+ * valid JSON; body-size errors from readBody propagate to the outer handler.
+ */
+async function readJsonBody(req, maxBytes) {
+  const body = await readBody(req, maxBytes);
+  try {
+    return JSON.parse(body);
+  } catch {
+    return undefined;
+  }
+}
+
 async function readBodyBuffer(req, maxBytes = MAX_UPLOAD_BYTES) {
   const declaredBytes = Number(req.headers['content-length']);
   if (Number.isFinite(declaredBytes) && declaredBytes > maxBytes) {
@@ -655,9 +668,8 @@ const server = createServer(async (req, res) => {
       return json(res, 429, { error: 'Too many connect attempts. Try again later.' }, req);
     }
 
-    const body = await readBody(req, MAX_CONNECT_BODY_BYTES);
-    let parsed;
-    try { parsed = JSON.parse(body); } catch {
+    const parsed = await readJsonBody(req, MAX_CONNECT_BODY_BYTES);
+    if (parsed === undefined) {
       return json(res, 400, { error: 'Invalid JSON body' }, req);
     }
 
@@ -691,9 +703,8 @@ const server = createServer(async (req, res) => {
       return json(res, 429, { error: 'Too many commands. Slow down.' }, req);
     }
 
-    const body = await readBody(req);
-    let parsed;
-    try { parsed = JSON.parse(body); } catch {
+    const parsed = await readJsonBody(req);
+    if (parsed === undefined) {
       return json(res, 400, { error: 'Invalid JSON body' }, req);
     }
 
@@ -738,8 +749,8 @@ const server = createServer(async (req, res) => {
     if (isRateLimited(`cmd:${clientIp}`, 30, 60_000)) {
       return json(res, 429, { error: 'Too many commands. Slow down.' }, req);
     }
-    let parsed;
-    try { parsed = JSON.parse(await readBody(req)); } catch {
+    const parsed = await readJsonBody(req);
+    if (parsed === undefined) {
       return json(res, 400, { error: 'Invalid JSON body' }, req);
     }
     const command = parsed?.command;
@@ -878,9 +889,8 @@ const server = createServer(async (req, res) => {
       return json(res, 401, { error: 'Unauthorized.' }, req);
     }
 
-    const body = await readBody(req);
-    let parsed;
-    try { parsed = JSON.parse(body); } catch {
+    const parsed = await readJsonBody(req);
+    if (parsed === undefined) {
       return json(res, 400, { error: 'Invalid JSON body' }, req);
     }
 
@@ -972,9 +982,8 @@ const server = createServer(async (req, res) => {
       return json(res, 401, { error: 'Unauthorized.' }, req);
     }
 
-    const body = await readBody(req);
-    let parsed;
-    try { parsed = JSON.parse(body); } catch {
+    const parsed = await readJsonBody(req);
+    if (parsed === undefined) {
       return json(res, 400, { error: 'Invalid JSON body' }, req);
     }
 

@@ -586,11 +586,6 @@ export async function writeIncomingText(dirHandle, filename, content, localPath,
   return { merged: result.merged };
 }
 
-export async function writeIncomingTextExact(dirHandle, filename, content) {
-  await writeText(dirHandle, filename, content);
-  return { merged: false };
-}
-
 /**
  * Delete a file from a directory.
  * @param {FileSystemDirectoryHandle} dirHandle
@@ -1932,8 +1927,6 @@ export async function saveFileContent(fileName, content, dirName) {
 // ─── Memory Operations ────────────────────────────────────────────────────────
 
 const MEMORY_DIR = 'memory';
-const MEMORY_FILE = 'MEMORY.md';
-const USER_FILE = 'USER.md';
 
 /**
  * Read a memory file from OPFS.
@@ -2318,42 +2311,5 @@ export async function writeAgentFile(agentId, path, content) {
       : await getAgentFilesDir(agentId);
     const name = await resolveWorkspaceName(agentId);
     await writeText(dir, fileName, content, { localPath: `${WORKSPACE_DIR}/${name}/files/${safePath}` });
-  });
-}
-
-export async function createAgentFile(agentId, path, isDirectory = false) {
-  const safePath = normalizeWorkspaceRelativePath(path);
-  return withAgentWorkspaceMutation(agentId, 'files', async () => {
-    const parts = pathParts(safePath);
-    const name = parts.pop();
-    const dir = parts.length > 0
-      ? await getAgentDir(agentId, 'files', ...parts)
-      : await getAgentFilesDir(agentId);
-    if (isDirectory) {
-      await dir.getDirectoryHandle(name, { create: true });
-      const workspaceName = await resolveWorkspaceName(agentId);
-      notifyOpfsMutation(`${WORKSPACE_DIR}/${workspaceName}/files/${safePath}`, 'mkdir');
-    } else {
-      const workspaceName = await resolveWorkspaceName(agentId);
-      await writeText(dir, name, '', { localPath: `${WORKSPACE_DIR}/${workspaceName}/files/${safePath}` });
-    }
-  });
-}
-
-export async function deleteAgentFile(agentId, path) {
-  const safePath = normalizeWorkspaceRelativePath(path);
-  return withAgentWorkspaceMutation(agentId, 'files', async () => {
-    const parts = pathParts(safePath);
-    const name = parts.pop();
-    const dir = parts.length > 0
-      ? await getAgentDir(agentId, 'files', ...parts)
-      : await getAgentFilesDir(agentId);
-    try {
-      await dir.removeEntry(name, { recursive: true });
-      const workspaceName = await resolveWorkspaceName(agentId);
-      notifyOpfsMutation(`${WORKSPACE_DIR}/${workspaceName}/files/${safePath}`, 'delete');
-    } catch (error) {
-      if (!isMissingFileSystemEntry(error)) throw error;
-    }
   });
 }

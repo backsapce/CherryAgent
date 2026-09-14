@@ -1,5 +1,3 @@
-import { formatMultimodal, formatOpenAITools, readSSE } from './shared.js';
-
 /**
  * OpenRouter provider.
  * Uses the OpenRouter API (OpenAI-compatible) to access many models.
@@ -33,41 +31,5 @@ export default {
     return (json.data || [])
       .sort((a, b) => a.id.localeCompare(b.id))
       .map((m) => ({ id: m.id, name: m.name || m.id }));
-  },
-
-  async *stream(config, messages, opts = {}) {
-    const baseUrl = (config.baseUrl || DEFAULT_BASE_URL).replace(/\/+$/, '');
-    const body = {
-      model: config.model || this.defaultModel,
-      messages: formatMultimodal(messages),
-      stream: true,
-      stream_options: { include_usage: true },
-      ...(opts.temperature != null && { temperature: opts.temperature }),
-      ...(opts.maxTokens != null && { max_tokens: opts.maxTokens }),
-    };
-
-    // Tool calling support
-    if (opts.tools?.length) {
-      body.tools = formatOpenAITools(opts.tools);
-    }
-
-    const res = await fetch(`${baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${config.apiKey}`,
-        'HTTP-Referer': globalThis.location?.href || 'https://cherry-agent.local',
-        'X-Title': 'Cherry Agent',
-      },
-      body: JSON.stringify(body),
-      signal: opts.signal,
-    });
-
-    if (!res.ok) {
-      const err = await res.text();
-      throw new Error(`OpenRouter error ${res.status}: ${err}`);
-    }
-
-    yield* readSSE(res.body);
   },
 };

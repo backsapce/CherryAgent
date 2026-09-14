@@ -1,5 +1,3 @@
-import { formatMultimodal, formatOpenAITools, readSSE } from './shared.js';
-
 /**
  * OpenAI-compatible provider.
  * Works with OpenAI API and any OpenAI-compatible endpoint (e.g. local proxies).
@@ -35,39 +33,5 @@ export default {
       .filter((m) => m.id && (m.id.startsWith('gpt') || m.id.startsWith('o') || m.id.startsWith('chatgpt')))
       .sort((a, b) => a.id.localeCompare(b.id))
       .map((m) => ({ id: m.id, name: m.id }));
-  },
-
-  async *stream(config, messages, opts = {}) {
-    const baseUrl = (config.baseUrl || DEFAULT_BASE_URL).replace(/\/+$/, '');
-    const body = {
-      model: config.model || this.defaultModel,
-      messages: formatMultimodal(messages),
-      stream: true,
-      stream_options: { include_usage: true },
-      ...(opts.temperature != null && { temperature: opts.temperature }),
-      ...(opts.maxTokens != null && { max_tokens: opts.maxTokens }),
-    };
-
-    // Tool calling support
-    if (opts.tools?.length) {
-      body.tools = formatOpenAITools(opts.tools);
-    }
-
-    const res = await fetch(`${baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${config.apiKey}`,
-      },
-      body: JSON.stringify(body),
-      signal: opts.signal,
-    });
-
-    if (!res.ok) {
-      const err = await res.text();
-      throw new Error(`OpenAI error ${res.status}: ${err}`);
-    }
-
-    yield* readSSE(res.body);
   },
 };

@@ -26,6 +26,7 @@ import {
 } from '../../sync/providerPresets';
 import { useI18n } from '../../i18n/context';
 import { SUPPORTED_LOCALES } from '../../i18n/locales';
+import { downloadBlobFile } from '../../utils/misc.js';
 import { X, Lock, Plug, Sun, Moon, Monitor, UploadCloud, DownloadCloud, AlertTriangle, Globe, ChevronDown, User, Cloud, HardDrive, Layers, Refresh, Upload, Download } from '../Icons/Icons';
 import { listAllSkills, setSkillEnabled } from '../../agent/skills';
 import { listAllTools, setToolEnabled } from '../../agent/tools';
@@ -1577,14 +1578,7 @@ const Settings = ({
                       setDataMessage(null);
                       try {
                         const blob = await runWithStorageBarrier(() => exportToZip());
-                        const url = URL.createObjectURL(blob);
-                        const a = document.createElement('a');
-                        a.href = url;
-                        a.download = `cherry-agent-backup-${new Date().toISOString().slice(0, 10)}.zip`;
-                        document.body.appendChild(a);
-                        a.click();
-                        document.body.removeChild(a);
-                        URL.revokeObjectURL(url);
+                        downloadBlobFile(`cherry-agent-backup-${new Date().toISOString().slice(0, 10)}.zip`, blob);
                         setDataMessage({ type: 'success', text: t('dataSettings.exportSuccess') });
                       } catch (err) {
                         setDataMessage({ type: 'error', text: t('dataSettings.exportFailed', { error: err.message }) });

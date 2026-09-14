@@ -1,4 +1,5 @@
 import config from '../config/config.js';
+import { randomId } from '../utils/misc.js';
 import {
   deleteEmptyPathTree,
   deletePath,
@@ -306,10 +307,7 @@ async function namespaceDigest(identity) {
   let namespace = backendNamespaceCache.get(identity);
   if (!namespace) {
     const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(identity));
-    namespace = [...new Uint8Array(digest)]
-      .slice(0, 16)
-      .map((byte) => byte.toString(16).padStart(2, '0'))
-      .join('');
+    namespace = toHex(new Uint8Array(digest).slice(0, 16));
     backendNamespaceCache.set(identity, namespace);
   }
   return namespace;
@@ -322,9 +320,7 @@ async function structuredBaseNamespace(syncConfig) {
 async function structuredBasePath(path, syncConfig) {
   const namespace = await structuredBaseNamespace(syncConfig);
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(path)));
-  const pathHash = [...new Uint8Array(digest)]
-    .map((byte) => byte.toString(16).padStart(2, '0'))
-    .join('');
+  const pathHash = toHex(new Uint8Array(digest));
   return `${STRUCTURED_BASE_DIR}/${namespace}/${pathHash}.bin`;
 }
 
@@ -335,9 +331,7 @@ async function structuredBaseCandidatePaths(path, syncConfig) {
     ...(structuredBaseLegacyNamespaces.get(backendId) || []),
   ]);
   const pathDigest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(path)));
-  const pathHash = [...new Uint8Array(pathDigest)]
-    .map((byte) => byte.toString(16).padStart(2, '0'))
-    .join('');
+  const pathHash = toHex(new Uint8Array(pathDigest));
   return [...namespaces].flatMap((namespace) => [
     `${STRUCTURED_BASE_DIR}/${namespace}/${pathHash}.bin`,
     `${STRUCTURED_BASE_DIR}/${namespace}/${encodePath(path)}.bin`,
@@ -757,6 +751,22 @@ function entryRevision(entry = {}) {
   return values.length ? Math.max(...values) : 0;
 }
 
+/** State entry recorded after a remote deletion wins and the local path is gone. */
+function buildRemoteTombstoneState(previous, deletionEntry) {
+  return {
+    ...(previous || {}),
+    deleted: true,
+    deletedAt: deletionEntry.deletedAt || nowIso(),
+    remoteDeleted: true,
+    remoteUpdatedAt: deletionEntry.updatedAt || previous?.remoteUpdatedAt || null,
+    remoteHash: deletionEntry.hash || previous?.remoteHash || null,
+    remoteRevision: entryRevision(deletionEntry),
+    revision: entryRevision(deletionEntry),
+    revisionBy: deletionEntry.revisionBy || null,
+    remoteFingerprint: remoteEntryFingerprint(deletionEntry),
+  };
+}
+
 function nextEntryRevision(...entries) {
   const current = entries.reduce((max, entry) => Math.max(max, entryRevision(entry)), 0);
   if (current >= Number.MAX_SAFE_INTEGER) {
@@ -765,18 +775,13 @@ function nextEntryRevision(...entries) {
   return current + 1;
 }
 
-function randomId() {
-  return globalThis.crypto?.randomUUID?.()
-    || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-}
-
 function randomShardAttemptId() {
   const uuidHex = globalThis.crypto?.randomUUID?.().replaceAll('-', '').toLowerCase() || '';
   if (/^[a-f\d]{32}$/.test(uuidHex)) return uuidHex.slice(0, SHARD_ATTEMPT_ID_HEX_LENGTH);
   const bytes = new Uint8Array(SHARD_ATTEMPT_ID_HEX_LENGTH / 2);
   if (typeof globalThis.crypto?.getRandomValues === 'function') {
     globalThis.crypto.getRandomValues(bytes);
-    return [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+    return toHex(bytes);
   }
   let fallback = '';
   while (fallback.length < SHARD_ATTEMPT_ID_HEX_LENGTH) {
@@ -1334,11 +1339,13 @@ async function currentLocalEntry(path) {
   }
 }
 
+function toHex(bytes) {
+  return [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
 async function hashBytes(bytes) {
   const digest = await crypto.subtle.digest('SHA-256', bytes);
-  return [...new Uint8Array(digest)]
-    .map((byte) => byte.toString(16).padStart(2, '0'))
-    .join('');
+  return toHex(new Uint8Array(digest));
 }
 
 function truncateUtf8(value, maxBytes) {
@@ -3647,18 +3654,7 @@ async function pullInternal(syncConfig, runtime = {}) {
     await deleteStructuredBase(path, syncConfig);
     local.delete(path);
     locallyDeletedPaths.add(path);
-    state.files[path] = {
-      ...(previous || {}),
-      deleted: true,
-      deletedAt: deletion.entry.deletedAt || nowIso(),
-      remoteDeleted: true,
-      remoteUpdatedAt: deletion.entry.updatedAt || previous?.remoteUpdatedAt || null,
-      remoteHash: deletion.entry.hash || previous?.remoteHash || null,
-      remoteRevision: entryRevision(deletion.entry),
-      revision: entryRevision(deletion.entry),
-      revisionBy: deletion.entry.revisionBy || null,
-      remoteFingerprint: remoteEntryFingerprint(deletion.entry),
-    };
+    state.files[path] = buildRemoteTombstoneState(previous, deletion.entry);
     stats.deleted += 1;
   }
 
@@ -3759,18 +3755,7 @@ async function pullInternal(syncConfig, runtime = {}) {
           // created after the OPFS snapshot and must survive for the next run.
           stats.skipped += 1;
         }
-        state.files[path] = {
-          ...(previous || {}),
-          deleted: true,
-          deletedAt: remoteDeletion.entry.deletedAt || nowIso(),
-          remoteDeleted: true,
-          remoteUpdatedAt: remoteDeletion.entry.updatedAt || previous?.remoteUpdatedAt || null,
-          remoteHash: remoteDeletion.entry.hash || previous?.remoteHash || null,
-          remoteRevision: entryRevision(remoteDeletion.entry),
-          revision: entryRevision(remoteDeletion.entry),
-          revisionBy: remoteDeletion.entry.revisionBy || null,
-          remoteFingerprint: remoteEntryFingerprint(remoteDeletion.entry),
-        };
+        state.files[path] = buildRemoteTombstoneState(previous, remoteDeletion.entry);
       }
       continue;
     }
@@ -4142,18 +4127,7 @@ async function pushInternal(syncConfig, runtime = {}) {
           throw new Error(`Local path changed while applying a remote sync deletion: ${path}`);
         }
         await deleteStructuredBase(path, syncConfig);
-        state.files[path] = {
-          ...(previous || {}),
-          deleted: true,
-          deletedAt: remoteDeletion.entry.deletedAt || nowIso(),
-          remoteDeleted: true,
-          remoteUpdatedAt: remoteDeletion.entry.updatedAt || previous?.remoteUpdatedAt || null,
-          remoteHash: remoteDeletion.entry.hash || previous?.remoteHash || null,
-          remoteRevision: entryRevision(remoteDeletion.entry),
-          revision: entryRevision(remoteDeletion.entry),
-          revisionBy: remoteDeletion.entry.revisionBy || null,
-          remoteFingerprint: remoteEntryFingerprint(remoteDeletion.entry),
-        };
+        state.files[path] = buildRemoteTombstoneState(previous, remoteDeletion.entry);
         stats.deleted += 1;
         return;
       }
@@ -4710,8 +4684,7 @@ export async function testSyncConnection(syncConfig = getSyncConfig()) {
     throw new Error('Sharded sync requires the browser Web Locks API for safe multi-tab use.');
   }
   const backend = syncBackendFactory(syncConfig);
-  const probeId = globalThis.crypto?.randomUUID?.()
-    || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  const probeId = randomId();
   await backend.test(objectKey(syncConfig, `.probe/${probeId}`));
   if (usesShardedManifest(syncConfig)) {
     const { shardObjects } = await listManifestShardObjects(

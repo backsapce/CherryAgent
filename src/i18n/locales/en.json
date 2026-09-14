@@ -1,17 +1,14 @@
 {
   "app": {
-    "loading": "Loading...",
     "name": "CherryAgent",
     "tagline": "AI agent running purely in your browser",
     "sendHint": "Send a message to get started",
-    "newSession": "New Session",
     "image": "[Image]"
   },
   "session": {
     "newSession": "New Session",
     "deleteSession": "Delete session",
     "exportDebug": "Export chat debug",
-    "wakeupScheduled": "Wake-up scheduled",
     "cancelWakeup": "Cancel scheduled wake-up",
     "noMessages": "No messages yet",
     "noConversations": "No conversations yet",
@@ -35,6 +32,7 @@
     "aborted": "aborted",
     "exitCode": "exit {code}",
     "remove": "Remove",
+    "retry": "Retry",
     "uploadImage": "Upload image",
     "dropImage": "Drop images here to attach",
     "edit": "Edit",
@@ -53,7 +51,6 @@
     "skillLoadFailed": "Unable to load skills",
     "agentSkill": "Agent",
     "globalSkill": "Global",
-    "sandbox": "Sandbox",
     "noSandboxSelected": "No sandbox selected",
     "noProviderConfigured": "No provider configured",
     "uploaded": "uploaded"
@@ -63,7 +60,6 @@
     "llm": "LLM Settings",
     "general": "General",
     "sandboxes": "Sandboxes",
-    "e2b": "E2B Cloud",
     "appearance": "Appearance",
     "data": "Data",
     "sync": "Sync",
@@ -125,13 +121,8 @@
     "providerUsageCount": "Used by {count} LLM(s)",
     "saveLlm": "Save LLM",
     "saveProvider": "Save Provider",
-    "noProviders": "No providers configured yet.",
     "providerFirst": "Add and save a provider before creating an LLM.",
     "profile": "LLM Profile",
-    "profileName": "Profile Name",
-    "profileNamePlaceholder": "Work GPT-4.1, Local Qwen...",
-    "addProfile": "Add Profile",
-    "deleteProfile": "Delete Profile",
     "provider": "Provider",
     "selectProvider": "Select a provider...",
     "apiKey": "API Key",
@@ -142,8 +133,6 @@
     "modelPlaceholder": "Type or select a model",
     "modelsLoading": "loading...",
     "modelsError": "Failed to load models: {error}",
-    "defaultModel": "Default ({model})",
-    "refreshModels": "Refresh model list",
     "modelsHint": "Models are loaded with the selected provider credentials. You can also enter a model ID manually.",
     "contextWindow": "Context Window",
     "contextWindowPlaceholder": "Fetched from models.dev",
@@ -176,9 +165,6 @@
     "insecureUrl": "Unencrypted http:// agent URLs are only allowed for localhost. Use an https:// URL — agent requests carry the auth token."
   },
   "e2bSettings": {
-    "title": "E2B Cloud Sandbox",
-    "desc": "Run commands in an isolated cloud sandbox powered by E2B. Just enter your API key and a sandbox will be created automatically.",
-    "apiKey": "E2B API Key",
     "apiKeyPlaceholder": "Enter your E2B API key...",
     "enable": "Enable",
     "starting": "Starting...",
@@ -288,11 +274,7 @@
     "title": "Skills",
     "desc": "Enable or disable default skills. Disabled skills won't appear in the system prompt.",
     "empty": "No skills available. Skills are loaded from the OPFS skills directory.",
-    "enableSkill": "Enable skill",
-    "disableSkill": "Disable skill",
     "version": "Version",
-    "enabled": "Enabled",
-    "disabled": "Disabled",
     "enableAll": "Enable All",
     "disableAll": "Disable All"
   },
@@ -300,8 +282,6 @@
     "title": "Tools",
     "desc": "Enable or disable agent tools. Disabled tools won't be sent to the model and cannot be executed.",
     "empty": "No tools available.",
-    "enabled": "Enabled",
-    "disabled": "Disabled",
     "enableAll": "Enable All",
     "disableAll": "Disable All"
   },
@@ -312,7 +292,6 @@
     "addAgent": "Add Agent",
     "removeAgent": "Remove agent",
     "created": "Created",
-    "rename": "Click name to rename",
     "defaultLlm": "Default LLM",
     "firstConfiguredLlm": "First configured LLM",
     "runtime": "Agent runtime",
@@ -323,16 +302,7 @@
     "sandbox": "Sandbox",
     "noSandbox": "Do not use sandbox"
   },
-  "errors": {
-    "noLLMConfigured": "Please configure an LLM provider in Settings.",
-    "noLLMConfiguredDetail": "No LLM provider configured yet. Please open Settings (gear icon) to add your API key and select a provider.",
-    "noLLMProvider": "No LLM provider configured. Please set up a provider in Settings.",
-    "apiKeyNotSet": "API key not set for {provider}. Please add your key in Settings.",
-    "unknownProvider": "Unknown provider: {provider}",
-    "serverNoToken": "Server did not return a token.",
-    "sandboxReturned": "Sandbox returned {status}",
-    "sandboxRequestFailed": "Sandbox request failed"
-  },
+  "errors": {},
   "offline": {
     "banner": "Offline — running from cache"
   },
@@ -343,7 +313,6 @@
     "uploadFolder": "Upload Folder",
     "uploading": "Uploading...",
     "download": "Download",
-    "downloading": "Downloading...",
     "delete": "Delete",
     "deleting": "Deleting...",
     "deleteSelected": "Delete selected",
@@ -377,10 +346,6 @@
     "loadLocalError": "Failed to load local files",
     "loadRemoteError": "Failed to load remote files. Make sure the agent server is running and connected.",
     "remoteEmpty": "No files in the remote workspace",
-    "e2bEmpty": "No files in the E2B sandbox root",
-    "remoteHint": "Files are shown from the agent workspace root.",
-    "loadE2bError": "Failed to load E2B sandbox files. Make sure the E2B API key is valid and the sandbox is running.",
-    "remoteOperationNotSupported": "This operation is not supported for remote files",
     "edit": "Edit",
     "preview": "Preview image",
     "loadingPreview": "Loading image...",
@@ -397,12 +362,7 @@
     "unsavedChanges": "Unsaved changes",
     "saved": "Saved",
     "saveHint": "Ctrl+S to save",
-    "confirmDiscardChanges": "You have unsaved changes. Are you sure you want to discard them?",
-    "uploadTarget": "Upload to",
-    "clearSelection": "Clear selection",
-    "defaultLocalTarget": "files directory",
-    "defaultRemoteTarget": "remote working directory",
-    "selectedHint": "Selected: {name}"
+    "confirmDiscardChanges": "You have unsaved changes. Are you sure you want to discard them?"
   },
   "permissions": {
     "title": "Approval needed",

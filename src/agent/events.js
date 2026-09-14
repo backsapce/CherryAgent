@@ -10,32 +10,6 @@ import { consumeTaggedReasoning, createTaggedReasoningParser } from './reasoning
 
 export const AGENT_EVENT_VERSION = 1;
 
-export const AGENT_EVENT_TYPES = Object.freeze([
-  'run-start',
-  'step-start',
-  'text-start',
-  'text-delta',
-  'text-end',
-  'reasoning-start',
-  'reasoning-delta',
-  'reasoning-end',
-  'tool-input-start',
-  'tool-input-delta',
-  'tool-input-end',
-  'tool-call',
-  'tool-status',
-  'tool-result',
-  'tool-error',
-  'tool-blocked',
-  'permission-request',
-  'permission-resolved',
-  'context-compact',
-  'step-finish',
-  'run-finish',
-  'run-error',
-  'run-abort',
-]);
-
 export function createAgentEventState(seed = {}) {
   const content = String(seed?.content || '');
   const thinking = String(seed?.thinking || '');

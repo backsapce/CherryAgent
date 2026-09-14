@@ -24,6 +24,15 @@ import {
   writeSkillReference,
 } from './skills.js';
 import { wakeupDelayToSeconds } from './wakeup.js';
+import { truncateMiddle } from './toolObservation.js';
+import { formatSkills } from './skillCore.js';
+import {
+  ABSOLUTE_READ_FILE_MAX_BYTES,
+  DEFAULT_READ_FILE_MAX_BYTES,
+  TOOL_PARAMETER_SCHEMAS,
+  formatCommandResult,
+} from './toolSchemas.js';
+import { formatBytes, imageMimeFromPath, splitFilePath } from '../utils/misc.js';
 import {
   E2B_AGENT_ID,
   executeCommand,
@@ -45,11 +54,8 @@ import config from '../config/config.js';
 import llm from '../models/llm.js';
 import { getAgent, listAgents } from '../agents/agents.js';
 
-const DEFAULT_READ_FILE_MAX_BYTES = 256 * 1024;
-const ABSOLUTE_READ_FILE_MAX_BYTES = 1024 * 1024;
 const ABSOLUTE_IMAGE_MAX_SOURCE_BYTES = 25 * 1024 * 1024;
 const TOOL_RESULT_MAX_CHARS = 80_000;
-const TOOL_RESULT_HEAD_RATIO = 0.62;
 
 // ─── Registry singleton ─────────────────────────────────────────────────────
 
@@ -220,37 +226,12 @@ function capToolResult(result) {
   return truncateMiddle(text, TOOL_RESULT_MAX_CHARS, 'tool result truncated');
 }
 
-function truncateMiddle(text, maxChars, label = 'truncated') {
-  const value = String(text || '');
-  if (value.length <= maxChars) return value;
-
-  let marker = `\n[${label}]\n`;
-  let available = Math.max(1, maxChars - marker.length);
-  let headChars = Math.ceil(available * TOOL_RESULT_HEAD_RATIO);
-  let tailChars = Math.max(0, available - headChars);
-  let omitted = Math.max(0, value.length - headChars - tailChars);
-
-  marker = `\n[${label}: ${omitted} chars omitted from middle]\n`;
-  available = Math.max(1, maxChars - marker.length);
-  headChars = Math.ceil(available * TOOL_RESULT_HEAD_RATIO);
-  tailChars = Math.max(0, available - headChars);
-
-  return `${value.slice(0, headChars)}${marker}${value.slice(value.length - tailChars)}`;
-}
-
 // ─── Built-in tools ─────────────────────────────────────────────────────────
 
 function clampReadLimit(maxBytes) {
   const parsed = Number(maxBytes);
   if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_READ_FILE_MAX_BYTES;
   return Math.min(Math.floor(parsed), ABSOLUTE_READ_FILE_MAX_BYTES);
-}
-
-function formatBytes(bytes) {
-  if (!Number.isFinite(bytes)) return 'unknown size';
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function oversizedFileMessage(path, size, maxBytes, readToolName, listToolName) {
@@ -263,14 +244,8 @@ function oversizedFileMessage(path, size, maxBytes, readToolName, listToolName) 
   ].join('\n');
 }
 
-function splitParentPath(path) {
-  const parts = String(path || '').split('/').filter(Boolean);
-  const name = parts.pop() || '';
-  return { parent: parts.join('/'), name };
-}
-
 async function findSandboxListedFile(path, ctx) {
-  const { parent, name } = splitParentPath(path);
+  const { parent, name } = splitFilePath(path);
   const listing = await listFiles(parent, ctx?.agentUrl, { signal: ctx?.signal });
   const entries = Array.isArray(listing) ? listing : listing?.children;
   return entries?.find((entry) => entry.name === name) || null;
@@ -280,37 +255,15 @@ function rethrowIfToolAborted(error, signal) {
   if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
 }
 
-async function assertBrowserReadableFileSize(path, maxBytes, ctx) {
-  const entry = await getAgentFileInfo(ctx.agentId, path).catch(() => null);
+async function assertReadableFileSize(path, maxBytes, lookupEntry, readToolName, listToolName) {
+  const entry = await lookupEntry().catch(() => null);
 
   if (!entry) return null;
   if (entry.type === 'directory') return `Cannot read ${path}: it is a directory.`;
   if (Number.isFinite(entry.size) && entry.size > maxBytes) {
-    return oversizedFileMessage(path, entry.size, maxBytes, 'read_browser_file', 'list_browser_files');
+    return oversizedFileMessage(path, entry.size, maxBytes, readToolName, listToolName);
   }
   return null;
-}
-
-async function assertSandboxReadableFileSize(path, maxBytes, ctx) {
-  const entry = await findSandboxListedFile(path, ctx).catch(() => null);
-
-  if (!entry) return null;
-  if (entry.type === 'directory') return `Cannot read ${path}: it is a directory.`;
-  if (Number.isFinite(entry.size) && entry.size > maxBytes) {
-    return oversizedFileMessage(path, entry.size, maxBytes, 'read_sandbox_file', 'list_sandbox_files');
-  }
-  return null;
-}
-
-function inferImageMimeFromPath(path) {
-  const extension = String(path || '').split('.').pop()?.toLowerCase();
-  if (extension === 'png') return 'image/png';
-  if (extension === 'jpg' || extension === 'jpeg') return 'image/jpeg';
-  if (extension === 'webp') return 'image/webp';
-  if (extension === 'gif') return 'image/gif';
-  if (extension === 'svg') return 'image/svg+xml';
-  if (extension === 'bmp') return 'image/bmp';
-  return '';
 }
 
 function isSupportedImageMime(type) {
@@ -334,17 +287,7 @@ registry.register({
   schema: {
     description:
       'Run a SHORT foreground shell command that is expected to finish within 30 seconds. Use it for quick inspection and bounded operations such as pwd, ls, git status, or a small targeted test. NEVER use it for training, servers, watchers, long builds, downloads, migrations, or any command whose duration is unknown or may exceed 30 seconds; use start_command instead. Commands can only see the sandbox filesystem/workdir, not browser OPFS.',
-    parameters: {
-      type: 'object',
-      properties: {
-        command: {
-          type: 'string',
-          description: 'The shell command to execute',
-        },
-      },
-      required: ['command'],
-      additionalProperties: false,
-    },
+    parameters: TOOL_PARAMETER_SCHEMAS.execute_command,
   },
   checkAvailable: (ctx) => !!ctx?.agentUrl,
   async handler({ command }, ctx) {
@@ -361,14 +304,7 @@ registry.register({
       cwd: result.cwd,
       filesRoot: result.filesRoot,
     });
-    let out = `Exit code: ${result.code}`;
-    if (result.status) out += `\nStatus: ${result.status}${Number.isFinite(result.durationMs) ? ` (${result.durationMs} ms)` : ''}`;
-    if (result.platform || result.shell || result.cwd || result.filesRoot) {
-      out += `\nEnvironment: platform=${result.platform || 'unknown'}, shell=${result.shell || 'unknown'}, cwd=${result.cwd || 'unknown'}, filesRoot=${result.filesRoot || 'unknown'}`;
-    }
-    if (result.stdout) out += `\nStdout:\n${result.stdout}`;
-    if (result.stderr) out += `\nStderr:\n${result.stderr}`;
-    return out;
+    return formatCommandResult(result);
   },
 });
 
@@ -380,17 +316,7 @@ registry.register({
   schema: {
     description:
       'Start a managed BACKGROUND shell command and return immediately with a job_id. Use this instead of execute_command for training, servers, watchers, lengthy builds/tests/downloads/migrations, commands with unknown duration, or anything expected to take 30 seconds or more. Do not add nohup, &, disown, screen, tmux, or shell timeout wrappers; the server owns the process, logs, and cancellation.',
-    parameters: {
-      type: 'object',
-      properties: {
-        command: {
-          type: 'string',
-          description: 'The complete foreground-form shell command. Do not append & or nohup.',
-        },
-      },
-      required: ['command'],
-      additionalProperties: false,
-    },
+    parameters: TOOL_PARAMETER_SCHEMAS.start_command,
   },
   checkAvailable: managedCommandAvailable,
   async handler({ command }, ctx) {
@@ -406,15 +332,7 @@ registry.register({
   schema: {
     description:
       'Read the current status and one incremental log segment for a managed background command. Pass nextCursor from the previous result as cursor so logs are not repeated. This returns immediately.',
-    parameters: {
-      type: 'object',
-      properties: {
-        job_id: { type: 'string', description: 'The job_id returned by start_command.' },
-        cursor: { type: 'integer', minimum: 0, description: 'Log byte cursor; use nextCursor from the previous result. Defaults to 0.' },
-      },
-      required: ['job_id'],
-      additionalProperties: false,
-    },
+    parameters: TOOL_PARAMETER_SCHEMAS.get_command,
   },
   checkAvailable: managedCommandAvailable,
   async handler({ job_id: jobId, cursor = 0 }, ctx) {
@@ -430,16 +348,7 @@ registry.register({
   schema: {
     description:
       'Wait up to 30 seconds for new logs or completion of a managed background command. Use only when completion is likely within that brief wait. For training or other work expected to need minutes or hours, call schedule_wakeup instead of repeatedly calling wait_command.',
-    parameters: {
-      type: 'object',
-      properties: {
-        job_id: { type: 'string', description: 'The job_id returned by start_command.' },
-        cursor: { type: 'integer', minimum: 0, description: 'Use nextCursor from the previous result. Defaults to 0.' },
-        wait_seconds: { type: 'integer', minimum: 1, maximum: 30, description: 'Maximum wait, from 1 through 30 seconds. Defaults to 30.' },
-      },
-      required: ['job_id'],
-      additionalProperties: false,
-    },
+    parameters: TOOL_PARAMETER_SCHEMAS.wait_command,
   },
   checkAvailable: managedCommandAvailable,
   async handler({ job_id: jobId, cursor = 0, wait_seconds: waitSeconds = 30 }, ctx) {
@@ -457,14 +366,7 @@ registry.register({
   schema: {
     description:
       'Stop a managed background command by job_id. This terminates the entire process tree, first gracefully and then forcibly if needed. Use only when the user requested cancellation or continuing the job is no longer useful.',
-    parameters: {
-      type: 'object',
-      properties: {
-        job_id: { type: 'string', description: 'The job_id returned by start_command.' },
-      },
-      required: ['job_id'],
-      additionalProperties: false,
-    },
+    parameters: TOOL_PARAMETER_SCHEMAS.stop_command,
   },
   checkAvailable: managedCommandAvailable,
   async handler({ job_id: jobId }, ctx) {
@@ -531,7 +433,9 @@ registry.register({
   async handler({ path, max_bytes: maxBytesArg }, ctx) {
     try {
       const maxBytes = clampReadLimit(maxBytesArg);
-      const sizeError = await assertBrowserReadableFileSize(path, maxBytes, ctx);
+      const sizeError = await assertReadableFileSize(
+        path, maxBytes, () => getAgentFileInfo(ctx.agentId, path), 'read_browser_file', 'list_browser_files'
+      );
       if (sizeError) return sizeError;
       const content = await readAgentFile(ctx.agentId, path);
       return content ?? `Browser file not found: ${path}`;
@@ -569,7 +473,7 @@ registry.register({
   async handler({ path }, ctx) {
     try {
       const info = await getAgentFileInfo(ctx.agentId, path);
-      const mimeType = info.type || inferImageMimeFromPath(path);
+      const mimeType = info.type || imageMimeFromPath(path);
       if (!isSupportedImageMime(mimeType)) return `Unsupported image type: ${mimeType || 'unknown'}`;
       if (info.size > ABSOLUTE_IMAGE_MAX_SOURCE_BYTES) {
         return `Refusing to display image ${path}: file is ${formatBytes(info.size)}, above ${formatBytes(ABSOLUTE_IMAGE_MAX_SOURCE_BYTES)}.`;
@@ -622,17 +526,7 @@ registry.register({
   schema: {
     description:
       'List files in the sandbox runtime workdir used by command tools. This is NOT browser OPFS or workspace/<active-agent>/files/. Use the skill tool, not generic file tools, for skills/. Other browser-owned files are unavailable unless explicitly copied.',
-    parameters: {
-      type: 'object',
-      properties: {
-        path: {
-          type: 'string',
-          description: 'Sandbox workdir directory path to list. Empty means the sandbox files root/workdir.',
-        },
-      },
-      required: [],
-      additionalProperties: false,
-    },
+    parameters: TOOL_PARAMETER_SCHEMAS.list_sandbox_files,
   },
   checkAvailable: (ctx) => !!ctx?.agentUrl,
   async handler({ path = '' }, ctx) {
@@ -654,27 +548,15 @@ registry.register({
   schema: {
     description:
       'Read a text file from the sandbox runtime workdir used by command tools. Use read_browser_file for files under workspace/<active-agent>/files/.',
-    parameters: {
-      type: 'object',
-      properties: {
-        path: {
-          type: 'string',
-          description: 'Sandbox workdir file path.',
-        },
-        max_bytes: {
-          type: 'number',
-          description: `Maximum file size to read. Defaults to ${DEFAULT_READ_FILE_MAX_BYTES} bytes and is capped at ${ABSOLUTE_READ_FILE_MAX_BYTES} bytes.`,
-        },
-      },
-      required: ['path'],
-      additionalProperties: false,
-    },
+    parameters: TOOL_PARAMETER_SCHEMAS.read_sandbox_file,
   },
   checkAvailable: (ctx) => !!ctx?.agentUrl,
   async handler({ path, max_bytes: maxBytesArg }, ctx) {
     try {
       const maxBytes = clampReadLimit(maxBytesArg);
-      const sizeError = await assertSandboxReadableFileSize(path, maxBytes, ctx);
+      const sizeError = await assertReadableFileSize(
+        path, maxBytes, () => findSandboxListedFile(path, ctx), 'read_sandbox_file', 'list_sandbox_files'
+      );
       if (sizeError) return sizeError;
       const content = await readFileText(path, ctx.agentUrl, { signal: ctx.signal });
       const contentSize = new Blob([content]).size;
@@ -697,28 +579,14 @@ registry.register({
   schema: {
     description:
       'Display an image stored in the sandbox runtime workdir in the conversation UI. The tool returns only a sandbox file reference and never puts image bytes or base64 in the conversation. Use display_browser_image for browser files.',
-    parameters: {
-      type: 'object',
-      properties: {
-        path: {
-          type: 'string',
-          description: 'Sandbox workdir image path.',
-        },
-        alt: {
-          type: 'string',
-          description: 'Short accessible description of the image.',
-        },
-      },
-      required: ['path'],
-      additionalProperties: false,
-    },
+    parameters: TOOL_PARAMETER_SCHEMAS.display_sandbox_image,
   },
   checkAvailable: (ctx) => !!ctx?.agentUrl,
   async handler({ path }, ctx) {
     try {
       const entry = await findSandboxListedFile(path, ctx);
       if (!entry || entry.type === 'directory') return `Sandbox image not found: ${path}`;
-      const mimeType = inferImageMimeFromPath(path);
+      const mimeType = imageMimeFromPath(path);
       if (!isSupportedImageMime(mimeType)) return `Unsupported image type: ${mimeType || 'unknown'}`;
       if (Number.isFinite(entry.size) && entry.size > ABSOLUTE_IMAGE_MAX_SOURCE_BYTES) {
         return `Refusing to display image ${path}: file is ${formatBytes(entry.size)}, above ${formatBytes(ABSOLUTE_IMAGE_MAX_SOURCE_BYTES)}.`;
@@ -737,21 +605,7 @@ registry.register({
   schema: {
     description:
       'Write a text file to the sandbox runtime workdir used by command tools. This does not update browser OPFS or workspace/<active-agent>/files/.',
-    parameters: {
-      type: 'object',
-      properties: {
-        path: {
-          type: 'string',
-          description: 'Sandbox workdir file path.',
-        },
-        content: {
-          type: 'string',
-          description: 'The content to write.',
-        },
-      },
-      required: ['path', 'content'],
-      additionalProperties: false,
-    },
+    parameters: TOOL_PARAMETER_SCHEMAS.write_sandbox_file,
   },
   checkAvailable: (ctx) => !!ctx?.agentUrl,
   async handler({ path, content }, ctx) {
@@ -876,34 +730,7 @@ registry.register({
   schema: {
     description:
       'List and read progressive skills merged from OPFS global skills, the active OPFS workspace, and the selected agent skills, in that precedence order. Later same-named skills override earlier ones. In browser runtime, write always creates or updates a skill in the active OPFS workspace. Read references individually only when needed.',
-    parameters: {
-      type: 'object',
-      properties: {
-        action: {
-          type: 'string',
-          enum: ['list', 'read', 'write'],
-          description: 'Skill operation.',
-        },
-        name: {
-          type: 'string',
-          description: 'Skill name for read or write.',
-        },
-        query: {
-          type: 'string',
-          description: 'Optional search query for list.',
-        },
-        reference_name: {
-          type: 'string',
-          description: 'For read or write, target one reference file instead of SKILL.md.',
-        },
-        content: {
-          type: 'string',
-          description: 'Full SKILL.md or reference content for write.',
-        },
-      },
-      required: ['action'],
-      additionalProperties: false,
-    },
+    parameters: TOOL_PARAMETER_SCHEMAS.skill,
   },
   async handler(args, ctx) {
     try {
@@ -957,28 +784,7 @@ registry.register({
   schema: {
     description:
       'Schedule one future continuation of the current conversation. Express the delay in its natural unit; do not convert minutes or hours to seconds (for example, 10 minutes is delay=10 and unit="minutes"). Use this instead of blocking or repeatedly polling during a long-running task. When the delay expires, the saved prompt is added to this conversation and the agent runs again. If the task is still pending after waking, schedule another wake-up. The browser page must be open to fire on time; an overdue wake-up fires once when the app is opened again.',
-    parameters: {
-      type: 'object',
-      properties: {
-        delay: {
-          type: 'integer',
-          minimum: 1,
-          maximum: 604800,
-          description: 'How many of the selected units to wait. The resulting delay must be from 5 seconds through 7 days.',
-        },
-        unit: {
-          type: 'string',
-          enum: ['seconds', 'minutes', 'hours', 'days'],
-          description: 'Unit for delay. Use the unit stated by the user instead of converting it yourself.',
-        },
-        prompt: {
-          type: 'string',
-          description: 'A self-contained instruction describing what to inspect or continue when the agent wakes.',
-        },
-      },
-      required: ['delay', 'unit', 'prompt'],
-      additionalProperties: false,
-    },
+    parameters: TOOL_PARAMETER_SCHEMAS.schedule_wakeup,
   },
   checkAvailable: (ctx) => typeof ctx?.scheduleWakeup === 'function',
   async handler({ delay, unit, prompt }, ctx) {
@@ -1095,18 +901,6 @@ function formatMemoryEntries(entries) {
     .map((entry) => {
       const tags = entry.tags?.length ? ` tags=${entry.tags.join(',')}` : '';
       return `- ${entry.id} [${entry.type}; ${entry.importance}${tags}; updated ${entry.updatedAt}]\n  ${entry.content}`;
-    })
-    .join('\n');
-}
-
-function formatSkills(skills) {
-  if (!skills?.length) return 'No skills found.';
-  return skills
-    .map((skill) => {
-      const refs = skill.references?.length
-        ? ` refs=[${skill.references.map((ref) => ref.name).join(', ')}]`
-        : '';
-      return `- ${skill.name} (${skill.source}, v${skill.version}): ${skill.description}${refs}`;
     })
     .join('\n');
 }

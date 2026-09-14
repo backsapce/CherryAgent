@@ -1,17 +1,14 @@
 {
   "app": {
-    "loading": "読み込み中...",
     "name": "CherryAgent",
     "tagline": "ブラウザで完全に動作する AI エージェント",
     "sendHint": "メッセージを送信して開始",
-    "newSession": "新しいセッション",
     "image": "[画像]"
   },
   "session": {
     "newSession": "新しいセッション",
     "deleteSession": "セッションを削除",
     "exportDebug": "チャットデバッグをエクスポート",
-    "wakeupScheduled": "ウェイクアップ予約済み",
     "cancelWakeup": "予約済みのウェイクアップをキャンセル",
     "noMessages": "メッセージなし",
     "noConversations": "会話はまだありません",
@@ -35,6 +32,7 @@
     "aborted": "中止",
     "exitCode": "終了コード {code}",
     "remove": "削除",
+    "retry": "再試行",
     "uploadImage": "画像をアップロード",
     "dropImage": "ここに画像をドロップして添付",
     "edit": "編集",
@@ -53,7 +51,6 @@
     "skillLoadFailed": "スキルを読み込めません",
     "agentSkill": "エージェント",
     "globalSkill": "グローバル",
-    "sandbox": "サンドボックス",
     "noSandboxSelected": "サンドボックス未選択",
     "noProviderConfigured": "プロバイダー未設定",
     "uploaded": "アップロード済み"
@@ -63,7 +60,6 @@
     "llm": "LLM 設定",
     "general": "一般",
     "sandboxes": "サンドボックス",
-    "e2b": "E2B クラウド",
     "appearance": "外観",
     "data": "データ",
     "sync": "同期",
@@ -125,13 +121,8 @@
     "providerUsageCount": "{count} 件の LLM が使用中",
     "saveLlm": "LLM を保存",
     "saveProvider": "プロバイダーを保存",
-    "noProviders": "プロバイダーがまだ設定されていません。",
     "providerFirst": "LLM を作成する前に、プロバイダーを追加して保存してください。",
     "profile": "LLM プロファイル",
-    "profileName": "プロファイル名",
-    "profileNamePlaceholder": "Work GPT-4.1、Local Qwen...",
-    "addProfile": "プロファイルを追加",
-    "deleteProfile": "プロファイルを削除",
     "provider": "プロバイダー",
     "selectProvider": "プロバイダーを選択...",
     "apiKey": "API キー",
@@ -142,8 +133,6 @@
     "modelPlaceholder": "モデルを入力または選択",
     "modelsLoading": "読み込み中...",
     "modelsError": "モデルの読み込みに失敗: {error}",
-    "defaultModel": "デフォルト ({model})",
-    "refreshModels": "モデルリストを更新",
     "modelsHint": "選択したプロバイダーの認証情報でモデル一覧を読み込みます。モデル ID を手動で入力することもできます。",
     "contextWindow": "コンテキストウィンドウ",
     "contextWindowPlaceholder": "models.dev から取得",
@@ -176,9 +165,6 @@
     "insecureUrl": "暗号化されていない http:// のエージェント URL は localhost のみ許可されます。agent リクエストには認証トークンが含まれるため https:// を使用してください。"
   },
   "e2bSettings": {
-    "title": "E2B クラウドサンドボックス",
-    "desc": "E2B が提供する隔離されたクラウドサンドボックス内でコマンドを実行します。API キーを入力するだけでサンドボックスが自動作成されます。",
-    "apiKey": "E2B API キー",
     "apiKeyPlaceholder": "E2B API キーを入力...",
     "enable": "有効化",
     "starting": "起動中...",
@@ -288,11 +274,7 @@
     "title": "スキル",
     "desc": "デフォルトスキルを有効または無効にします。無効にしたスキルはシステムプロンプトに表示されません。",
     "empty": "利用可能なスキルがありません。スキルはOPFSスキルディレクトリから読み込まれます。",
-    "enableSkill": "スキルを有効化",
-    "disableSkill": "スキルを無効化",
     "version": "バージョン",
-    "enabled": "有効",
-    "disabled": "無効",
     "enableAll": "すべて有効化",
     "disableAll": "すべて無効化"
   },
@@ -300,8 +282,6 @@
     "title": "ツール",
     "desc": "エージェントツールを有効または無効にします。無効にしたツールはモデルに送信されず、実行もできません。",
     "empty": "利用可能なツールがありません。",
-    "enabled": "有効",
-    "disabled": "無効",
     "enableAll": "すべて有効化",
     "disableAll": "すべて無効化"
   },
@@ -312,7 +292,6 @@
     "addAgent": "エージェントを追加",
     "removeAgent": "エージェントを削除",
     "created": "作成日",
-    "rename": "名前をクリックしてリネーム",
     "defaultLlm": "デフォルト LLM",
     "firstConfiguredLlm": "最初に設定した LLM",
     "runtime": "エージェントランタイム",
@@ -323,16 +302,7 @@
     "sandbox": "サンドボックス",
     "noSandbox": "サンドボックスを使用しない"
   },
-  "errors": {
-    "noLLMConfigured": "設定で LLM プロバイダーを設定してください。",
-    "noLLMConfiguredDetail": "LLM プロバイダーがまだ設定されていません。設定（歯車アイコン）を開いて API キーを追加し、プロバイダーを選択してください。",
-    "noLLMProvider": "LLM プロバイダーが設定されていません。設定で設定してください。",
-    "apiKeyNotSet": "{provider} の API キーが設定されていません。設定でキーを追加してください。",
-    "unknownProvider": "不明なプロバイダー: {provider}",
-    "serverNoToken": "サーバーがトークンを返しませんでした。",
-    "sandboxReturned": "サンドボックスが {status} を返しました",
-    "sandboxRequestFailed": "サンドボックスリクエストが失敗しました"
-  },
+  "errors": {},
   "offline": {
     "banner": "オフライン — キャッシュで実行中"
   },
@@ -343,7 +313,6 @@
     "uploadFolder": "フォルダーをアップロード",
     "uploading": "アップロード中...",
     "download": "ダウンロード",
-    "downloading": "ダウンロード中...",
     "delete": "削除",
     "deleting": "削除中...",
     "deleteSelected": "選択項目を削除",
@@ -377,10 +346,6 @@
     "loadLocalError": "ローカルファイルの読み込みに失敗しました",
     "loadRemoteError": "リモートファイルの読み込みに失敗しました。エージェントサーバーが実行中で接続されていることを確認してください。",
     "remoteEmpty": "リモートワークスペースにファイルがありません",
-    "e2bEmpty": "E2Bサンドボックスのルートにファイルがありません",
-    "remoteHint": "ファイルはエージェントワークスペースのルートから表示されます。",
-    "loadE2bError": "E2Bサンドボックスファイルの読み込みに失敗しました。E2B APIキーが有効で、サンドボックスが実行中であることを確認してください。",
-    "remoteOperationNotSupported": "この操作はリモートファイルではサポートされていません",
     "edit": "編集",
     "preview": "画像をプレビュー",
     "loadingPreview": "画像を読み込み中...",
@@ -397,12 +362,7 @@
     "unsavedChanges": "未保存の変更",
     "saved": "保存済み",
     "saveHint": "Ctrl+S で保存",
-    "confirmDiscardChanges": "未保存の変更があります。破棄してもよろしいですか？",
-    "uploadTarget": "アップロード先",
-    "clearSelection": "選択をクリア",
-    "defaultLocalTarget": "files ディレクトリ",
-    "defaultRemoteTarget": "リモート作業ディレクトリ",
-    "selectedHint": "選択中：{name}"
+    "confirmDiscardChanges": "未保存の変更があります。破棄してもよろしいですか？"
   },
   "permissions": {
     "title": "確認が必要です",

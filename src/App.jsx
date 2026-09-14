@@ -47,6 +47,7 @@ import { buildWakeupMessage, createOrReplaceTurnWakeup, findNextWakeup } from '.
 import { WifiOff, ChevronRight } from './components/Icons/Icons';
 import { boundContextFilesForPrompt, stripLegacyContextFileSummary } from './contextFiles';
 import { canSupersedeRemoteRun, formatRunFailureContent } from './remoteRunPresentation';
+import { downloadBlobFile, truncateText as truncateForPrompt, waitForSettlement } from './utils/misc.js';
 import {
   assertRemoteRunSnapshot,
   captureRemoteReplyFields,
@@ -72,17 +73,6 @@ function generateId() {
 function downloadJsonFile(filename, data) {
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
   downloadBlobFile(filename, blob);
-}
-
-function downloadBlobFile(filename, blob) {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
 }
 
 function formatTime(date) {
@@ -144,18 +134,6 @@ const REMOTE_RESUME_SLOW_RETRY_MS = 30_000;
 const REMOTE_WAITING_RECONCILE_MS = 5000;
 const LOCAL_RUN_STOP_TIMEOUT_MS = 5000;
 
-async function waitForSettlement(promise, timeoutMs) {
-  let timerId;
-  const settled = await Promise.race([
-    Promise.resolve(promise).then(() => true, () => true),
-    new Promise((resolve) => {
-      timerId = setTimeout(() => resolve(false), timeoutMs);
-    }),
-  ]);
-  clearTimeout(timerId);
-  return settled;
-}
-
 async function abortRemoteAgentRunBestEffort(url, runId) {
   if (!url || !runId) return null;
   const controller = new AbortController();
@@ -193,12 +171,6 @@ function messagePreviewText(text, images, contextFiles) {
   if (contextFiles?.length) return contextFilePromptPath(contextFiles[0]) || '[File]';
   if (images?.length) return '[Image]';
   return '';
-}
-
-function truncateForPrompt(text, maxChars) {
-  const value = String(text || '');
-  if (value.length <= maxChars) return value;
-  return `${value.slice(0, maxChars)}\n[truncated ${value.length - maxChars} chars]`;
 }
 
 function appendPromptSection(content, marker, body) {
@@ -3116,7 +3088,7 @@ function App() {
           setLlmReady((prev) => !prev);
         }}
         onConfigureLLM={async (cfg) => {
-          const saved = await (llm.configureLlm ? llm.configureLlm(cfg) : llm.configure(cfg));
+          const saved = await llm.configureLlm(cfg);
           setCurrentLlmProfileId(saved.id);
           if (activeSessionId) {
             setSessionLlmProfiles((prev) => ({ ...prev, [activeSessionId]: saved.id }));
@@ -3126,7 +3098,7 @@ function App() {
           return saved;
         }}
         onDeleteLLM={async (profileId) => {
-          await (llm.deleteLlm ? llm.deleteLlm(profileId) : llm.deleteProfile(profileId));
+          await llm.deleteLlm(profileId);
           const nextId = llm.getActiveProfileId();
           setCurrentLlmProfileId(nextId);
           setSessionLlmProfiles((prev) => {

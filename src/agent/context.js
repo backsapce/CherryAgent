@@ -11,6 +11,7 @@ import llm from '../models/llm.js';
 import { buildMemorySection } from './memory.js';
 import { COMMAND_EXECUTION_GUIDANCE } from './commandGuidance.js';
 import { estimateTextTokens } from './tokenEstimate.js';
+import { clampNumber, truncateText } from '../utils/misc.js';
 
 const CONTEXT_WINDOW_FALLBACK = 128_000;
 const PACKING_THRESHOLD_RATIO = 0.72;
@@ -65,19 +66,6 @@ Operating rules:
 - A user message beginning with /<skill-name> explicitly selects that enabled skill. Read it with the skill tool before acting, follow it for this turn, and treat the text after the command as the user's task. If the named skill is unavailable, explain that briefly instead of silently substituting another skill.
 
 ${COMMAND_EXECUTION_GUIDANCE}`;
-
-/**
- * Backward-compatible helper. Returns packed messages and system prompt.
- */
-export async function buildContext(opts) {
-  const result = await assembleApiMessages(opts);
-  return {
-    messages: result.apiMessages,
-    systemPrompt: result.systemPrompt,
-    compressed: result.compressed,
-    summaryState: result.summaryState,
-  };
-}
 
 /**
  * Build provider-safe messages plus the full system prompt.
@@ -388,16 +376,4 @@ export function summaryStateMatchesHistory(summaryState, messages) {
   if (anchorId == null) return true;
   const anchor = messages[coveredUntil - 1];
   return anchor?.id != null && anchor.id === anchorId;
-}
-
-function truncateText(text, maxChars) {
-  const value = String(text || '');
-  if (value.length <= maxChars) return value;
-  return `${value.slice(0, maxChars)}\n[truncated ${value.length - maxChars} chars]`;
-}
-
-function clampNumber(value, min, max) {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed)) return min;
-  return Math.min(Math.max(parsed, min), max);
 }

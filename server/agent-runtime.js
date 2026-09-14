@@ -1,10 +1,24 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import yaml from 'js-yaml';
 import { createLanguageModel } from '../src/models/ai.js';
 import { runAgentLoop } from '../src/agent/loop.js';
 import { buildWakeupMessage, createOrReplaceTurnWakeup, wakeupDelayToSeconds } from '../src/agent/wakeup.js';
+import {
+  MAX_SKILL_CONTENT_CHARS,
+  MAX_SKILL_REFERENCE_CHARS,
+  formatReferenceContent,
+  formatSkills,
+  normalizeReferenceName,
+  normalizeSkillName,
+  parseFrontmatter,
+  safeDirectorySkillName,
+  scoreSkill,
+  truncateText,
+  validateSkillContent,
+} from '../src/agent/skillCore.js';
+import { TOOL_PARAMETER_SCHEMAS, formatCommandResult } from '../src/agent/toolSchemas.js';
+import { imageMimeFromPath, splitFilePath, waitForSettlement } from '../src/utils/misc.js';
 
 const MAX_MESSAGES = 2_000;
 const MAX_EVENT_BYTES = 20 * 1024 * 1024;
@@ -28,8 +42,6 @@ const CANCELLED_RUN_ID_TTL_MS = 10 * 60_000;
 // still become terminal so it cannot lock the conversation forever.
 const RUN_ABORT_WAIT_MS = 3_000;
 const SANDBOX_ATTACHMENTS_MARKER = 'Sandbox attachment files (available to shell commands and sandbox file tools):';
-const MAX_SKILL_CONTENT_CHARS = 60_000;
-const MAX_SKILL_REFERENCE_CHARS = 80_000;
 const MAX_WAKEUP_CONTINUATION_TOOL_CHARS = 4_000;
 const MAX_WAKEUP_CONTINUATION_TOOL_INPUT_CHARS = 700;
 const MAX_WAKEUP_CONTINUATION_TOOL_RESULT_CHARS = 1_600;
@@ -44,159 +56,57 @@ const REMOTE_TOOL_SCHEMAS = [
   {
     name: 'execute_command',
     description: 'Run a SHORT foreground shell command expected to finish within 30 seconds. Use only for quick inspection or bounded operations. NEVER use for training, servers, watchers, long builds, downloads, migrations, or commands with unknown duration; use start_command instead. The browser, browser OPFS, and browser files are unavailable.',
-    parameters: {
-      type: 'object',
-      properties: { command: { type: 'string', description: 'Shell command to execute.' } },
-      required: ['command'],
-      additionalProperties: false,
-    },
+    parameters: TOOL_PARAMETER_SCHEMAS.execute_command,
   },
   {
     name: 'start_command',
     description: 'Start a managed BACKGROUND shell command and return immediately with a job_id. Use for training, servers, watchers, lengthy builds/tests/downloads/migrations, commands of unknown duration, or anything expected to take 30 seconds or more. Do not add nohup, &, disown, screen, tmux, or timeout wrappers.',
-    parameters: {
-      type: 'object',
-      properties: { command: { type: 'string', description: 'Complete foreground-form command without & or nohup.' } },
-      required: ['command'],
-      additionalProperties: false,
-    },
+    parameters: TOOL_PARAMETER_SCHEMAS.start_command,
   },
   {
     name: 'get_command',
     description: 'Return immediately with status and one incremental log segment for a background job. Pass nextCursor from the previous result as cursor.',
-    parameters: {
-      type: 'object',
-      properties: {
-        job_id: { type: 'string' },
-        cursor: { type: 'integer', minimum: 0 },
-      },
-      required: ['job_id'],
-      additionalProperties: false,
-    },
+    parameters: TOOL_PARAMETER_SCHEMAS.get_command,
   },
   {
     name: 'wait_command',
     description: 'Wait at most 30 seconds for new logs or completion of a background job. Use only when completion is likely soon. For minutes or hours, use schedule_wakeup instead of repeated waits.',
-    parameters: {
-      type: 'object',
-      properties: {
-        job_id: { type: 'string' },
-        cursor: { type: 'integer', minimum: 0 },
-        wait_seconds: { type: 'integer', minimum: 1, maximum: 30 },
-      },
-      required: ['job_id'],
-      additionalProperties: false,
-    },
+    parameters: TOOL_PARAMETER_SCHEMAS.wait_command,
   },
   {
     name: 'stop_command',
     description: 'Stop a managed background job and its entire process tree. Use only when cancellation was requested or the job is no longer useful.',
-    parameters: {
-      type: 'object',
-      properties: { job_id: { type: 'string' } },
-      required: ['job_id'],
-      additionalProperties: false,
-    },
+    parameters: TOOL_PARAMETER_SCHEMAS.stop_command,
   },
   {
     name: 'list_sandbox_files',
     description: 'List files in the sandbox runtime. Browser files are not available.',
-    parameters: {
-      type: 'object',
-      properties: { path: { type: 'string', description: 'Directory relative to the sandbox workspace.' } },
-      additionalProperties: false,
-    },
+    parameters: TOOL_PARAMETER_SCHEMAS.list_sandbox_files,
   },
   {
     name: 'read_sandbox_file',
     description: 'Read a UTF-8 text file from the sandbox runtime.',
-    parameters: {
-      type: 'object',
-      properties: { path: { type: 'string' } },
-      required: ['path'],
-      additionalProperties: false,
-    },
+    parameters: TOOL_PARAMETER_SCHEMAS.read_sandbox_file,
   },
   {
     name: 'display_sandbox_image',
     description: 'Display an image from the sandbox runtime in the browser conversation UI. Returns only a file reference; image bytes and base64 are never included in the conversation.',
-    parameters: {
-      type: 'object',
-      properties: {
-        path: { type: 'string', description: 'Image path relative to the sandbox workspace.' },
-        alt: { type: 'string', description: 'Short accessible description of the image.' },
-      },
-      required: ['path'],
-      additionalProperties: false,
-    },
+    parameters: TOOL_PARAMETER_SCHEMAS.display_sandbox_image,
   },
   {
     name: 'write_sandbox_file',
     description: 'Write a UTF-8 text file in the sandbox runtime.',
-    parameters: {
-      type: 'object',
-      properties: { path: { type: 'string' }, content: { type: 'string' } },
-      required: ['path', 'content'],
-      additionalProperties: false,
-    },
+    parameters: TOOL_PARAMETER_SCHEMAS.write_sandbox_file,
   },
   {
     name: 'skill',
     description: 'List, read, and write progressive skills only in this sandbox runtime under skills/<skill-name>/. This tool never reads from or writes to browser OPFS. Read references individually only when needed.',
-    parameters: {
-      type: 'object',
-      properties: {
-        action: {
-          type: 'string',
-          enum: ['list', 'read', 'write'],
-          description: 'Skill operation.',
-        },
-        name: {
-          type: 'string',
-          description: 'Skill name for read or write.',
-        },
-        query: {
-          type: 'string',
-          description: 'Optional search query for list.',
-        },
-        reference_name: {
-          type: 'string',
-          description: 'For read or write, target one reference file instead of SKILL.md.',
-        },
-        content: {
-          type: 'string',
-          description: 'Full SKILL.md or reference content for write.',
-        },
-      },
-      required: ['action'],
-      additionalProperties: false,
-    },
+    parameters: TOOL_PARAMETER_SCHEMAS.skill,
   },
   {
     name: 'schedule_wakeup',
     description: 'Schedule one future continuation of this sandbox agent run. Express the delay in its natural unit; do not convert minutes or hours to seconds (for example, 10 minutes is delay=10 and unit="minutes"). Use this instead of blocking or repeatedly polling. The agent server waits without using LLM tokens, then continues with the saved prompt. If the task is still pending after waking, schedule another wake-up.',
-    parameters: {
-      type: 'object',
-      properties: {
-        delay: {
-          type: 'integer',
-          minimum: 1,
-          maximum: 604800,
-          description: 'How many of the selected units to wait. The resulting delay must be from 5 seconds through 7 days.',
-        },
-        unit: {
-          type: 'string',
-          enum: ['seconds', 'minutes', 'hours', 'days'],
-          description: 'Unit for delay. Use the unit stated by the user instead of converting it yourself.',
-        },
-        prompt: {
-          type: 'string',
-          description: 'A self-contained instruction describing what to inspect or continue after waking.',
-        },
-      },
-      required: ['delay', 'unit', 'prompt'],
-      additionalProperties: false,
-    },
+    parameters: TOOL_PARAMETER_SCHEMAS.schedule_wakeup,
   },
 ];
 
@@ -622,18 +532,6 @@ export function createAgentRunManager({
   };
 }
 
-async function waitForSettlement(promise, timeoutMs) {
-  let timerId;
-  const settled = await Promise.race([
-    Promise.resolve(promise).then(() => true, () => true),
-    new Promise((resolve) => {
-      timerId = setTimeout(() => resolve(false), Math.max(0, Number(timeoutMs) || 0));
-    }),
-  ]);
-  clearTimeout(timerId);
-  return settled;
-}
-
 function createActivityWatchdog(timeoutMs, onTimeout) {
   const boundedTimeoutMs = Number(timeoutMs);
   if (!Number.isFinite(boundedTimeoutMs) || boundedTimeoutMs <= 0) {
@@ -987,12 +885,12 @@ export function createRuntimeToolDispatcher({
     if (name === 'list_sandbox_files') return JSON.stringify(await listFiles(input.path || ''), null, 2);
     if (name === 'read_sandbox_file') return readFile(input.path);
     if (name === 'display_sandbox_image') {
-      const { parent, filename } = splitFilePath(input.path);
+      const { parent, name: filename } = splitFilePath(input.path);
       const listing = await listFiles(parent);
       const entries = Array.isArray(listing) ? listing : listing?.children;
       const entry = entries?.find((item) => item.name === filename);
       if (!entry || entry.type === 'directory') return `Sandbox image not found: ${input.path}`;
-      const mimeType = inferImageMime(input.path);
+      const mimeType = imageMimeFromPath(input.path);
       if (!mimeType) return `Unsupported image type: ${input.path}`;
       return JSON.stringify({
         kind: 'image_reference',
@@ -1033,38 +931,38 @@ export function createRuntimeToolDispatcher({
 async function dispatchSandboxSkill(input, fileApi) {
   try {
     if (input.action === 'list') {
-      return formatSandboxSkills(await searchSandboxSkills(input.query || '', fileApi));
+      return formatSkills(await searchSandboxSkills(input.query || '', fileApi));
     }
 
     if (input.action === 'read') {
       if (!input.name) return 'Skill error: name is required for read.';
-      const skillName = normalizeSandboxSkillName(input.name);
+      const skillName = normalizeSkillName(input.name);
       if (input.reference_name) {
-        const referenceName = normalizeSandboxReferenceName(input.reference_name);
+        const referenceName = normalizeReferenceName(input.reference_name);
         const content = await readSandboxText(
           fileApi.readFile,
           `skills/${skillName}/references/${referenceName}`
         );
         return content == null
           ? `Skill or reference not found: ${skillName}/${referenceName}`
-          : formatSandboxReference(skillName, referenceName, content);
+          : formatReferenceContent(skillName, referenceName, content);
       }
 
       const content = await readSandboxText(fileApi.readFile, `skills/${skillName}/SKILL.md`);
       if (content == null) return `Skill or reference not found: ${skillName}`;
       const refs = await listSandboxSkillReferences(skillName, fileApi.listFiles);
       return refs.length
-        ? `${truncateSandboxText(content, MAX_SKILL_CONTENT_CHARS)}\n\n## Available References\n${refs.map((ref) => `- ${ref.name}`).join('\n')}`
-        : truncateSandboxText(content, MAX_SKILL_CONTENT_CHARS);
+        ? `${truncateText(content, MAX_SKILL_CONTENT_CHARS)}\n\n## Available References\n${refs.map((ref) => `- ${ref.name}`).join('\n')}`
+        : truncateText(content, MAX_SKILL_CONTENT_CHARS);
     }
 
     if (input.action === 'write') {
       if (!input.name) return 'Skill error: name is required for write.';
       if (!input.content?.trim()) return 'Skill error: content is required for write.';
-      const skillName = normalizeSandboxSkillName(input.name);
+      const skillName = normalizeSkillName(input.name);
 
       if (input.reference_name) {
-        const referenceName = normalizeSandboxReferenceName(input.reference_name);
+        const referenceName = normalizeReferenceName(input.reference_name);
         const existing = await readSandboxText(fileApi.readFile, `skills/${skillName}/SKILL.md`);
         if (existing == null) {
           return `Skill error: Skill "${skillName}" does not exist. Write SKILL.md before writing references.`;
@@ -1077,7 +975,7 @@ async function dispatchSandboxSkill(input, fileApi) {
         return `Successfully wrote sandbox skill reference ${skillName}/${referenceName}.`;
       }
 
-      validateSandboxSkillContent(skillName, input.content);
+      validateSkillContent(skillName, input.content);
       await fileApi.writeFile(`skills/${skillName}/SKILL.md`, String(input.content));
       return `Successfully wrote sandbox skill ${skillName}.`;
     }
@@ -1093,7 +991,7 @@ async function searchSandboxSkills(query, { listFiles, readFile }) {
   const terms = String(query || '').toLowerCase().split(/\s+/).filter(Boolean);
   if (!terms.length) return skills;
   return skills
-    .map((skill) => ({ skill, score: scoreSandboxSkill(skill, terms) }))
+    .map((skill) => ({ skill, score: scoreSkill(skill, terms) }))
     .filter((item) => item.score > 0)
     .sort((a, b) => b.score - a.score || a.skill.name.localeCompare(b.skill.name))
     .map((item) => item.skill);
@@ -1110,14 +1008,14 @@ async function listSandboxSkills({ listFiles, readFile }) {
   const skills = [];
   for (const entry of entries) {
     if (entry.type !== 'directory') continue;
-    const skillName = safeSandboxSkillDirectoryName(entry.name);
+    const skillName = safeDirectorySkillName(entry.name);
     if (!skillName) continue;
     const content = await readSandboxText(readFile, `skills/${skillName}/SKILL.md`);
     if (!content) continue;
-    const meta = parseSandboxSkillFrontmatter(content);
+    const meta = parseFrontmatter(content);
     const references = await listSandboxSkillReferences(skillName, listFiles);
     skills.push({
-      name: normalizeSandboxSkillName(meta.name || skillName),
+      name: normalizeSkillName(meta.name || skillName),
       description: String(meta.description || 'No description provided').trim(),
       version: String(meta.version || '1.0.0').trim(),
       source: 'sandbox',
@@ -1149,127 +1047,6 @@ async function readSandboxText(readFile, path) {
   } catch {
     return null;
   }
-}
-
-function safeSandboxSkillDirectoryName(name) {
-  try {
-    const normalized = normalizeSandboxSkillName(name);
-    return normalized === name ? normalized : null;
-  } catch {
-    return null;
-  }
-}
-
-function normalizeSandboxSkillName(name) {
-  const normalized = String(name || '')
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-  if (!normalized) throw new Error('Skill name is required.');
-  return normalized.slice(0, 80);
-}
-
-function normalizeSandboxReferenceName(name) {
-  const normalized = String(name || '')
-    .trim()
-    .replace(/\\/g, '/')
-    .split('/')
-    .filter(Boolean)
-    .join('/');
-  if (!normalized || normalized.includes('..')) throw new Error('Reference name is invalid.');
-  return normalized.slice(0, 160);
-}
-
-function parseSandboxSkillFrontmatter(content) {
-  const match = String(content || '').match(/^---\s*\n([\s\S]*?)\n---/);
-  if (!match) return {};
-  try {
-    const parsed = yaml.load(match[1]);
-    return parsed && typeof parsed === 'object' ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-function validateSandboxSkillContent(name, content) {
-  const text = String(content || '').trim();
-  if (!text) throw new Error('Skill content is required.');
-  if (text.length > MAX_SKILL_CONTENT_CHARS) {
-    throw new Error(`Skill content is too large (${text.length}/${MAX_SKILL_CONTENT_CHARS} chars). Move details into references.`);
-  }
-  const meta = parseSandboxSkillFrontmatter(text);
-  if (!meta.name || !meta.description) {
-    throw new Error('Skill content must include YAML frontmatter with name and description.');
-  }
-  if (normalizeSandboxSkillName(meta.name) !== name) {
-    throw new Error(`Skill frontmatter name "${meta.name}" must match "${name}".`);
-  }
-}
-
-function scoreSandboxSkill(skill, terms) {
-  const haystack = `${skill.name} ${skill.description} ${skill.references.map((ref) => ref.name).join(' ')}`.toLowerCase();
-  let score = 0;
-  for (const term of terms) {
-    if (skill.name.toLowerCase() === term) score += 8;
-    if (skill.name.toLowerCase().includes(term)) score += 4;
-    if (haystack.includes(term)) score += 1;
-  }
-  return score;
-}
-
-function formatSandboxSkills(skills) {
-  if (!skills.length) return 'No skills found.';
-  return skills
-    .map((skill) => {
-      const refs = skill.references.length
-        ? ` refs=[${skill.references.map((ref) => ref.name).join(', ')}]`
-        : '';
-      return `- ${skill.name} (${skill.source}, v${skill.version}): ${skill.description}${refs}`;
-    })
-    .join('\n');
-}
-
-function formatSandboxReference(skillName, referenceName, content) {
-  return [
-    `# Reference: ${skillName}/${referenceName}`,
-    '',
-    truncateSandboxText(content, MAX_SKILL_REFERENCE_CHARS),
-  ].join('\n');
-}
-
-function truncateSandboxText(content, maxChars) {
-  const value = String(content || '');
-  if (value.length <= maxChars) return value;
-  return `${value.slice(0, maxChars)}\n\n[truncated at ${maxChars} characters]`;
-}
-
-function splitFilePath(path) {
-  const parts = String(path || '').replace(/\\/g, '/').split('/').filter(Boolean);
-  const filename = parts.pop() || '';
-  return { parent: parts.join('/'), filename };
-}
-
-function inferImageMime(path) {
-  const extension = String(path || '').split('.').pop()?.toLowerCase();
-  if (extension === 'png') return 'image/png';
-  if (extension === 'jpg' || extension === 'jpeg') return 'image/jpeg';
-  if (extension === 'webp') return 'image/webp';
-  if (extension === 'gif') return 'image/gif';
-  if (extension === 'svg') return 'image/svg+xml';
-  if (extension === 'bmp') return 'image/bmp';
-  return '';
-}
-
-function formatCommandResult(result) {
-  let output = `Exit code: ${result.code}`;
-  if (result.status) output += `\nStatus: ${result.status}${Number.isFinite(result.durationMs) ? ` (${result.durationMs} ms)` : ''}`;
-  if (result.platform || result.shell || result.cwd || result.filesRoot) {
-    output += `\nEnvironment: platform=${result.platform || 'unknown'}, shell=${result.shell || 'unknown'}, cwd=${result.cwd || 'unknown'}, filesRoot=${result.filesRoot || 'unknown'}`;
-  }
-  if (result.stdout) output += `\nStdout:\n${result.stdout}`;
-  if (result.stderr) output += `\nStderr:\n${result.stderr}`;
-  return output;
 }
 
 function validateRunInput(input) {

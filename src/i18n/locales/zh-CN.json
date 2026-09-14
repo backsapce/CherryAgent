@@ -1,17 +1,14 @@
 {
   "app": {
-    "loading": "加载中...",
     "name": "CherryAgent",
     "tagline": "完全在浏览器中运行的 AI 助手",
     "sendHint": "发送消息开始会话",
-    "newSession": "新会话",
     "image": "[图片]"
   },
   "session": {
     "newSession": "新会话",
     "deleteSession": "删除会话",
     "exportDebug": "导出聊天调试",
-    "wakeupScheduled": "已安排唤醒",
     "cancelWakeup": "取消已安排的唤醒",
     "noMessages": "暂无消息",
     "noConversations": "暂无会话",
@@ -35,6 +32,7 @@
     "aborted": "已中止",
     "exitCode": "退出码 {code}",
     "remove": "移除",
+    "retry": "重试",
     "uploadImage": "上传图片",
     "dropImage": "拖放图片到此处添加",
     "edit": "编辑",
@@ -53,7 +51,6 @@
     "skillLoadFailed": "无法加载技能",
     "agentSkill": "代理",
     "globalSkill": "全局",
-    "sandbox": "沙箱",
     "noSandboxSelected": "未选择沙箱",
     "noProviderConfigured": "未配置服务商",
     "uploaded": "已上传"
@@ -63,7 +60,6 @@
     "llm": "LLM 设置",
     "general": "通用",
     "sandboxes": "沙箱",
-    "e2b": "E2B 云端",
     "appearance": "外观",
     "data": "数据",
     "sync": "同步",
@@ -125,13 +121,8 @@
     "providerUsageCount": "已有 {count} 个 LLM 使用",
     "saveLlm": "保存 LLM",
     "saveProvider": "保存服务商",
-    "noProviders": "尚未配置服务商。",
     "providerFirst": "请先添加并保存服务商，再创建 LLM。",
     "profile": "LLM 配置",
-    "profileName": "配置名称",
-    "profileNamePlaceholder": "工作 GPT-4.1、本地 Qwen...",
-    "addProfile": "添加配置",
-    "deleteProfile": "删除配置",
     "provider": "服务商",
     "selectProvider": "选择服务商...",
     "apiKey": "API 密钥",
@@ -142,8 +133,6 @@
     "modelPlaceholder": "输入或选择模型",
     "modelsLoading": "加载中...",
     "modelsError": "加载模型失败：{error}",
-    "defaultModel": "默认（{model}）",
-    "refreshModels": "刷新模型列表",
     "modelsHint": "模型列表使用所选服务商的凭据加载，也可以手动输入模型 ID。",
     "contextWindow": "上下文窗口",
     "contextWindowPlaceholder": "从 models.dev 获取",
@@ -176,9 +165,6 @@
     "insecureUrl": "非加密的 http:// agent 地址仅允许 localhost。请使用 https:// 地址——agent 请求会携带认证令牌。"
   },
   "e2bSettings": {
-    "title": "E2B 云端沙箱",
-    "desc": "在 E2B 提供的隔离云沙箱中运行命令。只需输入 API 密钥即可自动创建沙箱。",
-    "apiKey": "E2B API 密钥",
     "apiKeyPlaceholder": "输入 E2B API 密钥...",
     "enable": "启用",
     "starting": "启动中...",
@@ -288,11 +274,7 @@
     "title": "技能",
     "desc": "启用或禁用默认技能。禁用的技能不会出现在系统提示中。",
     "empty": "没有可用的技能。技能从 OPFS 技能目录加载。",
-    "enableSkill": "启用技能",
-    "disableSkill": "禁用技能",
     "version": "版本",
-    "enabled": "已启用",
-    "disabled": "已禁用",
     "enableAll": "全部启用",
     "disableAll": "全部禁用"
   },
@@ -300,8 +282,6 @@
     "title": "工具",
     "desc": "启用或禁用代理工具。禁用的工具不会发送给模型，也无法执行。",
     "empty": "没有可用的工具。",
-    "enabled": "已启用",
-    "disabled": "已禁用",
     "enableAll": "全部启用",
     "disableAll": "全部禁用"
   },
@@ -312,7 +292,6 @@
     "addAgent": "添加代理",
     "removeAgent": "移除代理",
     "created": "创建于",
-    "rename": "点击名称重命名",
     "defaultLlm": "默认 LLM",
     "firstConfiguredLlm": "第一个已配置的 LLM",
     "runtime": "Agent 运行时",
@@ -323,16 +302,7 @@
     "sandbox": "沙箱",
     "noSandbox": "不使用沙箱"
   },
-  "errors": {
-    "noLLMConfigured": "请在设置中配置 LLM 服务商。",
-    "noLLMConfiguredDetail": "尚未配置 LLM 服务商。请打开设置（齿轮图标）添加 API 密钥并选择服务商。",
-    "noLLMProvider": "未配置 LLM 服务商。请在设置中配置。",
-    "apiKeyNotSet": "未设置 {provider} 的 API 密钥。请在设置中添加。",
-    "unknownProvider": "未知服务商：{provider}",
-    "serverNoToken": "服务器未返回令牌。",
-    "sandboxReturned": "沙箱返回 {status}",
-    "sandboxRequestFailed": "沙箱请求失败"
-  },
+  "errors": {},
   "offline": {
     "banner": "离线模式 — 使用缓存运行"
   },
@@ -343,7 +313,6 @@
     "uploadFolder": "上传文件夹",
     "uploading": "上传中...",
     "download": "下载",
-    "downloading": "下载中...",
     "delete": "删除",
     "deleting": "删除中...",
     "deleteSelected": "删除已选项",
@@ -377,10 +346,6 @@
     "loadLocalError": "加载本地文件失败",
     "loadRemoteError": "加载远程文件失败。请确保代理服务器正在运行并已连接。",
     "remoteEmpty": "远程工作区中没有文件",
-    "e2bEmpty": "E2B 沙盒根目录中没有文件",
-    "remoteHint": "文件显示自代理工作区根目录。",
-    "loadE2bError": "加载 E2B 沙盒文件失败。请确保 E2B API 密钥有效且沙盒正在运行。",
-    "remoteOperationNotSupported": "此操作不支持远程文件",
     "edit": "编辑",
     "preview": "预览图片",
     "loadingPreview": "正在加载图片...",
@@ -397,12 +362,7 @@
     "unsavedChanges": "未保存的更改",
     "saved": "已保存",
     "saveHint": "Ctrl+S 保存",
-    "confirmDiscardChanges": "您有未保存的更改。确定要放弃它们吗？",
-    "uploadTarget": "上传到",
-    "clearSelection": "清除选择",
-    "defaultLocalTarget": "files 目录",
-    "defaultRemoteTarget": "远程工作目录",
-    "selectedHint": "已选择：{name}"
+    "confirmDiscardChanges": "您有未保存的更改。确定要放弃它们吗？"
   },
   "permissions": {
     "title": "需要确认",

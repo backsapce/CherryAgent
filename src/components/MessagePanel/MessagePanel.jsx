@@ -24,6 +24,7 @@ import {
 } from './sessionScrollRestore';
 import { getScheduleWakeupRunAtMs } from './toolWakeupCountdown';
 import { stripLegacyContextFileSummary } from '../../contextFiles';
+import { formatBytes, imageMimeFromPath } from '../../utils/misc.js';
 import { hasRenderableTranscript } from './transcriptVisibility';
 import { resolveThinkingElapsed, timestampOf } from './thinkingElapsed';
 import { formatWakeupCountdown } from '../SessionList/wakeupCountdown';
@@ -183,13 +184,6 @@ function getMentionRange(value, caret) {
   const query = value.slice(start + 1, caret);
   if (/\s/.test(query)) return null;
   return { start, end: caret, query };
-}
-
-function formatBytes(bytes) {
-  if (!Number.isFinite(bytes)) return '';
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function isImageGenerationToolName(name) {
@@ -598,17 +592,6 @@ function parseImageReference(toolCall) {
   } catch {
     return null;
   }
-}
-
-function imageMimeFromPath(path) {
-  const extension = String(path || '').split('.').pop()?.toLowerCase();
-  if (extension === 'png') return 'image/png';
-  if (extension === 'jpg' || extension === 'jpeg') return 'image/jpeg';
-  if (extension === 'webp') return 'image/webp';
-  if (extension === 'gif') return 'image/gif';
-  if (extension === 'svg') return 'image/svg+xml';
-  if (extension === 'bmp') return 'image/bmp';
-  return '';
 }
 
 const ToolImageReference = ({ reference, agentId, sandboxUrl }) => {

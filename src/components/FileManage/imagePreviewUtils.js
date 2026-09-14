@@ -1,18 +1,7 @@
-const IMAGE_MIME_TYPES = {
-  avif: 'image/avif',
-  bmp: 'image/bmp',
-  gif: 'image/gif',
-  ico: 'image/x-icon',
-  jpeg: 'image/jpeg',
-  jpg: 'image/jpeg',
-  png: 'image/png',
-  svg: 'image/svg+xml',
-  webp: 'image/webp',
-};
+import { imageMimeFromPath } from '../../utils/misc.js';
 
 export function imageMimeFromFileName(fileName = '') {
-  const extension = String(fileName).split('.').pop()?.toLowerCase();
-  return IMAGE_MIME_TYPES[extension] || '';
+  return imageMimeFromPath(fileName);
 }
 
 export function isImageFile(fileName = '') {

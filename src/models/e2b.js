@@ -307,13 +307,6 @@ export async function initE2b() {
 }
 
 /**
- * Cleanup: close sandbox on app unload.
- */
-export function cleanupE2b() {
-  stopSandbox().catch(() => {});
-}
-
-/**
  * Enable E2B from Settings: save API key and start sandbox.
  * @returns {Promise<{ connected: boolean, error?: string }>}
  */

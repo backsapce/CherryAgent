@@ -7,7 +7,7 @@
  */
 
 import config from '../config/config.js';
-import { initE2b, cleanupE2b, getSandboxStatus, executeInSandbox, stopSandbox, enableE2b, listE2bFiles, createE2bFile, createE2bDir, deleteE2bFile, moveE2bFile, uploadE2bFile, downloadE2bFile, readE2bFileText, writeE2bFileText } from './e2b.js';
+import { initE2b, getSandboxStatus, executeInSandbox, stopSandbox, enableE2b, listE2bFiles, createE2bFile, createE2bDir, deleteE2bFile, moveE2bFile, uploadE2bFile, downloadE2bFile, readE2bFileText, writeE2bFileText } from './e2b.js';
 
 const E2B_AGENT_ID = '__e2b__';
 // Protocol 3 guarantees bounded startup/model requests and immutable forced
@@ -218,9 +218,18 @@ export async function saveAgentToken(url, token) {
   await config.set(tokenKey(url), token);
 }
 
-/** Clear the saved token for a given agent URL. */
-export async function clearAgentToken(url) {
-  await config.set(tokenKey(url), null);
+/** Base headers plus the saved bearer token for an agent URL. */
+function agentHeaders(url, base = {}) {
+  const headers = { ...base };
+  const token = getAgentToken(url);
+  if (token) headers.Authorization = `Bearer ${token}`;
+  return headers;
+}
+
+/** Normalize a non-2xx agent response into an Error with the server's message. */
+async function agentResponseError(res) {
+  const err = await res.json().catch(() => ({ error: 'Agent request failed' }));
+  return new Error(err.error || `Agent returned ${res.status}`);
 }
 
 /**
@@ -233,9 +242,7 @@ export async function clearAgentToken(url) {
 export async function checkAgentAvailable(url, options = {}) {
   try {
     const endpoint = resolveAgentUrl(url);
-    const headers = {};
-    const token = getAgentToken(url);
-    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const headers = agentHeaders(url);
 
     return await withRequestDeadline(
       'Agent health check',
@@ -311,9 +318,7 @@ export async function executeCommand(cmd, url, opts = {}) {
   }
 
   const endpoint = resolveAgentUrl(url);
-  const headers = { 'Content-Type': 'application/json' };
-  const token = getAgentToken(url);
-  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const headers = agentHeaders(url, { 'Content-Type': 'application/json' });
 
   const res = await fetch(endpoint, {
     method: 'POST',
@@ -321,10 +326,7 @@ export async function executeCommand(cmd, url, opts = {}) {
     body: JSON.stringify({ cmd }),
     ...(opts.signal ? { signal: opts.signal } : {}),
   });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: 'Agent request failed' }));
-    throw new Error(err.error || `Agent returned ${res.status}`);
-  }
+  if (!res.ok) throw await agentResponseError(res);
   return res.json();
 }
 
@@ -336,9 +338,7 @@ function assertRemoteAgentRuntime(url) {
 
 async function assertAgentRunProtocol(url, controls) {
   const endpoint = resolveAgentUrl(url);
-  const headers = {};
-  const token = getAgentToken(url);
-  if (token) headers.Authorization = `Bearer ${token}`;
+  const headers = agentHeaders(url);
   try {
     await withRequestDeadline('Agent runtime health check', controls, async (signal) => {
       const res = await fetch(endpoint, {
@@ -379,9 +379,7 @@ export function assertRemoteAgentRunProtocol(url, signalOrOptions) {
 async function requestAgentRun(url, path = '', options = {}) {
   assertRemoteAgentRuntime(url);
   const endpoint = `${resolveAgentUrl(url)}/runs${path}`;
-  const headers = { ...(options.body ? { 'Content-Type': 'application/json' } : {}) };
-  const token = getAgentToken(url);
-  if (token) headers.Authorization = `Bearer ${token}`;
+  const headers = agentHeaders(url, options.body ? { 'Content-Type': 'application/json' } : {});
   const method = options.method || 'GET';
   const controls = requestControls(options, AGENT_RUN_REQUEST_TIMEOUT_MS);
   const requestOptions = {
@@ -481,9 +479,7 @@ function assertManagedCommandRuntime(url) {
 async function requestManagedCommand(url, path = '', options = {}) {
   assertManagedCommandRuntime(url);
   const endpoint = `${resolveAgentUrl(url)}/commands${path}`;
-  const headers = { ...(options.body ? { 'Content-Type': 'application/json' } : {}) };
-  const token = getAgentToken(url);
-  if (token) headers.Authorization = `Bearer ${token}`;
+  const headers = agentHeaders(url, options.body ? { 'Content-Type': 'application/json' } : {});
   const res = await fetch(endpoint, { ...options, headers: { ...headers, ...options.headers } });
   const data = await res.json().catch(() => ({ error: 'Invalid background command response' }));
   if (!res.ok) throw new Error(data.error || `Background command returned ${res.status}`);
@@ -630,19 +626,14 @@ export async function listRemoteFiles(path = '', url, options = {}) {
   if (options.includeHidden) searchParams.set('includeHidden', 'true');
   const query = searchParams.toString();
   const filesUrl = `${base}/files${query ? `?${query}` : ''}`;
-  const headers = {};
-  const token = getAgentToken(url);
-  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const headers = agentHeaders(url);
 
   return withRequestDeadline(
     `Agent file listing ${path || '/'}`,
     requestControls(options, FILE_REQUEST_TIMEOUT_MS),
     async (signal) => {
       const res = await fetch(filesUrl, { method: 'GET', headers, signal });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: 'Agent request failed' }));
-        throw new Error(err.error || `Agent returned ${res.status}`);
-      }
+      if (!res.ok) throw await agentResponseError(res);
       return res.json();
     }
   );
@@ -659,19 +650,14 @@ export async function listRemoteFiles(path = '', url, options = {}) {
 export async function createRemoteFile(path, content = '', isDirectory = false, url) {
   const base = resolveAgentUrl(url);
   const filesUrl = `${base}/files`;
-  const headers = { 'Content-Type': 'application/json' };
-  const token = getAgentToken(url);
-  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const headers = agentHeaders(url, { 'Content-Type': 'application/json' });
 
   const res = await fetch(filesUrl, {
     method: 'POST',
     headers,
     body: JSON.stringify({ path, content, isDirectory }),
   });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: 'Agent request failed' }));
-    throw new Error(err.error || `Agent returned ${res.status}`);
-  }
+  if (!res.ok) throw await agentResponseError(res);
   return res.json();
 }
 
@@ -684,15 +670,10 @@ export async function createRemoteFile(path, content = '', isDirectory = false, 
 export async function deleteRemoteFile(path, url) {
   const base = resolveAgentUrl(url);
   const filesUrl = `${base}/files?path=${encodeURIComponent(path)}`;
-  const headers = {};
-  const token = getAgentToken(url);
-  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const headers = agentHeaders(url);
 
   const res = await fetch(filesUrl, { method: 'DELETE', headers });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: 'Agent request failed' }));
-    throw new Error(err.error || `Agent returned ${res.status}`);
-  }
+  if (!res.ok) throw await agentResponseError(res);
   return res.json();
 }
 
@@ -706,19 +687,14 @@ export async function deleteRemoteFile(path, url) {
 export async function moveRemoteFile(sourcePath, targetPath, url) {
   const base = resolveAgentUrl(url);
   const filesUrl = `${base}/files`;
-  const headers = { 'Content-Type': 'application/json' };
-  const token = getAgentToken(url);
-  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const headers = agentHeaders(url, { 'Content-Type': 'application/json' });
 
   const res = await fetch(filesUrl, {
     method: 'PATCH',
     headers,
     body: JSON.stringify({ sourcePath, targetPath }),
   });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: 'Agent request failed' }));
-    throw new Error(err.error || `Agent returned ${res.status}`);
-  }
+  if (!res.ok) throw await agentResponseError(res);
   return res.json();
 }
 
@@ -738,19 +714,14 @@ export async function uploadRemoteFile(path, file, url) {
   formData.append('path', path);
   formData.append('file', file);
 
-  const headers = {};
-  const token = getAgentToken(url);
-  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const headers = agentHeaders(url);
 
   const res = await fetch(uploadUrl, {
     method: 'POST',
     headers,
     body: formData,
   });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: 'Agent request failed' }));
-    throw new Error(err.error || `Agent returned ${res.status}`);
-  }
+  if (!res.ok) throw await agentResponseError(res);
   return res.json();
 }
 
@@ -764,19 +735,14 @@ export async function uploadRemoteFile(path, file, url) {
 export async function downloadRemoteFile(path, url, options = {}) {
   const base = resolveAgentUrl(url);
   const downloadUrl = `${base}/files/download?path=${encodeURIComponent(path)}`;
-  const headers = {};
-  const token = getAgentToken(url);
-  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const headers = agentHeaders(url);
 
   return withRequestDeadline(
     `Agent file download ${path}`,
     requestControls(options, FILE_REQUEST_TIMEOUT_MS),
     async (signal) => {
       const res = await fetch(downloadUrl, { method: 'GET', headers, signal });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: 'Agent request failed' }));
-        throw new Error(err.error || `Agent returned ${res.status}`);
-      }
+      if (!res.ok) throw await agentResponseError(res);
       return res.blob();
     }
   );
@@ -985,6 +951,6 @@ export async function initAgents() {
 }
 
 // Re-export E2B functions for use in App.jsx and Settings
-export { cleanupE2b, getSandboxStatus, stopSandbox as stopE2bSandbox, enableE2b };
+export { getSandboxStatus, stopSandbox as stopE2bSandbox, enableE2b };
 export { E2B_AGENT_ID };
 export { listE2bFiles, createE2bFile, createE2bDir, deleteE2bFile, uploadE2bFile, downloadE2bFile, readE2bFileText, writeE2bFileText };

@@ -38,17 +38,24 @@ function getToolObservationMaxChars(contextWindow, toolName) {
   );
 }
 
-function truncateMiddle(text, maxChars) {
+/**
+ * Two-pass middle truncation shared with the tool registry. Without `label`
+ * the marker is the observation style; with it, `label` prefixes the
+ * omitted-chars count (tool-result style).
+ */
+export function truncateMiddle(text, maxChars, label = null) {
   const value = String(text || '');
   if (value.length <= maxChars) return value;
 
-  let marker = '\n[... truncated middle ...]\n';
+  let marker = label ? `\n[${label}]\n` : '\n[... truncated middle ...]\n';
   let available = Math.max(1, maxChars - marker.length);
   let headChars = Math.ceil(available * TOOL_OBSERVATION_HEAD_RATIO);
   let tailChars = Math.max(0, available - headChars);
   let omitted = Math.max(0, value.length - headChars - tailChars);
 
-  marker = `\n[... omitted ${omitted} chars from middle ...]\n`;
+  marker = label
+    ? `\n[${label}: ${omitted} chars omitted from middle]\n`
+    : `\n[... omitted ${omitted} chars from middle ...]\n`;
   available = Math.max(1, maxChars - marker.length);
   headChars = Math.ceil(available * TOOL_OBSERVATION_HEAD_RATIO);
   tailChars = Math.max(0, available - headChars);

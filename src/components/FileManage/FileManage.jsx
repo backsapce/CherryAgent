@@ -10,6 +10,7 @@ import {
 } from '../../config/fileVisibility';
 import { suspendAutoSync, waitForSyncIdle } from '../../sync/syncManager';
 import { enqueueStorageOperation } from '../Settings/storageOperationQueue';
+import { downloadBlobFile } from '../../utils/misc.js';
 import { ChevronRight, ChevronDown, Folder, File, FilePlus, FolderPlus, Refresh, X, Upload, Cloud, HardDrive, Trash, Download, Eye, FileEdit, Spinner, MultiSelect } from '../Icons/Icons';
 import FileEditor from './FileEditor';
 import ImagePreview from '../ImagePreview/ImagePreview';
@@ -30,17 +31,6 @@ function getTreeItemPath(parentDir, name) {
 
 function getTreeItemKey(type, parentDir, name) {
   return `${type}:${getTreeItemPath(parentDir, name)}`;
-}
-
-function triggerDownload(blob, fileName) {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = fileName;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
 }
 
 const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandboxUrl, agents, activeAgentId }) => {
@@ -412,7 +402,7 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandb
   const handleDownloadFile = useCallback(async (fileName, filePath) => {
     try {
       const blob = await fileOps.download(fileName, filePath);
-      triggerDownload(blob, fileName);
+      downloadBlobFile(fileName, blob);
     } catch { alert(t('filemanage.downloadFileError')); }
   }, [t, fileOps]);
 

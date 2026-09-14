@@ -6,6 +6,7 @@ import {
   S3Client,
 } from '@aws-sdk/client-s3';
 import { validateProviderConfig } from './providerPresets.js';
+import { randomId } from '../utils/misc.js';
 
 const DEFAULT_MAX_ATTEMPTS = 3;
 const MAX_MAX_ATTEMPTS = 5;
@@ -524,9 +525,7 @@ function putResult(response = {}) {
 }
 
 function defaultProbeKey(config) {
-  const nonce = globalThis.crypto?.randomUUID?.()
-    || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-  return objectKey(config, `.sync/connection-probe-${nonce}`);
+  return objectKey(config, `.sync/connection-probe-${randomId()}`);
 }
 
 function bytesEqual(left, right) {

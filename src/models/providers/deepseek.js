@@ -1,5 +1,3 @@
-import { formatMultimodal, formatOpenAITools, readSSE } from './shared.js';
-
 /**
  * DeepSeek OpenAI-compatible provider.
  * Official base URL: https://api.deepseek.com
@@ -32,38 +30,5 @@ export default {
       .filter((m) => m.id)
       .sort((a, b) => a.id.localeCompare(b.id))
       .map((m) => ({ id: m.id, name: m.id }));
-  },
-
-  async *stream(config, messages, opts = {}) {
-    const baseUrl = (config.baseUrl || DEFAULT_BASE_URL).replace(/\/+$/, '');
-    const body = {
-      model: config.model || this.defaultModel,
-      messages: formatMultimodal(messages, { includeReasoningContent: true }),
-      stream: true,
-      stream_options: { include_usage: true },
-      ...(opts.temperature != null && { temperature: opts.temperature }),
-      ...(opts.maxTokens != null && { max_tokens: opts.maxTokens }),
-    };
-
-    if (opts.tools?.length) {
-      body.tools = formatOpenAITools(opts.tools);
-    }
-
-    const res = await fetch(`${baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${config.apiKey}`,
-      },
-      body: JSON.stringify(body),
-      signal: opts.signal,
-    });
-
-    if (!res.ok) {
-      const err = await res.text();
-      throw new Error(`DeepSeek error ${res.status}: ${err}`);
-    }
-
-    yield* readSSE(res.body);
   },
 };

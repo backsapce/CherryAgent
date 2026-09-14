@@ -11,11 +11,6 @@ import config from '../config/config.js';
  *
  *   const provider = await llm.configureProvider({ type: 'openai', apiKey: 'sk-...' });
  *   await llm.configureLlm({ providerId: provider.id, model: 'gpt-4o' });
- *
- *   // Stream a response
- *   for await (const chunk of llm.streamSession(messages)) {
- *     process.stdout.write(chunk);
- *   }
  */
 
 import openai from './providers/openai.js';
@@ -27,8 +22,8 @@ import deepseek from './providers/deepseek.js';
 import customOpenai from './providers/custom-openai.js';
 import { loadSettings, saveSettings } from './settings.js';
 import { getStaticContextWindow } from './contextWindow.js';
-import { jsonSchema, streamText, tool } from 'ai';
-import { createLanguageModel, normalizeAiUsage, toModelMessages } from './ai.js';
+import { streamText } from 'ai';
+import { createLanguageModel, toModelMessages } from './ai.js';
 import {
   LLM_SETTINGS_SCHEMA_VERSION,
   defaultLlmName,
@@ -327,16 +322,8 @@ const llm = {
     return publicLlm(getLlm(llmId));
   },
 
-  getLlms() {
-    return Object.values(llms).map(publicLlm);
-  },
-
   getProfiles() {
-    return llm.getLlms();
-  },
-
-  getActiveLlmId() {
-    return activeLlmId;
+    return Object.values(llms).map(publicLlm);
   },
 
   getActiveProfileId() {
@@ -525,46 +512,11 @@ const llm = {
     return llm.getActiveConfig(id);
   },
 
-  /** Legacy flattened configuration adapter. */
-  async configure(cfg = {}) {
-    if (cfg.providerId) return llm.configureLlm(cfg);
-    if (!cfg.provider || !providers[cfg.provider]) {
-      throw new Error(`Unknown provider: ${cfg.provider || ''}`);
-    }
-    const llmId = hasOwn(cfg, 'id') ? (cfg.id || generateLlmId()) : (activeLlmId || generateLlmId());
-    const previousLlm = getLlm(llmId);
-    const previousProvider = getProviderConfig(previousLlm?.providerId);
-    const cloneLlm = cfg.cloneApiKeyFrom ? getLlm(cfg.cloneApiKeyFrom) : null;
-    const cloneProvider = getProviderConfig(cloneLlm?.providerId);
-    let providerId = previousProvider?.type === cfg.provider ? previousProvider.id : null;
-    if (!providerId && cloneProvider?.type === cfg.provider && !cfg.apiKey) providerId = cloneProvider.id;
-    if (!providerId) providerId = generateProviderId();
-    if (!providerConfigs[providerId] || cfg.apiKey || hasOwn(cfg, 'baseUrl')) {
-      await llm.configureProvider({
-        id: providerId,
-        type: cfg.provider,
-        ...(cfg.apiKey ? { apiKey: cfg.apiKey } : {}),
-        ...(hasOwn(cfg, 'baseUrl') ? { baseUrl: cfg.baseUrl } : {}),
-      });
-    }
-    return llm.configureLlm({
-      id: llmId,
-      name: cfg.name,
-      providerId,
-      model: cfg.model,
-      contextWindow: cfg.contextWindow,
-    });
-  },
-
-  async selectLlm(llmId) {
-    if (llmId && !llms[llmId]) throw new Error(`Unknown LLM: ${llmId}`);
-    activeLlmId = llmId || null;
+  async selectProfile(profileId) {
+    if (profileId && !llms[profileId]) throw new Error(`Unknown LLM: ${profileId}`);
+    activeLlmId = profileId || null;
     await persistSettings();
     return llm.getActiveConfig();
-  },
-
-  async selectProfile(profileId) {
-    return llm.selectLlm(profileId);
   },
 
   async deleteLlm(llmId) {
@@ -575,10 +527,6 @@ const llm = {
     if (activeLlmId === llmId) activeLlmId = Object.keys(llms)[0] || null;
     await persistSettings({ deletedLlmId: llmId });
     return llm.getActiveConfig();
-  },
-
-  async deleteProfile(profileId) {
-    return llm.deleteLlm(profileId);
   },
 
   /**
@@ -592,44 +540,6 @@ const llm = {
     llms = normalized.settings.llms;
     if (normalized.migrated) await persistSettings();
     return llm.getActiveConfig();
-  },
-
-  /**
-   * Backward-compatible stream adapter over AI SDK events.
-   * New agent code should consume streamText().fullStream through agent/events.
-   */
-  async *streamSession(messages, opts = {}) {
-    const fullMessages = opts.systemPrompt
-      ? [{ role: 'system', content: opts.systemPrompt }, ...messages]
-      : messages;
-    const tools = createAiTools(opts.tools);
-    const result = streamText({
-      model: llm.getLanguageModel(opts.llmProfileId),
-      messages: toModelMessages(fullMessages),
-      ...(Object.keys(tools).length ? { tools } : {}),
-      ...(opts.signal ? { abortSignal: opts.signal } : {}),
-      ...(opts.temperature != null ? { temperature: opts.temperature } : {}),
-      ...(opts.maxTokens != null ? { maxOutputTokens: opts.maxTokens } : {}),
-      maxRetries: 0,
-    });
-
-    for await (const part of result.fullStream) {
-      if (part.type === 'text-delta') yield { content: part.text };
-      else if (part.type === 'reasoning-delta') yield { reasoning: part.text };
-      else if (part.type === 'tool-call') {
-        yield {
-          toolCalls: [{
-            id: part.toolCallId,
-            name: part.toolName,
-            arguments: JSON.stringify(part.input || {}),
-          }],
-        };
-      } else if (part.type === 'finish') {
-        yield { usage: normalizeAiUsage(part.totalUsage) };
-      } else if (part.type === 'error') {
-        throw part.error;
-      }
-    }
   },
 
   /**
@@ -657,27 +567,9 @@ const llm = {
     return content;
   },
 
-  /**
-   * Check if the service is configured and ready.
-   * @returns {boolean}
-   */
-  isConfigured() {
-    return llm.getActiveConfig().configured;
-  },
-
   isProfileConfigured(profileId = activeLlmId) {
     return llm.getActiveConfig(profileId).configured;
   },
 };
-
-function createAiTools(schemas = []) {
-  return Object.fromEntries((schemas || []).map((schema) => [
-    schema.name,
-    tool({
-      description: schema.description,
-      inputSchema: jsonSchema(schema.parameters || { type: 'object', properties: {} }),
-    }),
-  ]));
-}
 
 export default llm;

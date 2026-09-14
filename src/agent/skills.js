@@ -6,7 +6,6 @@
  * Tier 3: references are read by name instead of dumping every file.
  */
 
-import yaml from 'js-yaml';
 import {
   listSkillDirs,
   readSkillFile,
@@ -25,9 +24,19 @@ import {
   readFileText,
 } from '../models/agent.js';
 import config from '../config/config.js';
+import {
+  MAX_SKILL_CONTENT_CHARS,
+  MAX_SKILL_REFERENCE_CHARS,
+  formatReferenceContent,
+  normalizeReferenceName,
+  normalizeSkillName,
+  parseFrontmatter,
+  safeDirectorySkillName,
+  scoreSkill,
+  truncateText,
+  validateSkillContent,
+} from './skillCore.js';
 
-const MAX_SKILL_CONTENT_CHARS = 60_000;
-const MAX_REFERENCE_CHARS = 80_000;
 const RUNTIME_SKILL_CATALOG_TIMEOUT_MS = 20_000;
 
 const DEFAULT_SKILLS = [
@@ -209,7 +218,7 @@ export async function writeSkill(name, content, agentId) {
 export async function writeSkillReference(name, referenceName, content, agentId) {
   const skillName = normalizeSkillName(name);
   const refName = normalizeReferenceName(referenceName);
-  const safeContent = truncateText(String(content || ''), MAX_REFERENCE_CHARS);
+  const safeContent = truncateText(String(content || ''), MAX_SKILL_REFERENCE_CHARS);
   if (!safeContent.trim()) throw new Error('Reference content is required.');
   requireAgentSkillWorkspace(agentId);
   await ensureAgentSkillExists(agentId, skillName);
@@ -481,15 +490,6 @@ function directoryEntries(listing) {
   return Array.isArray(listing?.children) ? listing.children : [];
 }
 
-function safeDirectorySkillName(name) {
-  try {
-    const normalized = normalizeSkillName(name);
-    return normalized === name ? normalized : null;
-  } catch {
-    return null;
-  }
-}
-
 async function resolveSkill(name, agentId, options = {}) {
   const skillName = normalizeSkillName(name);
   if (options.agentUrl) {
@@ -609,90 +609,4 @@ function buildSkillRecord({ dirName, source, meta, refs }) {
     source,
     references: (refs || []).map((ref) => ({ name: ref.name })).sort((a, b) => a.name.localeCompare(b.name)),
   };
-}
-
-// ─── Frontmatter and validation ─────────────────────────────────────────────
-
-function parseFrontmatter(content) {
-  const match = String(content || '').match(/^---\s*\n([\s\S]*?)\n---/);
-  if (!match) return {};
-  try {
-    const parsed = yaml.load(match[1]);
-    return parsed && typeof parsed === 'object' ? parsed : {};
-  } catch {
-    return parseSimpleFrontmatter(match[1]);
-  }
-}
-
-function parseSimpleFrontmatter(frontmatter) {
-  const result = {};
-  for (const line of frontmatter.split('\n')) {
-    const separator = line.indexOf(':');
-    if (separator <= 0) continue;
-    const key = line.slice(0, separator).trim();
-    const value = line.slice(separator + 1).trim().replace(/^["']|["']$/g, '');
-    result[key] = value;
-  }
-  return result;
-}
-
-function validateSkillContent(name, content) {
-  const text = String(content || '').trim();
-  if (!text) throw new Error('Skill content is required.');
-  if (text.length > MAX_SKILL_CONTENT_CHARS) {
-    throw new Error(`Skill content is too large (${text.length}/${MAX_SKILL_CONTENT_CHARS} chars). Move details into references.`);
-  }
-  const meta = parseFrontmatter(text);
-  if (!meta.name || !meta.description) {
-    throw new Error('Skill content must include YAML frontmatter with name and description.');
-  }
-  if (normalizeSkillName(meta.name) !== name) {
-    throw new Error(`Skill frontmatter name "${meta.name}" must match "${name}".`);
-  }
-}
-
-function normalizeSkillName(name) {
-  const normalized = String(name || '')
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-  if (!normalized) throw new Error('Skill name is required.');
-  return normalized.slice(0, 80);
-}
-
-function normalizeReferenceName(name) {
-  const normalized = String(name || '')
-    .trim()
-    .replace(/\\/g, '/')
-    .split('/')
-    .filter(Boolean)
-    .join('/');
-  if (!normalized || normalized.includes('..')) throw new Error('Reference name is invalid.');
-  return normalized.slice(0, 160);
-}
-
-function scoreSkill(skill, terms) {
-  const haystack = `${skill.name} ${skill.description} ${skill.references?.map((ref) => ref.name).join(' ')}`.toLowerCase();
-  let score = 0;
-  for (const term of terms) {
-    if (skill.name.toLowerCase() === term) score += 8;
-    if (skill.name.toLowerCase().includes(term)) score += 4;
-    if (haystack.includes(term)) score += 1;
-  }
-  return score;
-}
-
-function formatReferenceContent(skillName, referenceName, content) {
-  return [
-    `# Reference: ${skillName}/${referenceName}`,
-    '',
-    truncateText(content, MAX_REFERENCE_CHARS),
-  ].join('\n');
-}
-
-function truncateText(text, maxChars) {
-  const value = String(text || '');
-  if (value.length <= maxChars) return value;
-  return `${value.slice(0, maxChars)}\n[truncated ${value.length - maxChars} chars]`;
 }

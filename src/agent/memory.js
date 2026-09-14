@@ -86,26 +86,6 @@ export async function loadMemory(agentId) {
 }
 
 /**
- * Add or update a project/workspace memory note.
- * @param {string} content
- * @param {string} [agentId]
- * @param {{ id?: string, tags?: Array<string>|string, importance?: string }} [options]
- */
-export async function saveMemory(content, agentId, options = {}) {
-  return upsertMemoryEntry({ ...options, type: 'memory', content }, agentId);
-}
-
-/**
- * Add or update a user preference/profile memory note.
- * @param {string} content
- * @param {string} [agentId]
- * @param {{ id?: string, tags?: Array<string>|string, importance?: string }} [options]
- */
-export async function saveUser(content, agentId, options = {}) {
-  return upsertMemoryEntry({ ...options, type: 'user', content }, agentId);
-}
-
-/**
  * Add or update a structured memory entry.
  * @param {{ type?: string, content: string, id?: string, tags?: Array<string>|string, importance?: string }} entry
  * @param {string} [agentId]
