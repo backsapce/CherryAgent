@@ -59,6 +59,7 @@
     "title": "設定",
     "llm": "LLM 設定",
     "general": "一般",
+    "web": "ウェブ検索",
     "sandboxes": "サンドボックス",
     "appearance": "外観",
     "data": "データ",
@@ -69,6 +70,20 @@
     "tools": "ツール",
     "cancel": "キャンセル",
     "save": "保存"
+  },
+  "searchSettings": {
+    "title": "ウェブ検索",
+    "desc": "web_search ツールで使う検索プロバイダーを設定します。エージェントはタイトル・URL・スニペットの簡潔な結果を受け取り、web_fetch で全文を読めます。",
+    "configured": "ウェブ検索は設定済みで、エージェントが利用できます。",
+    "provider": "検索プロバイダー",
+    "tavilyApiKey": "Tavily API キー",
+    "braveApiKey": "Brave Search API キー",
+    "apiKeySet": "キー保存済み — 新しいキーを入力すると置き換えます",
+    "clearKey": "キーを削除",
+    "searxngUrl": "SearXNG インスタンス URL",
+    "searxngHint": "インスタンスは JSON 出力形式を有効にする必要があります。CORS が無効な場合、接続済みの agent サーバー経由でプロキシされます。",
+    "maxResults": "既定の結果数（1-10）",
+    "keyLocalNote": "API キーはこのブラウザーのストレージにのみ保存され、既定では同期に含まれません。"
   },
   "generalSettings": {
     "title": "一般設定",

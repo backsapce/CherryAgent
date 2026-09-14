@@ -87,6 +87,8 @@ test('sandbox runtime exposes only sandbox-owned tools', () => {
       'write_sandbox_file',
       'skill',
       'schedule_wakeup',
+      'web_search',
+      'web_fetch',
     ]
   );
   assert.match(
@@ -154,6 +156,55 @@ Inspect sandbox files.
   });
   assert.match(reference, /# Reference: sandbox-review\/checks\.md/);
   assert.match(reference, /Check the runtime output/);
+});
+
+test('sandbox web tool dispatch runs through injected search and fetch', async () => {
+  const searches = [];
+  const fetches = [];
+  const dispatch = createRuntimeToolDispatcher({
+    webSearch: async (config, request) => {
+      searches.push({ config, request });
+      return {
+        provider: config.provider,
+        query: request.query,
+        results: [{ title: 'Result One', url: 'https://example.com/one', snippet: 'A snippet.' }],
+      };
+    },
+    webFetch: async (url, opts) => {
+      fetches.push({ url, opts });
+      return {
+        url,
+        status: 200,
+        contentType: 'text/html',
+        text: '# Page\n\nBody text.',
+        truncated: false,
+        fromCache: false,
+      };
+    },
+  });
+
+  const searchOutput = await dispatch('web_search', {
+    query: 'cherryagent release notes',
+    max_results: 3,
+    allowed_domains: ['example.com'],
+  }, { searchConfig: { provider: 'tavily', apiKey: 'tvly-test' } });
+  assert.equal(searches.length, 1);
+  assert.equal(searches[0].config.provider, 'tavily');
+  assert.equal(searches[0].request.maxResults, 3);
+  assert.deepEqual(searches[0].request.allowedDomains, ['example.com']);
+  assert.match(searchOutput, /1\. Result One/);
+  assert.match(searchOutput, /https:\/\/example\.com\/one/);
+  assert.match(searchOutput, /web_fetch/);
+
+  const unconfigured = await dispatch('web_search', { query: 'anything' }, {});
+  assert.match(unconfigured, /not configured/i);
+
+  const fetchOutput = await dispatch('web_fetch', { url: 'https://example.com/doc', max_chars: 1200 }, {});
+  assert.equal(fetches.length, 1);
+  assert.equal(fetches[0].url, 'https://example.com/doc');
+  assert.equal(fetches[0].opts.maxChars, 1200);
+  assert.match(fetchOutput, /Fetched https:\/\/example\.com\/doc — HTTP 200/);
+  assert.match(fetchOutput, /Body text\./);
 });
 
 test('sandbox background command dispatch preserves job ids, cursors, waits, and stops', async () => {

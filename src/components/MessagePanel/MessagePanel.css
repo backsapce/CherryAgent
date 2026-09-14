@@ -548,9 +548,10 @@
 }
 
 .message-edit-submit {
-  border-color: var(--color-primary);
-  background: var(--color-primary);
-  color: #fff;
+  border-color: var(--button-primary-border);
+  background: var(--button-primary-bg);
+  color: var(--button-primary-fg);
+  box-shadow: var(--button-primary-shadow);
 }
 
 .message-edit-cancel:hover {
@@ -558,7 +559,8 @@
 }
 
 .message-edit-submit:hover:not(:disabled) {
-  background: var(--color-primary-hover);
+  background: var(--button-primary-bg-hover);
+  box-shadow: var(--button-primary-shadow-hover);
 }
 
 .message-edit-submit:disabled {
@@ -934,8 +936,8 @@
 }
 
 .tool-exit-code.writing {
-  color: #2563eb;
-  background: rgba(37, 99, 235, 0.1);
+  color: var(--color-accent-strong);
+  background: color-mix(in srgb, var(--color-accent-strong) 12%, transparent);
 }
 
 .tool-exit-code.error {
@@ -1749,10 +1751,10 @@
 }
 
 .send-btn {
-  background: var(--color-primary);
-  border: none;
-  border-radius: 8px;
-  color: var(--color-primary-fg);
+  background: var(--button-primary-bg);
+  border: 1px solid var(--button-primary-border);
+  border-radius: 9px;
+  color: var(--button-primary-fg);
   width: 36px;
   height: 36px;
   display: flex;
@@ -1761,17 +1763,23 @@
   cursor: pointer;
   transition: background 0.2s, opacity 0.2s, transform 0.2s, box-shadow 0.2s;
   flex-shrink: 0;
+  box-shadow: var(--button-primary-shadow);
 }
 
 .send-btn:hover:not(:disabled) {
-  background: var(--color-primary-hover);
+  background: var(--button-primary-bg-hover);
   transform: translateY(-1px);
-  box-shadow: 0 10px 22px color-mix(in srgb, var(--color-primary) 24%, transparent);
+  box-shadow: var(--button-primary-shadow-hover);
+}
+
+.send-btn:active:not(:disabled) {
+  transform: translateY(0);
 }
 
 .send-btn:disabled {
   opacity: 0.3;
   cursor: not-allowed;
+  box-shadow: none;
 }
 
 .message-input-hint {

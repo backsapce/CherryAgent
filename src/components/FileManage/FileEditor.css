@@ -63,7 +63,7 @@
 }
 
 .file-dirty-indicator {
-  color: var(--color-primary);
+  color: var(--color-warning);
   font-size: 16px;
 }
 
@@ -87,16 +87,22 @@
 }
 
 .file-editor-btn.save {
-  background-color: var(--color-primary);
-  color: #ffffff;
+  background: var(--button-primary-bg);
+  border: 1px solid var(--button-primary-border);
+  color: var(--button-primary-fg);
+  font-weight: 600;
+  box-shadow: var(--button-primary-shadow);
 }
 
 .file-editor-btn.save:hover:not(:disabled) {
-  background-color: var(--color-primary-hover);
+  background: var(--button-primary-bg-hover);
+  box-shadow: var(--button-primary-shadow-hover);
 }
 
 .file-editor-btn.save:disabled {
-  background-color: var(--color-border);
+  background: var(--color-border);
+  border-color: transparent;
+  box-shadow: none;
   cursor: not-allowed;
   opacity: 0.6;
 }

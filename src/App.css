@@ -13,7 +13,7 @@
   position: relative;
   isolation: isolate;
   background:
-    linear-gradient(135deg, color-mix(in srgb, var(--color-primary) 10%, transparent), transparent 32%),
+    radial-gradient(1100px 520px at 78% -12%, color-mix(in srgb, var(--color-accent-strong) 6%, transparent), transparent 60%),
     linear-gradient(180deg, var(--color-bg), color-mix(in srgb, var(--color-surface-deep) 72%, var(--color-bg)));
 }
 
@@ -167,9 +167,15 @@
 }
 
 .permission-approve {
-  background: var(--color-accent) !important;
-  border-color: var(--color-accent) !important;
-  color: var(--color-accent-contrast, #fff) !important;
+  background: var(--button-primary-bg) !important;
+  border-color: var(--button-primary-border) !important;
+  color: var(--button-primary-fg) !important;
+  box-shadow: var(--button-primary-shadow);
+  font-weight: 600;
+}
+
+.permission-approve:hover {
+  background: var(--button-primary-bg-hover) !important;
 }
 
 .permission-deny:hover {

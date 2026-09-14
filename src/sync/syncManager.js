@@ -618,6 +618,8 @@ function stripLocalOnlyConfig(data, { includeSecrets } = {}) {
   if (!keepSecrets) {
     delete next.agentTokens;
     if (next.llm !== undefined) next.llm = redactNestedApiKeys(next.llm);
+    // Search provider keys grant spend on the search account; same policy.
+    if (next.search !== undefined) next.search = redactNestedApiKeys(next.search);
   }
 
   // Sandbox hosts and their metadata are portable configuration. Hosts are
@@ -702,6 +704,10 @@ function preserveLocalOnlyConfig(path, mergedData, localData = {}) {
     if (localData.llm && typeof localData.llm === 'object' && !Array.isArray(localData.llm)
       && next.llm && typeof next.llm === 'object' && !Array.isArray(next.llm)) {
       restoreLocalSecretsDeep(next.llm, localData.llm);
+    }
+    if (localData.search && typeof localData.search === 'object' && !Array.isArray(localData.search)
+      && next.search && typeof next.search === 'object' && !Array.isArray(next.search)) {
+      restoreLocalSecretsDeep(next.search, localData.search);
     }
   }
 

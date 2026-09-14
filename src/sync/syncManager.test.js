@@ -218,6 +218,13 @@ test('sync projection redacts LLM keys and agent tokens by default', () => {
         p1: { id: 'p1', provider: 'openai', apiKey: 'llm-secret', model: 'gpt' },
       },
     },
+    search: {
+      provider: 'tavily',
+      providers: {
+        tavily: { apiKey: 'search-secret' },
+        searxng: { baseUrl: 'https://searx.example.com' },
+      },
+    },
   };
 
   const projected = stripLocalOnlyConfig(local);
@@ -232,6 +239,11 @@ test('sync projection redacts LLM keys and agent tokens by default', () => {
   assert.equal(projected.llm.profiles.p1.apiKey, undefined);
   assert.equal(projected.llm.profiles.p1.model, 'gpt');
   assert.equal(local.llm.profiles.p1.apiKey, 'llm-secret');
+  // Search provider keys follow the same device-local policy.
+  assert.equal(projected.search.providers.tavily.apiKey, undefined);
+  assert.equal(projected.search.provider, 'tavily');
+  assert.equal(projected.search.providers.searxng.baseUrl, 'https://searx.example.com');
+  assert.equal(local.search.providers.tavily.apiKey, 'search-secret');
 });
 
 test('sync projection includes portable credentials when the user opts in', () => {
@@ -257,17 +269,23 @@ test('a sync round trip strips uploaded keys but never wipes local ones', () => 
         p1: { id: 'p1', provider: 'openai', apiKey: 'local-llm-secret', model: 'gpt' },
       },
     },
+    search: {
+      provider: 'tavily',
+      providers: { tavily: { apiKey: 'local-search-secret' } },
+    },
   };
 
   // What this device would upload: no keys, no tokens.
   const uploaded = stripLocalOnlyConfig(local);
   assert.equal(uploaded.llm.profiles.p1.apiKey, undefined);
   assert.equal(uploaded.agentTokens, undefined);
+  assert.equal(uploaded.search.providers.tavily.apiKey, undefined);
 
   // That payload merged back onto this device keeps the local credentials.
   const merged = preserveLocalOnlyConfig('config.yaml', uploaded, local);
   assert.equal(merged.llm.profiles.p1.apiKey, 'local-llm-secret');
   assert.deepEqual(merged.agentTokens, { local: 'local-token' });
+  assert.equal(merged.search.providers.tavily.apiKey, 'local-search-secret');
 });
 
 test('remote config merge keeps local keys while preserving device-only credentials', () => {

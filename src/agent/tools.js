@@ -43,7 +43,17 @@ import {
   stopCommand,
   waitCommand,
   writeFile,
+  proxyWebFetch,
+  proxyWebSearch,
 } from '../models/agent.js';
+import {
+  fetchWebPage,
+  formatWebPageForModel,
+} from './webFetch.js';
+import search, {
+  formatSearchResults,
+  runWebSearch,
+} from '../models/search.js';
 import {
   getAgentFileInfo,
   listAgentFiles,
@@ -253,6 +263,11 @@ async function findSandboxListedFile(path, ctx) {
 
 function rethrowIfToolAborted(error, signal) {
   if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+}
+
+/** Web tools can route through a real agent server; E2B exposes no proxy. */
+function canProxyThroughAgentServer(ctx) {
+  return Boolean(ctx?.agentUrl && ctx.agentUrl !== E2B_AGENT_ID);
 }
 
 async function assertReadableFileSize(path, maxBytes, lookupEntry, readToolName, listToolName) {
@@ -614,6 +629,81 @@ registry.register({
       return `Successfully wrote sandbox file ${path}`;
     } catch (err) {
       return `Error writing sandbox file ${path}: ${err.message}`;
+    }
+  },
+});
+
+registry.register({
+  name: 'web_search',
+  category: 'web',
+  readOnly: true,
+  parallelSafe: true,
+  schema: {
+    description:
+      'Search the web and return compact results: title, URL, and a short snippet per result — never full page content. Use it whenever a question needs current or otherwise external information instead of guessing. After answering from results, cite the used sources as markdown links. When a snippet is not enough, call web_fetch on the result URL to read the full page.',
+    parameters: TOOL_PARAMETER_SCHEMAS.web_search,
+  },
+  checkAvailable: () => search.isConfigured(),
+  async handler(args, ctx) {
+    const runtimeConfig = search.getRuntimeConfig();
+    if (!runtimeConfig) {
+      return 'Web search is not configured. Set up a search provider in Settings → Web Search.';
+    }
+    try {
+      const result = await runWebSearch(runtimeConfig, args, { signal: ctx?.signal });
+      return formatSearchResults(result);
+    } catch (err) {
+      rethrowIfToolAborted(err, ctx?.signal);
+      // Some providers (notably self-hosted SearXNG) are not CORS-reachable
+      // from the browser. Retry through the authenticated agent server before
+      // giving up; if that also fails, the direct error is the clearer one.
+      if (canProxyThroughAgentServer(ctx)) {
+        try {
+          const proxied = await proxyWebSearch(ctx.agentUrl, runtimeConfig, args, ctx?.signal);
+          return formatSearchResults(proxied);
+        } catch (proxyErr) {
+          rethrowIfToolAborted(proxyErr, ctx?.signal);
+        }
+      }
+      return `Web search error: ${err.message}`;
+    }
+  },
+});
+
+registry.register({
+  name: 'web_fetch',
+  category: 'web',
+  readOnly: true,
+  parallelSafe: true,
+  schema: {
+    description:
+      'Fetch one web page and return its readable text. HTML is converted to text with headings and links preserved; binary content (images, PDFs, archives) is rejected. http URLs are upgraded to https and only http(s) is supported. Successful fetches are cached for a short time, so re-reading a URL is cheap. Prefer this over shell curl for reading public pages.',
+    parameters: TOOL_PARAMETER_SCHEMAS.web_fetch,
+  },
+  async handler({ url, max_chars: maxChars }, ctx) {
+    try {
+      if (canProxyThroughAgentServer(ctx)) {
+        try {
+          const page = await proxyWebFetch(ctx.agentUrl, url, {
+            maxChars,
+            signal: ctx?.signal,
+          });
+          return formatWebPageForModel(page);
+        } catch (err) {
+          rethrowIfToolAborted(err, ctx?.signal);
+          // Proxy transport failures (old server without the endpoint,
+          // server offline) fall through to a direct browser fetch, which
+          // still works for CORS-enabled sites.
+        }
+      }
+      const page = await fetchWebPage(url, {
+        maxChars,
+        signal: ctx?.signal,
+      });
+      return formatWebPageForModel(page);
+    } catch (err) {
+      rethrowIfToolAborted(err, ctx?.signal);
+      return `Error fetching ${url}: ${err.message}`;
     }
   },
 });

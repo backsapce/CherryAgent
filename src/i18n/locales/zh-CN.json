@@ -59,6 +59,7 @@
     "title": "设置",
     "llm": "LLM 设置",
     "general": "通用",
+    "web": "网络搜索",
     "sandboxes": "沙箱",
     "appearance": "外观",
     "data": "数据",
@@ -69,6 +70,20 @@
     "tools": "工具",
     "cancel": "取消",
     "save": "保存"
+  },
+  "searchSettings": {
+    "title": "网络搜索",
+    "desc": "配置 web_search 工具使用的搜索源。代理会获得精简的标题/链接/摘要结果，并可用 web_fetch 读取完整页面。",
+    "configured": "网络搜索已配置，代理可以使用。",
+    "provider": "搜索源",
+    "tavilyApiKey": "Tavily API 密钥",
+    "braveApiKey": "Brave Search API 密钥",
+    "apiKeySet": "已保存密钥——输入新密钥可替换",
+    "clearKey": "清除密钥",
+    "searxngUrl": "SearXNG 实例地址",
+    "searxngHint": "实例需要开启 JSON 输出格式。若实例未开启 CORS，搜索会经由已连接的 agent 服务器代理。",
+    "maxResults": "默认结果数量（1-10）",
+    "keyLocalNote": "API 密钥只保存在本浏览器存储中，默认不参与多设备同步。"
   },
   "generalSettings": {
     "title": "通用设置",

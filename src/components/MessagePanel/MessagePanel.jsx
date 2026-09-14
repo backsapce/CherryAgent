@@ -507,7 +507,7 @@ const ToolTerminal = ({ output }) => {
         background: style.getPropertyValue('--color-bg').trim() || '#0f172a',
         foreground: style.getPropertyValue('--color-text-content').trim() || '#e5e7eb',
         cursor: style.getPropertyValue('--color-text-content').trim() || '#e5e7eb',
-        selectionBackground: style.getPropertyValue('--color-accent').trim() || '#2563eb',
+        selectionBackground: style.getPropertyValue('--color-accent').trim() || '#4fb3c4',
       },
     });
     const fitAddon = new FitAddon();

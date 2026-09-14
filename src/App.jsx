@@ -18,6 +18,7 @@ import {
 } from './vfs/storagePersistence';
 import config from './config/config';
 import llm from './models/llm';
+import search from './models/search';
 import { executeCommand, initAgents, enableE2b, E2B_AGENT_ID, getSandboxStatus, stopE2bSandbox, assertRemoteAgentRunProtocol, startRemoteAgentRun, getRemoteAgentRun, listRemoteAgentRuns, abortRemoteAgentRun } from './models/agent';
 import { prepareAgentRuntimeContext, runAgentLoop } from './agent/loop';
 import { applyAgentEvent, createAgentEventState } from './agent/events';
@@ -1564,6 +1565,11 @@ function App() {
       const remoteModelConfig = useRemoteRuntime && !opts.resumeRunId
         ? llm.getRuntimeConfig(llmProfileId)
         : null;
+      // Search credentials ride the same authenticated sandbox-run channel as
+      // the model config, and only when web search is actually configured.
+      const remoteSearchConfig = useRemoteRuntime && !opts.resumeRunId
+        ? search.getRuntimeConfig()
+        : null;
 
       let result;
       let responseCompleted = false;
@@ -1620,6 +1626,7 @@ function App() {
               systemPrompt: SANDBOX_AGENT_SYSTEM_PROMPT,
               agentId: sessionAgentId,
               modelConfig: remoteModelConfig,
+              ...(remoteSearchConfig ? { searchConfig: remoteSearchConfig } : {}),
               runtimeContext: {
                 ...runtimeContext,
                 // Memory stays browser-only; identity and enabled skills are a

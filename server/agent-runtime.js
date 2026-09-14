@@ -18,6 +18,8 @@ import {
   validateSkillContent,
 } from '../src/agent/skillCore.js';
 import { TOOL_PARAMETER_SCHEMAS, formatCommandResult } from '../src/agent/toolSchemas.js';
+import { fetchWebPage, formatWebPageForModel } from '../src/agent/webFetch.js';
+import { formatSearchResults, runWebSearch } from '../src/models/search.js';
 import { imageMimeFromPath, splitFilePath, waitForSettlement } from '../src/utils/misc.js';
 
 const MAX_MESSAGES = 2_000;
@@ -107,6 +109,16 @@ const REMOTE_TOOL_SCHEMAS = [
     name: 'schedule_wakeup',
     description: 'Schedule one future continuation of this sandbox agent run. Express the delay in its natural unit; do not convert minutes or hours to seconds (for example, 10 minutes is delay=10 and unit="minutes"). Use this instead of blocking or repeatedly polling. The agent server waits without using LLM tokens, then continues with the saved prompt. If the task is still pending after waking, schedule another wake-up.',
     parameters: TOOL_PARAMETER_SCHEMAS.schedule_wakeup,
+  },
+  {
+    name: 'web_search',
+    description: 'Search the web and return compact results: title, URL, and a short snippet per result — never full page content. Use it whenever a question needs current or otherwise external information instead of guessing. After answering from results, cite the used sources as markdown links. When a snippet is not enough, call web_fetch on the result URL to read the full page.',
+    parameters: TOOL_PARAMETER_SCHEMAS.web_search,
+  },
+  {
+    name: 'web_fetch',
+    description: 'Fetch one web page and return its readable text. HTML is converted to text with headings and links preserved; binary content (images, PDFs, archives) is rejected. http URLs are upgraded to https and only http(s) is supported. Successful fetches are cached for a short time, so re-reading a URL is cheap. Prefer this over shell curl for reading public pages.',
+    parameters: TOOL_PARAMETER_SCHEMAS.web_fetch,
   },
 ];
 
@@ -223,12 +235,14 @@ export function createAgentRunManager({
 
   // The subset of the original run request needed to continue a durable run
   // after a restart. `runtimeContext` keeps sandboxFiles so skills/identity are
-  // re-materialized if the sandbox filesystem was recreated.
+  // re-materialized if the sandbox filesystem was recreated. `searchConfig`
+  // carries the search provider credential and rides the same 0600 files.
   const persistableInput = (input) => ({
     systemPrompt: input.systemPrompt || '',
     agentId: input.agentId || null,
     maxRounds: input.maxRounds,
     modelConfig: input.modelConfig,
+    searchConfig: input.searchConfig || null,
     runtimeContext: input.runtimeContext || null,
   });
 
@@ -259,6 +273,7 @@ export function createAgentRunManager({
         turnNumber = 0;
       }
       const modelConfig = input.modelConfig;
+      const searchConfig = normalizeRuntimeSearchConfig(input.searchConfig);
       let activeTurnToken = null;
       while (true) {
         if (pendingWakeup) {
@@ -304,8 +319,10 @@ export function createAgentRunManager({
               signal: run.controller.signal,
               languageModel: createModel(modelConfig),
               runtimeContext: normalizeRuntimeContext(input.runtimeContext),
-              toolSchemas: REMOTE_TOOL_SCHEMAS,
-              dispatchTool,
+              toolSchemas: searchConfig
+                ? REMOTE_TOOL_SCHEMAS
+                : REMOTE_TOOL_SCHEMAS.filter((tool) => tool.name !== 'web_search'),
+              dispatchTool: (name, input, context) => dispatchTool(name, input, { ...context, searchConfig }),
               scheduleWakeup: async ({ delaySeconds, prompt }) => {
                 if (activeTurnToken !== turnToken) throw createRunAbortError();
                 throwIfRunCancelled(run);
@@ -842,6 +859,8 @@ export function createRuntimeToolDispatcher({
   listFiles,
   readFile,
   writeFile,
+  webSearch = runWebSearch,
+  webFetch = fetchWebPage,
 }) {
   return async (name, input, context) => {
     if (name === 'execute_command') {
@@ -924,7 +943,43 @@ export function createRuntimeToolDispatcher({
         prompt: wakeup.prompt,
       });
     }
+    if (name === 'web_search') {
+      const searchConfig = context?.searchConfig;
+      if (!searchConfig?.provider) {
+        return 'Web search is not configured for this run. Complete the setup in the browser Settings → Web Search, then start a new run.';
+      }
+      const result = await webSearch(searchConfig, {
+        query: input.query,
+        maxResults: input.max_results,
+        allowedDomains: input.allowed_domains,
+        blockedDomains: input.blocked_domains,
+      }, { signal: context?.signal });
+      return formatSearchResults(result);
+    }
+    if (name === 'web_fetch') {
+      const page = await webFetch(input.url, {
+        maxChars: input.max_chars,
+        signal: context?.signal,
+      });
+      return formatWebPageForModel(page);
+    }
     throw new Error(`Tool is unavailable in sandbox runtime: ${name}`);
+  };
+}
+
+/**
+ * Validate the browser-supplied search execution config. Runs persist in 0600
+ * files while waiting, matching the model credential handling.
+ */
+function normalizeRuntimeSearchConfig(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  if (!value.provider || typeof value.provider !== 'string') return null;
+  const maxResults = Number(value.maxResults);
+  return {
+    provider: value.provider,
+    ...(typeof value.apiKey === 'string' && value.apiKey ? { apiKey: value.apiKey } : {}),
+    ...(typeof value.baseUrl === 'string' && value.baseUrl ? { baseUrl: value.baseUrl } : {}),
+    ...(Number.isFinite(maxResults) && maxResults > 0 ? { maxResults: Math.floor(maxResults) } : {}),
   };
 }
 

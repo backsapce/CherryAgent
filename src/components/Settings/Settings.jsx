@@ -30,6 +30,7 @@ import { downloadBlobFile } from '../../utils/misc.js';
 import { X, Lock, Plug, Sun, Moon, Monitor, UploadCloud, DownloadCloud, AlertTriangle, Globe, ChevronDown, User, Cloud, HardDrive, Layers, Refresh, Upload, Download } from '../Icons/Icons';
 import { listAllSkills, setSkillEnabled } from '../../agent/skills';
 import { listAllTools, setToolEnabled } from '../../agent/tools';
+import search from '../../models/search';
 import { createAgent, deleteAgent, updateAgentName, updateAgentConfig, listAgents } from '../../agents/agents';
 import {
   getDefaultSessionTitlePrompt,
@@ -209,6 +210,16 @@ const Settings = ({
   const [skillsLoading, setSkillsLoading] = useState(false);
   const [toolsList, setToolsList] = useState([]);
   const [toolsLoading, setToolsLoading] = useState(false);
+  const [webSearchForm, setWebSearchForm] = useState({
+    provider: 'tavily',
+    tavilyApiKey: '',
+    braveApiKey: '',
+    searxngBaseUrl: '',
+    maxResults: '5',
+  });
+  const [webSearchSaved, setWebSearchSaved] = useState(null);
+  const [webSearchSaving, setWebSearchSaving] = useState(false);
+  const [webSearchError, setWebSearchError] = useState(null);
   const [agentsTabList, setAgentsTabList] = useState([]);
   const [agentsLoading, setAgentsLoading] = useState(false);
   const [agentsError, setAgentsError] = useState(null);
@@ -356,6 +367,62 @@ const Settings = ({
       }
     }
   }, [settingsTab]);
+
+  // Load web search settings when tab changes to web
+  useEffect(() => {
+    if (settingsTab !== 'web') return;
+    try {
+      const settings = search.getSettings();
+      setWebSearchSaved(settings);
+      setWebSearchError(null);
+      setWebSearchForm((prev) => ({
+        ...prev,
+        provider: settings.provider || 'tavily',
+        searxngBaseUrl: settings.providers.searxng?.baseUrl || '',
+        maxResults: String(settings.maxResults || 5),
+        tavilyApiKey: '',
+        braveApiKey: '',
+      }));
+    } catch (err) {
+      setWebSearchError(err.message);
+    }
+  }, [settingsTab]);
+
+  const handleSaveWebSearch = async () => {
+    setWebSearchSaving(true);
+    setWebSearchError(null);
+    try {
+      const tavilyApiKey = webSearchForm.tavilyApiKey.trim();
+      const braveApiKey = webSearchForm.braveApiKey.trim();
+      const settings = await search.configure({
+        provider: webSearchForm.provider,
+        maxResults: Number(webSearchForm.maxResults) || 5,
+        providers: {
+          ...(tavilyApiKey ? { tavily: { apiKey: tavilyApiKey } } : {}),
+          ...(braveApiKey ? { brave: { apiKey: braveApiKey } } : {}),
+          searxng: { baseUrl: webSearchForm.searxngBaseUrl.trim() },
+        },
+      });
+      setWebSearchSaved(settings);
+      setWebSearchForm((prev) => ({ ...prev, tavilyApiKey: '', braveApiKey: '' }));
+    } catch (err) {
+      setWebSearchError(err.message);
+    } finally {
+      setWebSearchSaving(false);
+    }
+  };
+
+  const handleClearSearchApiKey = async (providerId) => {
+    setWebSearchSaving(true);
+    setWebSearchError(null);
+    try {
+      setWebSearchSaved(await search.configure({ providers: { [providerId]: { clearApiKey: true } } }));
+    } catch (err) {
+      setWebSearchError(err.message);
+    } finally {
+      setWebSearchSaving(false);
+    }
+  };
 
   useEffect(() => {
     if (!show || settingsTab !== 'data') return;
@@ -960,6 +1027,13 @@ const Settings = ({
               {t('settings.general')}
             </button>
             <button
+              className={`settings-nav-item ${settingsTab === 'web' ? 'active' : ''}`}
+              onClick={() => setSettingsTab('web')}
+            >
+              <Globe width={16} height={16} />
+              {t('settings.web')}
+            </button>
+            <button
               className={`settings-nav-item ${settingsTab === 'sandboxes' ? 'active' : ''}`}
               onClick={() => setSettingsTab('sandboxes')}
             >
@@ -1390,6 +1464,119 @@ const Settings = ({
                   className="settings-save"
                   onClick={handleSaveGeneral}
                 >
+                  {t('settings.save')}
+                </button>
+              </div>
+            </div>
+          )}
+          {settingsTab === 'web' && (
+            <div className="settings-section">
+              <h3>{t('searchSettings.title')}</h3>
+              <p className="settings-desc">{t('searchSettings.desc')}</p>
+
+              {webSearchError && (
+                <div className="settings-error">{webSearchError}</div>
+              )}
+              {webSearchSaved?.configured && !webSearchError && (
+                <div className="settings-success">{t('searchSettings.configured')}</div>
+              )}
+
+              <label>{t('searchSettings.provider')}</label>
+              <div className="theme-options">
+                {search.getProviderTypes().map((provider) => (
+                  <button
+                    key={provider.id}
+                    className={`theme-option ${webSearchForm.provider === provider.id ? 'active' : ''}`}
+                    onClick={() => setWebSearchForm((f) => ({ ...f, provider: provider.id }))}
+                  >
+                    <span>{provider.name}</span>
+                  </button>
+                ))}
+              </div>
+
+              {webSearchForm.provider === 'tavily' && (
+                <label>
+                  {t('searchSettings.tavilyApiKey')}
+                  <div className="settings-two-col">
+                    <input
+                      type="password"
+                      autoComplete="off"
+                      placeholder={webSearchSaved?.providers?.tavily?.hasApiKey
+                        ? t('searchSettings.apiKeySet')
+                        : 'tvly-...'}
+                      value={webSearchForm.tavilyApiKey}
+                      onChange={(e) => setWebSearchForm((f) => ({ ...f, tavilyApiKey: e.target.value }))}
+                    />
+                    {webSearchSaved?.providers?.tavily?.hasApiKey && (
+                      <button
+                        type="button"
+                        className="settings-secondary"
+                        disabled={webSearchSaving}
+                        onClick={() => handleClearSearchApiKey('tavily')}
+                      >
+                        {t('searchSettings.clearKey')}
+                      </button>
+                    )}
+                  </div>
+                </label>
+              )}
+
+              {webSearchForm.provider === 'brave' && (
+                <label>
+                  {t('searchSettings.braveApiKey')}
+                  <div className="settings-two-col">
+                    <input
+                      type="password"
+                      autoComplete="off"
+                      placeholder={webSearchSaved?.providers?.brave?.hasApiKey
+                        ? t('searchSettings.apiKeySet')
+                        : 'BSA...'}
+                      value={webSearchForm.braveApiKey}
+                      onChange={(e) => setWebSearchForm((f) => ({ ...f, braveApiKey: e.target.value }))}
+                    />
+                    {webSearchSaved?.providers?.brave?.hasApiKey && (
+                      <button
+                        type="button"
+                        className="settings-secondary"
+                        disabled={webSearchSaving}
+                        onClick={() => handleClearSearchApiKey('brave')}
+                      >
+                        {t('searchSettings.clearKey')}
+                      </button>
+                    )}
+                  </div>
+                </label>
+              )}
+
+              {webSearchForm.provider === 'searxng' && (
+                <label>
+                  {t('searchSettings.searxngUrl')}
+                  <input
+                    type="text"
+                    placeholder="https://searx.example.com"
+                    value={webSearchForm.searxngBaseUrl}
+                    onChange={(e) => setWebSearchForm((f) => ({ ...f, searxngBaseUrl: e.target.value }))}
+                  />
+                  <p className="settings-desc">{t('searchSettings.searxngHint')}</p>
+                </label>
+              )}
+
+              <label>
+                {t('searchSettings.maxResults')}
+                <input
+                  type="number"
+                  min="1"
+                  max="10"
+                  value={webSearchForm.maxResults}
+                  onChange={(e) => setWebSearchForm((f) => ({ ...f, maxResults: e.target.value }))}
+                />
+              </label>
+
+              <p className="settings-desc">{t('searchSettings.keyLocalNote')}</p>
+
+              <div className="settings-actions">
+                <button className="settings-cancel" onClick={onClose}>{t('settings.cancel')}</button>
+                <button className="settings-save" onClick={handleSaveWebSearch} disabled={webSearchSaving}>
                   {t('settings.save')}
                 </button>
               </div>

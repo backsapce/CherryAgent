@@ -113,8 +113,8 @@
 }
 
 .source-btn.active {
-  color: var(--color-primary, #007bff);
-  background: color-mix(in srgb, var(--color-primary, #007bff) 10%, transparent);
+  color: var(--color-primary);
+  background: color-mix(in srgb, var(--color-primary) 10%, transparent);
 }
 
 .source-btn.active::after {
@@ -125,7 +125,7 @@
   transform: translateX(-50%);
   width: 12px;
   height: 2px;
-  background-color: var(--color-primary, #007bff);
+  background-color: var(--color-primary);
   border-radius: 1px;
 }
 
@@ -156,9 +156,9 @@
 }
 
 .filemanage-header-btn.active {
-  background-color: color-mix(in srgb, var(--color-primary, #007bff) 12%, transparent);
-  border-color: color-mix(in srgb, var(--color-primary, #007bff) 38%, transparent);
-  color: var(--color-primary, #007bff);
+  background-color: color-mix(in srgb, var(--color-primary) 12%, transparent);
+  border-color: color-mix(in srgb, var(--color-primary) 38%, transparent);
+  color: var(--color-primary);
 }
 
 .filemanage-header-btn svg {
@@ -363,8 +363,8 @@
 }
 
 .tree-node.multi-selected > .tree-item {
-  background-color: color-mix(in srgb, var(--color-primary, #007bff) 14%, transparent);
-  box-shadow: inset 3px 0 0 var(--color-primary, #007bff);
+  background-color: color-mix(in srgb, var(--color-primary) 14%, transparent);
+  box-shadow: inset 3px 0 0 var(--color-primary);
 }
 
 .tree-node.multi-selected > .tree-item .tree-label {
@@ -376,8 +376,8 @@
 }
 
 .tree-node.drop-target > .tree-item {
-  background-color: color-mix(in srgb, var(--color-primary, #007bff) 12%, transparent);
-  outline: 1px dashed color-mix(in srgb, var(--color-primary, #007bff) 72%, transparent);
+  background-color: color-mix(in srgb, var(--color-primary) 12%, transparent);
+  outline: 1px dashed color-mix(in srgb, var(--color-primary) 72%, transparent);
   outline-offset: -2px;
 }
 
@@ -397,13 +397,13 @@
 .tree-selected-badge {
   margin-left: 6px;
   font-size: 12px;
-  color: var(--color-primary, #007bff);
+  color: var(--color-primary);
   font-weight: bold;
 }
 
 .filemanage-selected-hint {
   font-size: 12px;
-  color: var(--color-primary, #007bff);
+  color: var(--color-primary);
   margin-top: 4px;
 }
 
@@ -457,7 +457,7 @@
 
 .file-action-btn.edit-btn:hover {
   background-color: var(--bg-hover, #e3f2fd);
-  color: var(--color-primary, #007bff);
+  color: var(--color-primary);
 }
 
 [data-theme="dark"] .file-action-btn.edit-btn:hover {
@@ -581,17 +581,20 @@
   align-items: center;
   gap: 8px;
   padding: 10px 16px;
-  background-color: var(--color-primary, #007bff);
-  color: white;
-  border: none;
+  background: var(--button-primary-bg);
+  color: var(--button-primary-fg);
+  border: 1px solid var(--button-primary-border);
   border-radius: 8px;
   cursor: pointer;
   font-size: 13px;
+  font-weight: 600;
+  box-shadow: var(--button-primary-shadow);
   transition: background-color 0.15s ease;
 }
 
 .filemanage-upload-btn:hover:not(:disabled) {
-  background-color: var(--color-primary-hover, #0056b3);
+  background: var(--button-primary-bg-hover);
+  box-shadow: var(--button-primary-shadow-hover);
 }
 
 .filemanage-upload-btn:disabled {
@@ -600,13 +603,16 @@
 }
 
 .filemanage-upload-btn.folder-upload-btn {
-  color: var(--color-primary, #007bff);
-  background-color: color-mix(in srgb, var(--color-primary, #007bff) 9%, var(--color-surface, #fff));
-  border: 1px solid color-mix(in srgb, var(--color-primary, #007bff) 35%, transparent);
+  color: var(--color-text-heading);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-subtle);
+  box-shadow: none;
 }
 
 .filemanage-upload-btn.folder-upload-btn:hover:not(:disabled) {
-  background-color: color-mix(in srgb, var(--color-primary, #007bff) 15%, var(--color-surface, #fff));
+  background: var(--color-surface-alt);
+  border-color: var(--color-border-focus);
+  box-shadow: none;
 }
 
 .filemanage-drop-hint {
@@ -616,8 +622,8 @@
 }
 
 .drag-over {
-  background-color: color-mix(in srgb, var(--color-primary, #007bff) 10%, transparent) !important;
-  border: 2px dashed var(--color-primary, #007bff) !important;
+  background-color: color-mix(in srgb, var(--color-primary) 10%, transparent) !important;
+  border: 2px dashed var(--color-primary) !important;
   border-radius: 8px;
 }
 

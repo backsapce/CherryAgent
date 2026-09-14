@@ -336,6 +336,54 @@ function assertRemoteAgentRuntime(url) {
   }
 }
 
+/**
+ * Run a web search on the agent server. Used as a fallback when the search
+ * provider cannot be reached directly from the browser (for example a
+ * SearXNG instance without CORS headers). The request carries the search
+ * provider credential, so it rides the same authenticated channel as
+ * sandbox-run model configs.
+ */
+export async function proxyWebSearch(url, searchConfig, request, options = {}) {
+  assertRemoteAgentRuntime(url);
+  const endpoint = `${resolveAgentUrl(url)}/web-search`;
+  const headers = agentHeaders(url, { 'Content-Type': 'application/json' });
+  const controls = requestControls(options, AGENT_RUN_REQUEST_TIMEOUT_MS);
+  return withRequestDeadline('Agent web search', controls, async (signal) => {
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ config: searchConfig, request }),
+      signal,
+    });
+    if (!res.ok) throw await agentResponseError(res);
+    return res.json();
+  });
+}
+
+/**
+ * Fetch a web page through the agent server, bypassing browser CORS limits.
+ * Returns the page envelope (url, status, contentType, text, truncated).
+ */
+export async function proxyWebFetch(url, targetUrl, options = {}) {
+  assertRemoteAgentRuntime(url);
+  const endpoint = `${resolveAgentUrl(url)}/web-fetch`;
+  const headers = agentHeaders(url, { 'Content-Type': 'application/json' });
+  const controls = requestControls(options, 60_000);
+  return withRequestDeadline('Agent web fetch', controls, async (signal) => {
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        url: targetUrl,
+        ...(options.maxChars != null ? { max_chars: options.maxChars } : {}),
+      }),
+      signal,
+    });
+    if (!res.ok) throw await agentResponseError(res);
+    return res.json();
+  });
+}
+
 async function assertAgentRunProtocol(url, controls) {
   const endpoint = resolveAgentUrl(url);
   const headers = agentHeaders(url);

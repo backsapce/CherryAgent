@@ -51,6 +51,8 @@ import { migrateLegacyAgentState, resolveAgentStatePaths } from './agent-state.j
 import { createCommandExecutor } from './command-executor.js';
 import { createCommandJobManager } from './command-jobs.js';
 import { createFilePathPolicy } from './file-path-policy.js';
+import { fetchWebPage, isPrivateWebHostname, normalizeWebUrl } from '../src/agent/webFetch.js';
+import { runWebSearch } from '../src/models/search.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const STATIC_DIR = join(__dirname, '..', 'dist');
@@ -90,6 +92,7 @@ const ALLOWED_ORIGINS = (process.env.AGENT_ALLOWED_ORIGINS || 'https://127.0.0.1
   .map((origin) => origin.trim())
   .filter(Boolean);
 const COMMAND_SHELL = process.env.AGENT_SHELL || (process.platform === 'win32' ? (process.env.ComSpec || 'cmd.exe') : undefined);
+const ALLOW_PRIVATE_WEB_FETCH = /^(1|true|yes)$/i.test(process.env.AGENT_ALLOW_PRIVATE_WEB_FETCH || '');
 const WORKSPACE_DIR = resolve(process.env.AGENT_WORKING_DIR || process.cwd());
 const FILES_ROOT_DIR = resolve(process.env.AGENT_FILES_DIR || WORKSPACE_DIR);
 const AGENT_STATE_PATHS = resolveAgentStatePaths({
@@ -834,6 +837,84 @@ const server = createServer(async (req, res) => {
     if (!isAuthorized(req)) return json(res, 401, { error: 'Unauthorized.' }, req);
     const run = await agentRunManager.abort(decodeURIComponent(runRoute[1]));
     return run ? json(res, 202, run, req) : json(res, 404, { error: 'Agent run not found' }, req);
+  }
+
+  // ── Web search proxy (requires auth) ───────────────────────────────────
+  // Runs a provider search server-side for browser clients that cannot reach
+  // the provider directly (no CORS). The request carries the provider
+  // credential, so it rides the same authenticated channel as run payloads.
+  if (url.pathname === '/agent/web-search' && req.method === 'POST') {
+    if (!isAuthorized(req)) return json(res, 401, { error: 'Unauthorized.' }, req);
+    const clientIp = req.socket.remoteAddress;
+    if (isRateLimited(`websearch:${clientIp}`, 30, 60_000)) {
+      return json(res, 429, { error: 'Too many search requests. Slow down.' }, req);
+    }
+
+    const parsed = await readJsonBody(req, 64 * 1024);
+    if (parsed === undefined) {
+      return json(res, 400, { error: 'Invalid JSON body' }, req);
+    }
+    const { config: searchConfig = {}, request: searchRequest = {} } = parsed || {};
+    if (!searchRequest || typeof searchRequest.query !== 'string' || !searchRequest.query.trim()) {
+      return json(res, 400, { error: 'Missing or invalid "request.query" field' }, req);
+    }
+
+    console.log(`[agent] web-search: ${searchConfig.provider} "${searchRequest.query.slice(0, 200)}"`);
+    try {
+      const result = await runWebSearch(searchConfig, searchRequest, {});
+      return json(res, 200, result, req);
+    } catch (error) {
+      console.warn(`[agent] web-search failed: ${error.message}`);
+      return json(res, error.statusCode && error.statusCode >= 400 && error.statusCode < 500 ? error.statusCode : 502, {
+        error: error.message || 'Web search failed',
+      }, req);
+    }
+  }
+
+  // ── Web fetch proxy (requires auth) ────────────────────────────────────
+  // Fetches one public web page for the browser client, bypassing browser
+  // CORS limits, and returns the converted readable text.
+  if (url.pathname === '/agent/web-fetch' && req.method === 'POST') {
+    if (!isAuthorized(req)) return json(res, 401, { error: 'Unauthorized.' }, req);
+    const clientIp = req.socket.remoteAddress;
+    if (isRateLimited(`webfetch:${clientIp}`, 60, 60_000)) {
+      return json(res, 429, { error: 'Too many fetch requests. Slow down.' }, req);
+    }
+
+    const parsed = await readJsonBody(req, 64 * 1024);
+    if (parsed === undefined) {
+      return json(res, 400, { error: 'Invalid JSON body' }, req);
+    }
+    const { url: targetUrl, max_chars: maxChars } = parsed || {};
+    const normalizedTarget = normalizeWebUrl(targetUrl);
+    if (!normalizedTarget) {
+      return json(res, 400, { error: 'Missing or invalid "url" field: only http(s) URLs are supported' }, req);
+    }
+    // Defense-in-depth for CSRF-shaped misuse when auth is disabled: private
+    // addresses stay unreachable unless the operator opts in. A token holder
+    // can already run arbitrary shell, so this is not a hard boundary.
+    let targetHost = null;
+    try {
+      targetHost = new URL(normalizedTarget).hostname;
+    } catch { /* unreachable: normalizeWebUrl validated it */ }
+    if (!ALLOW_PRIVATE_WEB_FETCH && isPrivateWebHostname(targetHost)) {
+      return json(res, 403, { error: 'Refusing to fetch private or loopback addresses through the web proxy (set AGENT_ALLOW_PRIVATE_WEB_FETCH=1 to allow).' }, req);
+    }
+
+    console.log(`[agent] web-fetch: ${normalizedTarget}`);
+    try {
+      const page = await fetchWebPage(normalizedTarget, {
+        maxChars,
+        timeoutMs: 30_000,
+        // The proxy is the shared cache owner; each request re-validates the
+        // TTL centrally instead of trusting a client-supplied cache flag.
+        noCache: false,
+      });
+      return json(res, 200, page, req);
+    } catch (error) {
+      console.warn(`[agent] web-fetch failed: ${error.message}`);
+      return json(res, error.statusCode || 502, { error: error.message || 'Web fetch failed' }, req);
+    }
   }
 
   // ── List files (requires auth) ─────────────────────────────────────────

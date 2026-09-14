@@ -59,6 +59,7 @@
     "title": "Settings",
     "llm": "LLM Settings",
     "general": "General",
+    "web": "Web Search",
     "sandboxes": "Sandboxes",
     "appearance": "Appearance",
     "data": "Data",
@@ -69,6 +70,20 @@
     "tools": "Tools",
     "cancel": "Cancel",
     "save": "Save"
+  },
+  "searchSettings": {
+    "title": "Web Search",
+    "desc": "Configure the search provider behind the web_search tool. The agent returns compact title/URL/snippet results and can read full pages with web_fetch.",
+    "configured": "Web search is configured and available to the agent.",
+    "provider": "Search provider",
+    "tavilyApiKey": "Tavily API key",
+    "braveApiKey": "Brave Search API key",
+    "apiKeySet": "API key saved — enter a new key to replace it",
+    "clearKey": "Clear key",
+    "searxngUrl": "SearXNG instance URL",
+    "searxngHint": "The instance must enable the JSON output format. If it lacks CORS headers, searches are proxied through a connected agent server.",
+    "maxResults": "Default result count (1-10)",
+    "keyLocalNote": "API keys stay in this browser's storage and are never included in sync by default."
   },
   "generalSettings": {
     "title": "General Settings",

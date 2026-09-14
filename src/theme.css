@@ -41,19 +41,33 @@
   --color-border-subtle:   #2b3a4d;
   --color-border-focus:    #4fb3c4;
 
-  /* Buttons / accents */
-  --color-primary:         #4f8cff;
-  --color-primary-hover:   #74a3ff;
+  /* Buttons / accents — primary is ink-white (inverted), teal stays the brand accent */
+  --color-primary:         #e9edf4;
+  --color-primary-hover:   #ffffff;
   --color-accent:          #1d3442;
   --color-accent-hover:    #26495a;
   --color-accent-strong:   #4fb3c4;
-  --color-primary-fg:      #ffffff;
+  --color-primary-fg:      #10151d;
+
+  /* Primary button treatment: soft vertical gradient + neutral layered shadow */
+  --button-primary-bg: linear-gradient(180deg, #f8fafc, #dfe6ee);
+  --button-primary-bg-hover: linear-gradient(180deg, #ffffff, #eaeff5);
+  --button-primary-fg: #10151d;
+  --button-primary-border: rgba(9, 13, 19, 0.14);
+  --button-primary-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.4),
+    0 6px 18px -8px rgba(0, 0, 0, 0.55),
+    inset 0 1px 0 rgba(255, 255, 255, 0.75);
+  --button-primary-shadow-hover:
+    0 2px 4px rgba(0, 0, 0, 0.38),
+    0 10px 24px -8px rgba(0, 0, 0, 0.6),
+    inset 0 1px 0 rgba(255, 255, 255, 0.8);
 
   /* Avatars */
-  --color-avatar-user-bg:  #1f9d7a;
-  --color-avatar-user-fg:  #ecfffa;
-  --color-avatar-ai-bg:    #4f8cff;
-  --color-avatar-ai-fg:    #ffffff;
+  --color-avatar-user-bg:  #3d4a5d;
+  --color-avatar-user-fg:  #e7edf5;
+  --color-avatar-ai-bg:    #3d9db3;
+  --color-avatar-ai-fg:    #f2fbfd;
 
   /* Settings nav */
   --color-nav-active:      #1c2b3b;
@@ -71,7 +85,7 @@
   --color-success:         #35d39d;
   --color-warning:         #f6b84b;
   --color-hint:            #657386;
-  --color-loading:         #77a4ff;
+  --color-loading:         #6fb5c4;
   --color-overlay:         rgba(0, 0, 0, 0.7);
   --color-shadow:          rgba(0, 0, 0, 0.42);
   --color-shadow-soft:     rgba(4, 10, 18, 0.28);
@@ -114,18 +128,32 @@
   --color-border-subtle:   #cfd9e5;
   --color-border-focus:    #2496a8;
 
-  /* Buttons / accents */
-  --color-primary:         #2563eb;
-  --color-primary-hover:   #1d4ed8;
+  /* Buttons / accents — primary is ink (near-black), teal stays the brand accent */
+  --color-primary:         #1a1f28;
+  --color-primary-hover:   #000000;
   --color-accent:          #e3f2f5;
   --color-accent-hover:    #cce7ec;
   --color-accent-strong:   #1493a6;
-  --color-primary-fg:      #ffffff;
+  --color-primary-fg:      #f5f7fa;
+
+  /* Primary button treatment */
+  --button-primary-bg: linear-gradient(180deg, #2b313c, #15181f);
+  --button-primary-bg-hover: linear-gradient(180deg, #363d49, #1b1f27);
+  --button-primary-fg: #f5f7fa;
+  --button-primary-border: rgba(9, 13, 19, 0.9);
+  --button-primary-shadow:
+    0 1px 2px rgba(13, 17, 23, 0.24),
+    0 6px 16px -8px rgba(13, 17, 23, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.1);
+  --button-primary-shadow-hover:
+    0 2px 4px rgba(13, 17, 23, 0.26),
+    0 10px 22px -8px rgba(13, 17, 23, 0.5),
+    inset 0 1px 0 rgba(255, 255, 255, 0.12);
 
   /* Avatars */
-  --color-avatar-user-bg:  #119c7a;
+  --color-avatar-user-bg:  #6b7688;
   --color-avatar-user-fg:  #ffffff;
-  --color-avatar-ai-bg:    #2563eb;
+  --color-avatar-ai-bg:    #0e7f92;
   --color-avatar-ai-fg:    #ffffff;
 
   /* Settings nav */
@@ -144,7 +172,7 @@
   --color-success:         #0f9f6e;
   --color-warning:         #d98917;
   --color-hint:            #9aa6b5;
-  --color-loading:         #477ee8;
+  --color-loading:         #1493a6;
   --color-overlay:         rgba(0, 0, 0, 0.3);
   --color-shadow:          rgba(15, 23, 42, 0.14);
   --color-shadow-soft:     rgba(15, 23, 42, 0.08);
@@ -161,9 +189,13 @@
 }
 
 :root {
-  --radius-sm: 6px;
-  --radius-md: 8px;
-  --radius-lg: 12px;
-  --shadow-popover: 0 18px 50px var(--color-shadow);
-  --shadow-panel: 0 10px 30px var(--color-shadow-soft);
+  --radius-sm: 7px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --shadow-popover:
+    0 1px 2px color-mix(in srgb, var(--color-shadow) 48%, transparent),
+    0 24px 64px -16px var(--color-shadow);
+  --shadow-panel:
+    0 1px 2px color-mix(in srgb, var(--color-shadow-soft) 60%, transparent),
+    0 12px 32px -10px var(--color-shadow-soft);
 }

@@ -165,6 +165,49 @@ export const TOOL_PARAMETER_SCHEMAS = {
     required: ['delay', 'unit', 'prompt'],
     additionalProperties: false,
   },
+  web_search: {
+    type: 'object',
+    properties: {
+      query: {
+        type: 'string',
+        minLength: 2,
+        description: 'The search query to use.',
+      },
+      max_results: {
+        type: 'integer',
+        minimum: 1,
+        maximum: 10,
+        description: 'Maximum number of results to return. Defaults to 5.',
+      },
+      allowed_domains: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Only include results from these domains (for example ["github.com"]).',
+      },
+      blocked_domains: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Never include results from these domains.',
+      },
+    },
+    required: ['query'],
+    additionalProperties: false,
+  },
+  web_fetch: {
+    type: 'object',
+    properties: {
+      url: {
+        type: 'string',
+        description: 'The URL to fetch. Only http(s) is supported and http is upgraded to https.',
+      },
+      max_chars: {
+        type: 'number',
+        description: `Maximum readable characters of converted page content. Defaults to 50000 and is capped at 200000.`,
+      },
+    },
+    required: ['url'],
+    additionalProperties: false,
+  },
 };
 
 /** Render a command execution result for the model (exit code, env, output). */
