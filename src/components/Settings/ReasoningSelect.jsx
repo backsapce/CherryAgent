@@ -20,7 +20,7 @@ export default function ReasoningSelect({ profile, onChange, defaultSetting = fa
     });
     return () => { cancelled = true; };
   }, [provider, model]);
-  const levels = capability?.provider === provider && capability?.model === model ? capability.levels : [];
+  const levels = capability?.provider === provider && capability?.model === model && capability?.levels ? capability.levels : [];
   if (!levels.length) return null;
   const configuredValue = defaultSetting ? defaultEffort : profile?.reasoningEffort || '';
   const value = levels.includes(configuredValue) ? configuredValue : '';
