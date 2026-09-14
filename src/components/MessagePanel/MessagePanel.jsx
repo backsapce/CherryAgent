@@ -653,6 +653,23 @@ const ToolImageReference = ({ reference, agentId, sandboxUrl }) => {
   );
 };
 
+const ToolImageWall = ({ entries, agentId, sandboxUrl }) => {
+  if (entries.length === 1) {
+    return (
+      <div className="tool-image-artifact">
+        <ToolImageReference reference={entries[0].reference} agentId={agentId} sandboxUrl={sandboxUrl} />
+      </div>
+    );
+  }
+  return (
+    <div className="tool-image-grid">
+      {entries.map(({ toolCall, reference }) => (
+        <ToolImageReference key={toolCall.id} reference={reference} agentId={agentId} sandboxUrl={sandboxUrl} />
+      ))}
+    </div>
+  );
+};
+
 const ScheduleWakeupToolLabel = ({ label, runAtMs }) => {
   const [nowMs, setNowMs] = useState(() => Date.now());
 
@@ -763,6 +780,15 @@ const ToolBlock = ({ toolCall, onStopStreaming, agentId, sandboxUrl }) => {
   const renderTerminal = name === 'execute_command';
   const isImageGeneration = isImageGenerationToolName(name);
   const imageReference = parseImageReference(toolCall);
+  // A finished display-image call renders as just the picture — the
+  // "creating image" header is only meaningful while the call is running.
+  if (imageReference) {
+    return (
+      <div className="tool-image-artifact">
+        <ToolImageReference reference={imageReference} agentId={agentId} sandboxUrl={sandboxUrl} />
+      </div>
+    );
+  }
   const label = renderTerminal ? t('message.execute') : (isImageGeneration ? t('message.imageGeneration') : name);
   const wakeupRunAtMs = getScheduleWakeupRunAtMs(toolCall);
   const waitSeconds = getWaitCommandWaitSeconds(toolCall);
@@ -828,6 +854,37 @@ const ToolBlock = ({ toolCall, onStopStreaming, agentId, sandboxUrl }) => {
   );
 };
 
+const ToolCallList = ({ toolCalls, onStopStreaming, agentId, sandboxUrl }) => {
+  const items = [];
+  let imageEntries = [];
+  const flushImageEntries = () => {
+    if (!imageEntries.length) return;
+    items.push({ key: `image-wall-${imageEntries[0].toolCall.id}`, imageEntries });
+    imageEntries = [];
+  };
+  for (const toolCall of toolCalls) {
+    const reference = parseImageReference(toolCall);
+    if (reference) {
+      imageEntries.push({ toolCall, reference });
+    } else {
+      flushImageEntries();
+      items.push({ key: toolCall.id || `tool-${items.length}`, toolCall });
+    }
+  }
+  flushImageEntries();
+  return items.map((item) => (item.toolCall ? (
+    <ToolBlock
+      key={item.key}
+      toolCall={item.toolCall}
+      onStopStreaming={onStopStreaming}
+      agentId={agentId}
+      sandboxUrl={sandboxUrl}
+    />
+  ) : (
+    <ToolImageWall key={item.key} entries={item.imageEntries} agentId={agentId} sandboxUrl={sandboxUrl} />
+  )));
+};
+
 const ImageGenerationStatus = () => {
   const { t } = useI18n();
   return (
@@ -852,62 +909,45 @@ const AssistantTranscript = ({ transcript, toolCalls, streaming, onStopStreaming
       reasoningRounds.set(segment.id, reasoningCounter);
     }
   }
-  return (
-    <div className="assistant-transcript">
-      {transcript.map((segment) => {
-        if (segment.type === 'reasoning') {
-          const reasoningRound = reasoningRounds.get(segment.id) || 0;
-          const parsedReasoning = splitTaggedReasoningContent(segment.content);
-          return (
-            <div className="transcript-reasoning-segment" key={segment.id}>
-              <ThinkingBlock
-                thinking={parsedReasoning.thinking}
-                isThinking={streaming && segment.status !== 'finished' && !parsedReasoning.closed}
-                startedAt={segment.startedAt}
-                finishedAt={segment.finishedAt}
-                round={reasoningRound}
-              />
-              {parsedReasoning.text && (
-                <div className="message-text transcript-text">
-                  <ReactMarkdown
-                    remarkPlugins={MARKDOWN_REMARK_PLUGINS}
-                    rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
-                    components={MARKDOWN_COMPONENTS}
-                  >
-                    {parsedReasoning.text}
-                  </ReactMarkdown>
-                </div>
-              )}
+  const renderSegment = (segment) => {
+    if (segment.type === 'reasoning') {
+      const reasoningRound = reasoningRounds.get(segment.id) || 0;
+      const parsedReasoning = splitTaggedReasoningContent(segment.content);
+      return (
+        <div className="transcript-reasoning-segment" key={segment.id}>
+          <ThinkingBlock
+            thinking={parsedReasoning.thinking}
+            isThinking={streaming && segment.status !== 'finished' && !parsedReasoning.closed}
+            startedAt={segment.startedAt}
+            finishedAt={segment.finishedAt}
+            round={reasoningRound}
+          />
+          {parsedReasoning.text && (
+            <div className="message-text transcript-text">
+              <ReactMarkdown
+                remarkPlugins={MARKDOWN_REMARK_PLUGINS}
+                rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
+                components={MARKDOWN_COMPONENTS}
+              >
+                {parsedReasoning.text}
+              </ReactMarkdown>
             </div>
-          );
-        }
-        if (segment.type === 'tool') {
-          const toolCall = toolCalls?.find((item) => item.id === segment.toolCallId);
-          return toolCall ? (
-            <div className="transcript-tool-segment" key={segment.id}>
-              <ToolBlock
-                toolCall={toolCall}
-                onStopStreaming={onStopStreaming}
-                agentId={agentId}
-                sandboxUrl={sandboxUrl}
-              />
-              {segment.content && (
-                <div className="message-text transcript-text">
-                  <ReactMarkdown
-                    remarkPlugins={MARKDOWN_REMARK_PLUGINS}
-                    rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
-                    components={MARKDOWN_COMPONENTS}
-                  >
-                    {segment.content}
-                  </ReactMarkdown>
-                </div>
-              )}
-            </div>
-          ) : null;
-        }
-        if (segment.type === 'text' && segment.content) {
-          return (
-            <div className="message-text transcript-text" key={segment.id}>
+          )}
+        </div>
+      );
+    }
+    if (segment.type === 'tool') {
+      const toolCall = toolCalls?.find((item) => item.id === segment.toolCallId);
+      return toolCall ? (
+        <div className="transcript-tool-segment" key={segment.id}>
+          <ToolBlock
+            toolCall={toolCall}
+            onStopStreaming={onStopStreaming}
+            agentId={agentId}
+            sandboxUrl={sandboxUrl}
+          />
+          {segment.content && (
+            <div className="message-text transcript-text">
               <ReactMarkdown
                 remarkPlugins={MARKDOWN_REMARK_PLUGINS}
                 rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
@@ -916,10 +956,57 @@ const AssistantTranscript = ({ transcript, toolCalls, streaming, onStopStreaming
                 {segment.content}
               </ReactMarkdown>
             </div>
-          );
-        }
-        return null;
-      })}
+          )}
+        </div>
+      ) : null;
+    }
+    if (segment.type === 'text' && segment.content) {
+      return (
+        <div className="message-text transcript-text" key={segment.id}>
+          <ReactMarkdown
+            remarkPlugins={MARKDOWN_REMARK_PLUGINS}
+            rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
+            components={MARKDOWN_COMPONENTS}
+          >
+            {segment.content}
+          </ReactMarkdown>
+        </div>
+      );
+    }
+    return null;
+  };
+
+  // Collapse runs of finished display-image tool segments into one grid so a
+  // batch of generated images reads as a single gallery. Text or other tools
+  // between two image calls start a new grid.
+  const renderItems = [];
+  let imageEntries = [];
+  const flushImageEntries = () => {
+    if (!imageEntries.length) return;
+    renderItems.push({ key: `image-wall-${imageEntries[0].toolCall.id}`, imageEntries });
+    imageEntries = [];
+  };
+  for (const segment of transcript) {
+    if (segment.type === 'tool' && !segment.content) {
+      const toolCall = toolCalls?.find((item) => item.id === segment.toolCallId);
+      const reference = toolCall ? parseImageReference(toolCall) : null;
+      if (reference) {
+        imageEntries.push({ toolCall, reference });
+        continue;
+      }
+    }
+    flushImageEntries();
+    renderItems.push({ key: segment.id, segment });
+  }
+  flushImageEntries();
+
+  return (
+    <div className="assistant-transcript">
+      {renderItems.map((item) => (item.segment
+        ? renderSegment(item.segment)
+        : (
+          <ToolImageWall key={item.key} entries={item.imageEntries} agentId={agentId} sandboxUrl={sandboxUrl} />
+        )))}
     </div>
   );
 };
@@ -2032,15 +2119,12 @@ const MessagePanel = forwardRef(({
                   />
                 )}
                 {msg.role === 'assistant' && !hasTranscript && msg.toolCalls?.length > 0 && (
-                  msg.toolCalls.map((tc, i) => (
-                    <ToolBlock
-                      key={tc.id || i}
-                      toolCall={tc}
-                      onStopStreaming={onStopStreaming}
-                      agentId={agentId}
-                      sandboxUrl={selectedAgentUrl}
-                    />
-                  ))
+                  <ToolCallList
+                    toolCalls={msg.toolCalls}
+                    onStopStreaming={onStopStreaming}
+                    agentId={agentId}
+                    sandboxUrl={selectedAgentUrl}
+                  />
                 )}
                 <div className="message-text">
                   {editingMessageId === msg.id ? (
