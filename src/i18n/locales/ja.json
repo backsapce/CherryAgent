@@ -377,7 +377,19 @@
     "unsavedChanges": "未保存の変更",
     "saved": "保存済み",
     "saveHint": "Ctrl+S で保存",
-    "confirmDiscardChanges": "未保存の変更があります。破棄してもよろしいですか？"
+    "confirmDiscardChanges": "未保存の変更があります。破棄してもよろしいですか？",
+    "aiInfo": "AI生成情報",
+    "copy": "コピー",
+    "copied": "コピーしました",
+    "aiPrompt": "プロンプト",
+    "aiResolution": "解像度",
+    "aiModel": "モデル",
+    "aiLoras": "LoRA",
+    "aiSampler": "サンプラー",
+    "aiSteps": "ステップ数",
+    "aiSeed": "シード",
+    "aiCfg": "CFGスケール",
+    "aiDuration": "生成時間"
   },
   "permissions": {
     "title": "確認が必要です",

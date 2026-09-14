@@ -377,7 +377,19 @@
     "unsavedChanges": "Unsaved changes",
     "saved": "Saved",
     "saveHint": "Ctrl+S to save",
-    "confirmDiscardChanges": "You have unsaved changes. Are you sure you want to discard them?"
+    "confirmDiscardChanges": "You have unsaved changes. Are you sure you want to discard them?",
+    "aiInfo": "AI generation info",
+    "copy": "Copy",
+    "copied": "Copied",
+    "aiPrompt": "Prompt",
+    "aiResolution": "Resolution",
+    "aiModel": "Model",
+    "aiLoras": "LoRA",
+    "aiSampler": "Sampler",
+    "aiSteps": "Steps",
+    "aiSeed": "Seed",
+    "aiCfg": "CFG scale",
+    "aiDuration": "Generation time"
   },
   "permissions": {
     "title": "Approval needed",

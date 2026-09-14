@@ -97,7 +97,11 @@ test('sandbox runtime exposes only sandbox-owned tools', () => {
   );
   assert.match(
     REMOTE_TOOL_SCHEMAS.find((tool) => tool.name === 'start_command').description,
-    /unknown duration/
+    /without waiting/
+  );
+  assert.match(
+    REMOTE_TOOL_SCHEMAS.find((tool) => tool.name === 'wait_command').description,
+    /wait for it in one call/
   );
 });
 
@@ -246,6 +250,44 @@ test('sandbox background command dispatch preserves job ids, cursors, waits, and
   assert.deepEqual(calls[2].slice(0, 4), ['wait', 'job-one', 15, 12_000]);
   assert.strictEqual(calls[2][4], controller.signal);
   assert.deepEqual(calls[3], ['stop', 'job-one']);
+});
+
+test('sandbox wait_command with a command starts the job and waits on it in one call', async () => {
+  const calls = [];
+  const dispatch = createRuntimeToolDispatcher({
+    execCommand: async () => ({ stdout: '', stderr: '', code: 0 }),
+    startCommand: async (command) => {
+      calls.push(['start', command]);
+      return { job_id: 'job-fresh', status: 'running', nextCursor: 0 };
+    },
+    waitCommand: async (id, options) => {
+      calls.push(['wait', id, options.cursor, options.waitMs]);
+      return { job_id: id, status: 'completed', exit_code: 0, log: 'done\n', nextCursor: 4 };
+    },
+    listFiles: async () => [],
+    readFile: async () => '',
+    writeFile: async () => {},
+  });
+
+  const result = JSON.parse(await dispatch('wait_command', {
+    command: 'python train.py', wait_seconds: 45,
+  }));
+
+  assert.equal(result.status, 'completed');
+  assert.equal(result.job_id, 'job-fresh');
+  assert.deepEqual(calls, [
+    ['start', 'python train.py'],
+    ['wait', 'job-fresh', 0, 20_000],
+  ]);
+
+  await assert.rejects(
+    () => dispatch('wait_command', { command: 'ls', job_id: 'job-fresh' }),
+    /not both/
+  );
+  await assert.rejects(
+    () => dispatch('wait_command', { cursor: 0 }),
+    /pass command/
+  );
 });
 
 test('sandbox wait_command slices long waits and reports the remainder', async () => {

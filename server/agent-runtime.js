@@ -72,7 +72,7 @@ const REMOTE_TOOL_SCHEMAS = [
   },
   {
     name: 'start_command',
-    description: 'Start a managed BACKGROUND shell command and return immediately with a job_id. Use for training, servers, watchers, lengthy builds/tests/downloads/migrations, commands of unknown duration, or anything expected to take 30 seconds or more. Do not add nohup, &, disown, screen, tmux, or timeout wrappers.',
+    description: 'Start a managed BACKGROUND shell command and return immediately with a job_id, without waiting. Use when a later get_command/wait_command or schedule_wakeup continuation will consume the result; otherwise prefer wait_command with the command to start and wait in one call. Do not add nohup, &, disown, screen, tmux, or timeout wrappers.',
     parameters: TOOL_PARAMETER_SCHEMAS.start_command,
   },
   {
@@ -82,7 +82,7 @@ const REMOTE_TOOL_SCHEMAS = [
   },
   {
     name: 'wait_command',
-    description: 'Wait for a background job to finish or produce new logs, blocking for up to wait_seconds (default 30, at most 7 days); the user sees the remaining wait time. This runtime serves long waits in bounded slices: when a wait is cut short, the result says so and you should call wait_command again (or schedule_wakeup when the turn should end now and resume later).',
+    description: 'Start a background command and wait for it in one call (pass command), or keep waiting on an existing job (pass job_id with cursor): blocks for up to wait_seconds (default 30, at most 7 days) and returns early on completion or new logs; the user sees the remaining wait time. This runtime serves long waits in bounded slices: when a wait is cut short, the result says so and you should call wait_command again with the job_id (or schedule_wakeup when the turn should end now and resume later).',
     parameters: TOOL_PARAMETER_SCHEMAS.wait_command,
   },
   {
@@ -945,8 +945,25 @@ export function createRuntimeToolDispatcher({
     }
     if (name === 'wait_command') {
       if (!waitCommand) throw new Error('Managed background commands are unavailable.');
+      const { command, job_id: jobId } = input;
+      if (command && jobId) {
+        throw new Error('wait_command: pass either command (start a new job and wait) or job_id (wait on an existing job), not both.');
+      }
+      if (command) {
+        if (!startCommand) throw new Error('Managed background commands are unavailable.');
+        const job = await startCommand(command);
+        const result = await waitCommandInSlices(waitCommand, {
+          job_id: job.job_id,
+          cursor: 0,
+          wait_seconds: input.wait_seconds,
+        }, context);
+        return JSON.stringify(result, null, 2);
+      }
+      if (!jobId) {
+        throw new Error('wait_command: pass command (start a new job and wait) or job_id (wait on an existing job).');
+      }
       const result = await waitCommandInSlices(waitCommand, input, context);
-      return result ? JSON.stringify(result, null, 2) : `Background command not found: ${input.job_id}`;
+      return result ? JSON.stringify(result, null, 2) : `Background command not found: ${jobId}`;
     }
     if (name === 'stop_command') {
       if (!stopCommand) throw new Error('Managed background commands are unavailable.');

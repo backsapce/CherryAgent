@@ -78,6 +78,7 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandb
   const [editorOpen, setEditorOpen] = useState(false);
   const [editingFile, setEditingFile] = useState(null);
   const [previewingImage, setPreviewingImage] = useState(null);
+  const [aiInfoVisible, setAiInfoVisible] = useState(false);
   const agentIds = useMemo(() => (
     Array.isArray(agents) ? new Set(agents.map((agent) => agent.id)) : null
   ), [agents]);
@@ -418,7 +419,10 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandb
     const images = imageNames.includes(fileName) ? imageNames : [fileName];
     setPreviewingImage({ fileName, filePath, images, index: images.indexOf(fileName) });
   }, []);
-  const handlePreviewClose = useCallback(() => setPreviewingImage(null), []);
+  const handlePreviewClose = useCallback(() => {
+    setPreviewingImage(null);
+    setAiInfoVisible(false);
+  }, []);
   const handlePreviewNavigate = useCallback((offset) => {
     setPreviewingImage((current) => {
       if (!current) return null;
@@ -841,6 +845,8 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandb
           onPrevious={() => handlePreviewNavigate(-1)}
           onNext={() => handlePreviewNavigate(1)}
           onClose={handlePreviewClose}
+          showAiInfo={aiInfoVisible}
+          onAiInfoVisibilityChange={setAiInfoVisible}
         />
       )}
     </>

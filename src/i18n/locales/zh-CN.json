@@ -377,7 +377,19 @@
     "unsavedChanges": "未保存的更改",
     "saved": "已保存",
     "saveHint": "Ctrl+S 保存",
-    "confirmDiscardChanges": "您有未保存的更改。确定要放弃它们吗？"
+    "confirmDiscardChanges": "您有未保存的更改。确定要放弃它们吗？",
+    "aiInfo": "AI 生成信息",
+    "copy": "复制",
+    "copied": "已复制",
+    "aiPrompt": "提示词",
+    "aiResolution": "分辨率",
+    "aiModel": "模型",
+    "aiLoras": "LoRA",
+    "aiSampler": "采样方法",
+    "aiSteps": "步数",
+    "aiSeed": "种子",
+    "aiCfg": "CFG",
+    "aiDuration": "运行时间"
   },
   "permissions": {
     "title": "需要确认",

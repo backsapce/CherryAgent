@@ -562,8 +562,14 @@ function serializeInput(input) {
   }
 }
 
+// Managed command tools may carry the command inline (start_command, or
+// wait_command when it starts and waits in one call) — surface it so the UI
+// header can show what a long-running call is actually executing.
+const COMMAND_TOOL_NAMES = new Set(['execute_command', 'start_command', 'wait_command']);
+
 function commandFor(name, input) {
-  return name === 'execute_command' && typeof input?.command === 'string' && input.command.trim()
+  if (!COMMAND_TOOL_NAMES.has(name)) return undefined;
+  return typeof input?.command === 'string' && input.command.trim()
     ? input.command
     : undefined;
 }

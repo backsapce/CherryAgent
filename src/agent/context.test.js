@@ -32,7 +32,8 @@ test('browser runtime prompt tells the model to prefer managed jobs when duratio
     autoSummarize: false,
   });
 
-  assert.match(result.systemPrompt, /When uncertain, choose start_command/);
+  assert.match(result.systemPrompt, /When uncertain, choose wait_command/);
+  assert.match(result.systemPrompt, /call wait_command with the command/);
   assert.match(result.systemPrompt, /Never use execute_command to "try" a long command first/);
   assert.match(result.systemPrompt, /Sparse or silent output does not prove a job is stuck/);
   assert.match(result.systemPrompt, /message beginning with \/<skill-name> explicitly selects that enabled skill/);

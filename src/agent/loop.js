@@ -30,19 +30,9 @@ const DEFAULT_SANDBOX_MODEL_TIMEOUT = Object.freeze({
   stepMs: 5 * 60_000,
   chunkMs: 90_000,
 });
-const MAX_CONTINUATION_GUARDS = 2;
 const STREAMING_TOOL_OUTPUT_MAX_CHARS = 80_000;
 const WAKEUP_SCHEDULED_CONTROL_CODE = 'CHERRY_WAKEUP_SCHEDULED';
 const WAKEUP_SCHEDULED_CONTROL_BRAND = Symbol('cherry-wakeup-scheduled');
-
-const CONTINUATION_INTENT_RE =
-  /\b(?:wait(?:ing)?|poll|check(?:ing)?|download(?:ing)?|compare|continue|next step|not (?:done|finished|complete)|after .*complete|once .*complete)\b|(?:等待|生成完成后|完成后|下载|对比|继续|下一步|稍后|轮生成任务)/i;
-
-const PROMISED_TOOL_WORK_RE =
-  /(?:\b(?:(?:i|we)(?:\s*(?:'|’)ll|\s+will|\s+(?:am|are)\s+going\s+to|\s+need\s+to|\s+should)|let\s+me|next(?:,?\s*(?:i|we)(?:\s*(?:'|’)ll|\s+will))?|now(?:,?\s*(?:i|we)(?:\s*(?:'|’)ll|\s+will))?|first(?:,?\s*(?:i|we)(?:\s*(?:'|’)ll|\s+will))?)\b[\s\S]{0,260}\b(?:inspect|check|read|list|open|search|scan|review|create|write|edit|modify|update|delete|move|copy|run|execute|test|build|install|generate|save|load|call|invoke|use)\b|(?:我(?:将|会|需要|应该)|先|接下来|现在)[\s\S]{0,120}(?:检查|读取|列出|搜索|创建|写入|修改|更新|运行|执行|测试|构建|保存|调用|使用))/i;
-
-const CONTINUATION_GUARD_PROMPT =
-  'You indicated the task still needs a later step, but you did not call a tool. Continue the task now. Do not describe future tool work. If a tool can inspect, read, list, create, write, run, check status, compare, or finish the work, call that tool in this response. Only provide a final answer when the requested task is actually complete.';
 
 const FINALIZE_PROMPT =
   'The tool-use round limit has been reached. Stop using tools and provide the best final status now: what is complete, what changed, what was verified, and any remaining blockers.';
@@ -224,7 +214,6 @@ export async function runAgentLoop(opts) {
     let latestUsage = initial.usage;
     let totalUsage = initial.totalUsage;
     let modelCallCount = initial.modelCallCount ?? initial.steps.length;
-    let continuationGuardCount = 0;
 
     // A syntactically successful but empty completion is common with broken
     // OpenAI-compatible gateways. Retry it once; otherwise the UI used to
@@ -252,33 +241,6 @@ export async function runAgentLoop(opts) {
       latestUsage = recovery.usage || latestUsage;
       totalUsage = addUsage(totalUsage, recovery.totalUsage);
       modelCallCount += recovery.modelCallCount ?? recovery.steps.length;
-    }
-
-    while (modelCallCount < maxRounds && shouldContinueWithoutToolCall(latestRun, schemas, continuationGuardCount)) {
-      continuationGuardCount += 1;
-      const continuation = await consumeAgentStream({
-        model,
-        messages: [
-          ...toModelMessages(packed.apiMessages),
-          ...responseMessages,
-          { role: 'user', content: CONTINUATION_GUARD_PROMPT },
-        ],
-        system: packed.systemPrompt,
-        tools,
-        maxRounds: Math.max(1, maxRounds - modelCallCount),
-        modelMaxRetries,
-        modelTimeout,
-        contextWindow,
-        signal: turn.signal,
-        emit,
-        lifecycle,
-        loopControl,
-      });
-      latestRun = continuation;
-      responseMessages.push(...continuation.responseMessages);
-      latestUsage = continuation.usage || latestUsage;
-      totalUsage = addUsage(totalUsage, continuation.totalUsage);
-      modelCallCount += continuation.modelCallCount ?? continuation.steps.length;
     }
 
     // `stepCountIs` ends on a tool-call step. Give the model one tool-free turn
@@ -397,16 +359,6 @@ export async function prepareAgentRuntimeContext(agentId, options = {}) {
     agentIdentity,
     sandboxFiles,
   };
-}
-
-function shouldContinueWithoutToolCall(run, schemas, continuationGuardCount) {
-  if (!schemas?.length || continuationGuardCount >= MAX_CONTINUATION_GUARDS) return false;
-  if (run.finishReason === 'tool-calls') return false;
-  const finalStep = run.steps.at(-1);
-  if (!finalStep) return false;
-  const text = `${finalStep.text || ''}\n${finalStep.reasoningText || ''}`;
-  const toolCallsSoFar = run.steps.reduce((count, step) => count + step.toolCalls.length, 0);
-  return (toolCallsSoFar > 0 && CONTINUATION_INTENT_RE.test(text)) || PROMISED_TOOL_WORK_RE.test(text);
 }
 
 function hasMeaningfulAgentOutput(state) {

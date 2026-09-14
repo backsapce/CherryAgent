@@ -35,7 +35,7 @@ export const TOOL_PARAMETER_SCHEMAS = {
   get_command: {
     type: 'object',
     properties: {
-      job_id: { type: 'string', description: 'The job_id returned by start_command.' },
+      job_id: { type: 'string', description: 'The job_id returned by start_command or wait_command.' },
       cursor: { type: 'integer', minimum: 0, description: 'Log byte cursor; use nextCursor from the previous result. Defaults to 0.' },
     },
     required: ['job_id'],
@@ -44,7 +44,11 @@ export const TOOL_PARAMETER_SCHEMAS = {
   wait_command: {
     type: 'object',
     properties: {
-      job_id: { type: 'string', description: 'The job_id returned by start_command.' },
+      command: {
+        type: 'string',
+        description: 'The complete foreground-form shell command to start and then wait on. Do not append & or nohup. Pass exactly one of command or job_id.',
+      },
+      job_id: { type: 'string', description: 'The job_id returned by start_command or a previous wait_command. Pass exactly one of command or job_id.' },
       cursor: { type: 'integer', minimum: 0, description: 'Use nextCursor from the previous result. Defaults to 0.' },
       wait_seconds: {
         type: 'integer',
@@ -53,13 +57,13 @@ export const TOOL_PARAMETER_SCHEMAS = {
         description: 'Maximum seconds to block waiting for output or completion, from 1 second up to 7 days. Always decide this explicitly (default 30). Size it to cover the expected remaining time of the job rather than re-waiting in a short loop; the user sees this duration while the wait runs.',
       },
     },
-    required: ['job_id'],
+    required: [],
     additionalProperties: false,
   },
   stop_command: {
     type: 'object',
     properties: {
-      job_id: { type: 'string', description: 'The job_id returned by start_command.' },
+      job_id: { type: 'string', description: 'The job_id returned by start_command or wait_command.' },
     },
     required: ['job_id'],
     additionalProperties: false,

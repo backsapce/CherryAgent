@@ -45,12 +45,16 @@ const DANGEROUS_COMMAND_RULES = [
   },
 ];
 
+// wait_command is included because it can carry a `command` to start; calls
+// that only pass a job_id have no command and pass through untouched.
+const SHELL_COMMAND_TOOL_NAMES = new Set(['execute_command', 'start_command', 'wait_command']);
+
 /**
  * Assess one tool call. Returns `{ dangerous: true, reason }` for shell tools
  * whose command matches a rule, or null when no approval is needed.
  */
 export function assessToolCommandDanger(toolName, input) {
-  if (toolName !== 'execute_command' && toolName !== 'start_command') return null;
+  if (!SHELL_COMMAND_TOOL_NAMES.has(toolName)) return null;
   const command = typeof input?.command === 'string' ? input.command : '';
   if (!command.trim()) return null;
   for (const rule of DANGEROUS_COMMAND_RULES) {

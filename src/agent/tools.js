@@ -330,7 +330,7 @@ registry.register({
   category: 'shell',
   schema: {
     description:
-      'Start a managed BACKGROUND shell command and return immediately with a job_id. Use this instead of execute_command for training, servers, watchers, lengthy builds/tests/downloads/migrations, commands with unknown duration, or anything expected to take 30 seconds or more. Do not add nohup, &, disown, screen, tmux, or shell timeout wrappers; the server owns the process, logs, and cancellation.',
+      'Start a managed BACKGROUND shell command and return immediately with a job_id, WITHOUT waiting. Use this only when the turn must not block on the job now — a server, watcher, or other work whose result a later get_command/wait_command call or a schedule_wakeup continuation will consume. When you want to run a long command and report its result, call wait_command with the command instead: it starts the job and waits in one call. Do not add nohup, &, disown, screen, tmux, or shell timeout wrappers; the server owns the process, logs, and cancellation.',
     parameters: TOOL_PARAMETER_SCHEMAS.start_command,
   },
   checkAvailable: managedCommandAvailable,
@@ -358,15 +358,27 @@ registry.register({
 registry.register({
   name: 'wait_command',
   category: 'shell',
-  readOnly: true,
-  parallelSafe: true,
   schema: {
     description:
-      'Wait for a managed background command to finish or produce new logs, blocking for up to wait_seconds (default 30, at most 7 days). Returns early on completion or new output, so issue one wait sized to the expected remaining time instead of a tight loop of short waits; the user sees the remaining wait time while it runs. This is the right tool when the job should simply be waited out and its result reported immediately. Use schedule_wakeup only to end the turn now and resume later (freeing the session for other work or surviving restarts).',
+      'Start a managed background command and wait for it in ONE call: pass the command (foreground form, no & or nohup) and this call starts the job, blocks until it finishes or emits logs, and returns the full result including job_id and nextCursor. Or pass job_id (with cursor from the previous result) to keep waiting on an existing job. Returns early on completion or new output, so size wait_seconds (default 30, at most 7 days) to the expected remaining time instead of a tight loop of short re-waits; the user sees the remaining wait time while it runs. Use start_command instead only when the turn must not wait now (fire-and-forget, or a schedule_wakeup continuation will check the job later).',
     parameters: TOOL_PARAMETER_SCHEMAS.wait_command,
   },
   checkAvailable: managedCommandAvailable,
-  async handler({ job_id: jobId, cursor = 0, wait_seconds: waitSeconds = 30 }, ctx) {
+  async handler({ command, job_id: jobId, cursor = 0, wait_seconds: waitSeconds = 30 }, ctx) {
+    if (command && jobId) {
+      throw new Error('wait_command: pass either command (start a new job and wait) or job_id (wait on an existing job), not both.');
+    }
+    if (command) {
+      const job = await startCommand(command, ctx.agentUrl, ctx?.signal);
+      return JSON.stringify(await waitCommand(job.job_id, ctx.agentUrl, {
+        cursor: 0,
+        waitMs: waitSeconds * 1000,
+        signal: ctx?.signal,
+      }), null, 2);
+    }
+    if (!jobId) {
+      throw new Error('wait_command: pass command (start a new job and wait) or job_id (wait on an existing job).');
+    }
     return JSON.stringify(await waitCommand(jobId, ctx.agentUrl, {
       cursor,
       waitMs: waitSeconds * 1000,

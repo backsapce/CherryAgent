@@ -362,4 +362,20 @@ export const Menu = ({ width = 20, height = 20, className = '' }) => (
   </IconBase>
 );
 
+// Sparkles Icon (AI-generated content)
+export const Sparkles = ({ width = 18, height = 18, className = '' }) => (
+  <IconBase width={width} height={height} viewBox="0 0 24 24" className={className}>
+    <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z" />
+    <path d="M19 14.5l.9 2.1 2.1.9-2.1.9-.9 2.1-.9-2.1-2.1-.9 2.1-.9.9-2.1z" />
+    <path d="M4.5 15.5l.7 1.5 1.5.7-1.5.7-.7 1.5-.7-1.5-1.5-.7 1.5-.7.7-1.5z" />
+  </IconBase>
+);
+
+// Check (success) Icon
+export const Check = ({ width = 18, height = 18, className = '' }) => (
+  <IconBase width={width} height={height} viewBox="0 0 24 24" className={className}>
+    <polyline points="20 6 9 17 4 12" />
+  </IconBase>
+);
+
 // Empty State Icons

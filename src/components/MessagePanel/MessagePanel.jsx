@@ -811,7 +811,7 @@ const ToolBlock = ({ toolCall, onStopStreaming, agentId, sandboxUrl }) => {
         ) : (
           <span className="tool-label">{label}</span>
         )}
-        {renderTerminal && command && <span className="tool-cmd" title={command}>{command}</span>}
+        {command && <span className="tool-cmd" title={command}>{command}</span>}
         {summary && <span className="tool-summary">{summary}</span>}
         {status === 'pending' && <span className="tool-exit-code">{t('message.running')}</span>}
         {status === 'writing' && <span className="tool-exit-code writing">{t('message.writing')}</span>}
@@ -1059,6 +1059,7 @@ const MessagePanel = forwardRef(({
   const [composerDrafts, setComposerDrafts] = useState({});
   const [copiedMessageId, setCopiedMessageId] = useState(null);
   const [historyImagePreview, setHistoryImagePreview] = useState(null);
+  const [historyAiInfoVisible, setHistoryAiInfoVisible] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [composerDragActive, setComposerDragActive] = useState(false);
   const [showHiddenFiles, setShowHiddenFiles] = useState(
@@ -2428,7 +2429,12 @@ const MessagePanel = forwardRef(({
           hasNext={activeHistoryImagePreview.index < activeHistoryImagePreview.images.length - 1}
           onPrevious={() => handleHistoryPreviewNavigate(-1)}
           onNext={() => handleHistoryPreviewNavigate(1)}
-          onClose={() => setHistoryImagePreview(null)}
+          onClose={() => {
+            setHistoryImagePreview(null);
+            setHistoryAiInfoVisible(false);
+          }}
+          showAiInfo={historyAiInfoVisible}
+          onAiInfoVisibilityChange={setHistoryAiInfoVisible}
         />
       )}
     </div>

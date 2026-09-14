@@ -48,3 +48,10 @@ test('start_command goes through the same assessment', () => {
   assert.ok(result?.dangerous);
   assert.equal(assessToolCommandDanger('start_command', { command: 'npm run dev' }), null);
 });
+
+test('wait_command is assessed when it carries a command and ignored otherwise', () => {
+  const result = assessToolCommandDanger('wait_command', { command: 'sudo npm run deploy', wait_seconds: 60 });
+  assert.ok(result?.dangerous);
+  assert.equal(assessToolCommandDanger('wait_command', { command: 'npm run build' }), null);
+  assert.equal(assessToolCommandDanger('wait_command', { job_id: 'job-1', cursor: 0 }), null);
+});
