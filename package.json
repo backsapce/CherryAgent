@@ -2,7 +2,7 @@
   "name": "cherry-agent",
   "description": "AI agent running purely in the browser",
   "private": true,
-  "version": "0.0.19",
+  "version": "0.0.20",
   "type": "module",
   "bin": {
     "cherry-sandbox": "./bin/cherry-sandbox.js",
