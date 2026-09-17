@@ -307,3 +307,31 @@ test('getAgentConnection shares instances per resolved URL and reset clears them
     restoreBrowserMocks();
   }
 });
+
+test('resolveAgentWsUrl maps remote origins onto the served endpoint', async () => {
+  installBrowserMocks();
+  try {
+    const { resolveAgentWsUrl } = await import('../models/agentConnection.js');
+    // Bare origin: the server only serves /agent/ws, never /ws.
+    assert.equal(
+      resolveAgentWsUrl('https://cherry-sandbox.example.com:6060'),
+      'wss://cherry-sandbox.example.com:6060/agent/ws',
+    );
+    assert.equal(
+      resolveAgentWsUrl('https://cherry-sandbox.example.com:6060/'),
+      'wss://cherry-sandbox.example.com:6060/agent/ws',
+    );
+    // Explicit /agent suffix keeps resolving to the canonical endpoint.
+    assert.equal(
+      resolveAgentWsUrl('https://cherry-sandbox.example.com:6060/agent'),
+      'wss://cherry-sandbox.example.com:6060/agent/ws',
+    );
+    // Non-agent paths stay proxy-mounted prefixes.
+    assert.equal(
+      resolveAgentWsUrl('https://proxy.example.com/prefix'),
+      'wss://proxy.example.com/prefix/ws',
+    );
+  } finally {
+    restoreBrowserMocks();
+  }
+});

@@ -92,8 +92,11 @@ export function resolveAgentWsUrl(url) {
     if (parsed.pathname === '/agent' || parsed.pathname === '/agent/ws') {
       endpoint = new URL('/agent/ws', parsed.origin);
     } else {
+      // A bare origin targets the server root: the server only serves the
+      // canonical /agent/ws endpoint, so an empty path falls back to /agent.
+      // Other paths are proxy-mounted prefixes and keep the <prefix>/ws form.
       const path = parsed.pathname.replace(/\/+$/, '');
-      endpoint = new URL(`${path}/ws`, parsed.origin);
+      endpoint = new URL(`${path || '/agent'}/ws`, parsed.origin);
     }
   } catch {
     endpoint = new URL('/agent/ws', window.location.href);
