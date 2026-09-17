@@ -490,7 +490,7 @@ test('sandbox run enters waiting and resumes after a real agent-loop wake-up', a
     );
 
     releaseWakeup();
-    const completed = await waitForRunStatus(manager, started.id, 'completed');
+    const completed = await waitForRunStatus(manager, started.id, 'idle');
     assert.equal(modelCallCount, 2);
     assert.equal(completed.result.content, 'awake');
     assert.equal(completed.wakeup, null);
@@ -597,13 +597,13 @@ test('a second session cannot disturb a waiting run and wake-up keeps compact to
     const waitingSnapshot = structuredClone(waiting.wakeup);
 
     const second = manager.start(input('b'));
-    const secondCompleted = await waitForRunStatus(manager, second.id, 'completed');
+    const secondCompleted = await waitForRunStatus(manager, second.id, 'idle');
     assert.equal(secondCompleted.result.content, 'session B lookup finished');
     assert.equal(manager.get(first.id).status, 'waiting');
     assert.deepEqual(manager.get(first.id).wakeup, waitingSnapshot);
 
     wakeupGate.resolve();
-    const firstCompleted = await waitForRunStatus(manager, first.id, 'completed');
+    const firstCompleted = await waitForRunStatus(manager, first.id, 'idle');
     assert.equal(firstCompleted.result.content, 'session A finished');
     const continuation = resumedMessages.at(-2).content;
     assert.match(continuation, /Tool history from the turn/);
@@ -1142,6 +1142,9 @@ test('sandbox runs execute concurrently with isolated events, cancellation, and 
 
     active.get('session-one').emit({ type: 'text-delta', text: 'one-only' });
     active.get('session-two').emit({ type: 'text-delta', text: 'two-first' });
+    // Streaming deltas coalesce on a short window before they land in the
+    // event log; give the batch time to flush.
+    await new Promise((resolve) => setTimeout(resolve, 150));
     assert.deepEqual(manager.get(first.id).events.map((event) => event.text), ['one-only']);
     assert.deepEqual(manager.get(second.id).events.map((event) => event.text), ['two-first']);
 
@@ -1159,9 +1162,10 @@ test('sandbox runs execute concurrently with isolated events, cancellation, and 
 
     active.get('session-two').emit({ type: 'text-delta', text: 'two-after-abort' });
     active.get('session-two').complete({ content: 'session two completed' });
-    const completed = await waitForRunStatus(manager, second.id, 'completed');
+    const completed = await waitForRunStatus(manager, second.id, 'idle');
 
     assert.deepEqual(completed.result, { content: 'session two completed' });
+    // The 150ms coalescing flush between the two deltas keeps them separate.
     assert.deepEqual(manager.get(second.id).events.map((event) => event.text), [
       'two-first',
       'two-after-abort',
@@ -1374,7 +1378,7 @@ test('a failed initial persist does not leave a ghost active session run', async
 
     mkdirSync(runsDir, { recursive: true });
     const retry = manager.start({ ...input, runId: 'run-persist-retry' });
-    const completed = await waitForRunStatus(manager, retry.id, 'completed');
+    const completed = await waitForRunStatus(manager, retry.id, 'idle');
     assert.equal(completed.result.content, 'done');
   } finally {
     rmSync(runsDir, { recursive: true, force: true });
@@ -1465,7 +1469,7 @@ test('a server restart re-arms a waiting run and it resumes after the wake-up', 
     // The abandoned pre-restart process is gone for good: its in-memory gate
     // is never resolved. Only the re-armed run may continue.
     restartedWakeupGate.resolve();
-    const completed = await waitForRunStatus(second, started.id, 'completed');
+    const completed = await waitForRunStatus(second, started.id, 'idle');
     assert.equal(completed.result.content, 'resumed after restart');
     assert.equal(completed.wakeup, null);
 
@@ -1480,7 +1484,7 @@ test('a server restart re-arms a waiting run and it resumes after the wake-up', 
       waitUntilWakeup: () => restartedWakeupGate.promise,
       runAgent,
     });
-    assert.equal(third.get(started.id).status, 'completed');
+    assert.equal(third.get(started.id).status, 'idle');
     assert.equal(turns, 2);
   } finally {
     restartedWakeupGate.resolve();
@@ -1554,6 +1558,325 @@ test('a legacy waiting run without resume state stays interrupted after restart'
     const manager = createManager(runsDir);
     assert.equal(manager.get('run-legacy-waiting').status, 'interrupted');
   } finally {
+    rmSync(runsDir, { recursive: true, force: true });
+  }
+});
+
+// ─── Protocol 4: incremental continue, subscriptions, coalescing ────────────
+
+function simpleModel() {
+  const prompts = [];
+  const usage = {
+    inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
+    outputTokens: { total: 1, text: 1, reasoning: 0 },
+  };
+  const model = new MockLanguageModelV3({
+    doStream: async ({ prompt }) => {
+      prompts.push(prompt);
+      return {
+        stream: simulateReadableStream({
+          chunks: [
+            { type: 'stream-start', warnings: [] },
+            { type: 'text-start', id: 'answer' },
+            { type: 'text-delta', id: 'answer', delta: 'ok' },
+            { type: 'text-end', id: 'answer' },
+            { type: 'finish', finishReason: { unified: 'stop' }, usage },
+          ],
+          initialDelayInMs: null,
+          chunkDelayInMs: null,
+        }),
+      };
+    },
+  });
+  return { model, prompts };
+}
+
+test('continue appends one user turn and returns the run to idle', async () => {
+  const runsDir = mkdtempSync(join(tmpdir(), 'cherry-continue-'));
+  try {
+    const { model, prompts } = simpleModel();
+    const manager = createManager(runsDir, { createModel: () => model });
+    const input = {
+      runId: 'run-continue-one',
+      sessionId: 'session-continue',
+      replyId: 'reply-1',
+      messages: [
+        { role: 'user', content: 'first question' },
+      ],
+      modelConfig: { provider: 'openai', model: 'test', apiKey: 'test' },
+    };
+    const started = manager.start(input);
+    const idle = await waitForRunStatus(manager, started.id, 'idle');
+    assert.equal(idle.replyId, 'reply-1');
+
+    const continued = manager.continue({
+      runId: started.id,
+      replyId: 'reply-2',
+      message: 'follow up',
+      userMessageCount: 2,
+    });
+    assert.equal(continued.status, 'running');
+    assert.equal(continued.replyId, 'reply-2');
+    const idleAgain = await waitForRunStatus(manager, started.id, 'idle');
+    assert.equal(idleAgain.replyId, 'reply-2');
+
+    assert.equal(prompts.length, 2);
+    const secondMessages = prompts[1];
+    const lastPart = secondMessages.at(-1);
+    assert.equal(lastPart.role, 'user');
+    const lastText = Array.isArray(lastPart.content)
+      ? lastPart.content.find((part) => part.type === 'text')?.text
+      : lastPart.content;
+    assert.equal(lastText, 'follow up');
+    assert.ok(secondMessages.length >= 3, 'continuation keeps the original conversation');
+  } finally {
+    rmSync(runsDir, { recursive: true, force: true });
+  }
+});
+
+test('continue rejects a diverged history and refuses non-idle runs', async () => {
+  const runsDir = mkdtempSync(join(tmpdir(), 'cherry-diverge-'));
+  try {
+    const { model } = simpleModel();
+    const manager = createManager(runsDir, { createModel: () => model });
+    const started = manager.start({
+      runId: 'run-diverge',
+      sessionId: 'session-diverge',
+      messages: [{ role: 'user', content: 'one' }],
+      modelConfig: { provider: 'openai', model: 'test', apiKey: 'test' },
+    });
+    await waitForRunStatus(manager, started.id, 'idle');
+
+    assert.throws(
+      () => manager.continue({ runId: started.id, message: 'next', userMessageCount: 5 }),
+      (error) => error.code === 'HISTORY_DIVERGED' && error.statusCode === 409
+    );
+
+    assert.throws(
+      () => manager.continue({ runId: 'run-missing', message: 'next' }),
+      (error) => error.statusCode === 404
+    );
+
+    // A full start supersedes the session's idle run.
+    const fresh = manager.start({
+      runId: 'run-diverge-fresh',
+      sessionId: 'session-diverge',
+      messages: [{ role: 'user', content: 'fresh full history' }],
+      modelConfig: { provider: 'openai', model: 'test', apiKey: 'test' },
+    });
+    assert.equal(manager.get(started.id).status, 'superseded');
+    await waitForRunStatus(manager, fresh.id, 'idle');
+    assert.throws(
+      () => manager.continue({ runId: started.id, message: 'late' }),
+      (error) => error.statusCode === 409
+    );
+  } finally {
+    rmSync(runsDir, { recursive: true, force: true });
+  }
+});
+
+test('run subscriptions replay past the cursor and push live updates', async () => {
+  const runsDir = mkdtempSync(join(tmpdir(), 'cherry-subscribe-'));
+  try {
+    const seen = [];
+    let releaseModel;
+    const gate = new Promise((resolve) => { releaseModel = resolve; });
+    const model = new MockLanguageModelV3({
+      doStream: async () => {
+        await gate;
+        return {
+          stream: simulateReadableStream({
+            chunks: [
+              { type: 'stream-start', warnings: [] },
+              { type: 'text-start', id: 'answer' },
+              { type: 'text-delta', id: 'answer', delta: 'done' },
+              { type: 'text-end', id: 'answer' },
+              {
+                type: 'finish',
+                finishReason: { unified: 'stop' },
+                usage: { inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 1, text: 1, reasoning: 0 } },
+              },
+            ],
+            initialDelayInMs: null,
+            chunkDelayInMs: null,
+          }),
+        };
+      },
+    });
+    const manager = createManager(runsDir, { createModel: () => model });
+    const started = manager.start({
+      runId: 'run-subscribe',
+      sessionId: 'session-subscribe',
+      messages: [{ role: 'user', content: 'go' }],
+      modelConfig: { provider: 'openai', model: 'test', apiKey: 'test' },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const unsubscribe = manager.subscribe(started.id, 0, (notification) => {
+      seen.push(notification);
+    });
+    assert.ok(unsubscribe);
+    // The initial replay + status snapshot arrive synchronously.
+    assert.ok(seen.some((item) => item.run?.status === 'running'));
+
+    releaseModel();
+    await waitForRunStatus(manager, started.id, 'idle');
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    unsubscribe();
+
+    const eventBatches = seen.filter((item) => item.events);
+    const allEvents = eventBatches.flatMap((item) => item.events);
+    assert.ok(allEvents.length > 0);
+    assert.ok(allEvents.every((event) => event.remoteSequence > 0));
+    assert.ok(allEvents.every((event) => String(event.runId || '').startsWith('run-subscribe:turn-')));
+    assert.ok(seen.some((item) => item.run?.status === 'idle'));
+    // No duplicate sequences across replay + live pushes.
+    const sequences = allEvents.map((event) => event.remoteSequence);
+    assert.equal(new Set(sequences).size, sequences.length);
+  } finally {
+    rmSync(runsDir, { recursive: true, force: true });
+  }
+});
+
+test('streaming deltas coalesce into batched log entries', async () => {
+  const runsDir = mkdtempSync(join(tmpdir(), 'cherry-coalesce-'));
+  try {
+    const model = new MockLanguageModelV3({
+      doStream: async () => ({
+        stream: simulateReadableStream({
+          chunks: [
+            { type: 'stream-start', warnings: [] },
+            { type: 'text-start', id: 'answer' },
+            ...Array.from({ length: 200 }, () => ({ type: 'text-delta', id: 'answer', delta: 'ab' })),
+            { type: 'text-end', id: 'answer' },
+            {
+              type: 'finish',
+              finishReason: { unified: 'stop' },
+              usage: { inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 1, text: 1, reasoning: 0 } },
+            },
+          ],
+          initialDelayInMs: null,
+          chunkDelayInMs: null,
+        }),
+      }),
+    });
+    const manager = createManager(runsDir, { createModel: () => model });
+    const started = manager.start({
+      runId: 'run-coalesce',
+      sessionId: 'session-coalesce',
+      messages: [{ role: 'user', content: 'talk' }],
+      modelConfig: { provider: 'openai', model: 'test', apiKey: 'test' },
+    });
+    const idle = await waitForRunStatus(manager, started.id, 'idle');
+    void idle;
+    const deltas = manager.get(started.id).events.filter((event) => event.type === 'text-delta');
+    // 200 one-frame deltas collapse into the flush windows + final flush.
+    assert.ok(deltas.length < 10, `expected coalesced deltas, got ${deltas.length}`);
+    const text = deltas.map((event) => event.text).join('');
+    assert.equal(text, 'ab'.repeat(200));
+  } finally {
+    rmSync(runsDir, { recursive: true, force: true });
+  }
+});
+
+test('idle runs beyond the LRU cap are demoted to superseded', async () => {
+  const runsDir = mkdtempSync(join(tmpdir(), 'cherry-idle-lru-'));
+  try {
+    const { model } = simpleModel();
+    const manager = createManager(runsDir, { createModel: () => model, maxIdleRuns: 2, runPruneIntervalMs: 20 });
+    for (let index = 0; index < 4; index += 1) {
+      const run = manager.start({
+        runId: `run-lru-0${index}`,
+        sessionId: `session-lru-${index}`,
+        messages: [{ role: 'user', content: 'go' }],
+        modelConfig: { provider: 'openai', model: 'test', apiKey: 'test' },
+      });
+      await waitForRunStatus(manager, run.id, 'idle');
+    }
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    const statuses = [0, 1, 2, 3].map((index) => manager.get(`run-lru-0${index}`).status);
+    assert.deepEqual(statuses, ['superseded', 'superseded', 'idle', 'idle']);
+  } finally {
+    rmSync(runsDir, { recursive: true, force: true });
+  }
+});
+
+test('a superseding continue replaces a pending wake-up with the caller message', async () => {
+  const runsDir = mkdtempSync(join(tmpdir(), 'cherry-supersede-'));
+  const wakeupGate = deferred();
+  try {
+    const prompts = [];
+    const usage = {
+      inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
+      outputTokens: { total: 1, text: 1, reasoning: 0 },
+    };
+    let callCount = 0;
+    const model = new MockLanguageModelV3({
+      doStream: async ({ prompt }) => {
+        callCount += 1;
+        prompts.push(prompt);
+        const chunks = callCount === 1
+          ? [
+              { type: 'stream-start', warnings: [] },
+              {
+                type: 'tool-call',
+                toolCallId: 'call-wakeup',
+                toolName: 'schedule_wakeup',
+                input: JSON.stringify({ delay: 30, unit: 'minutes', prompt: 'check the background job' }),
+              },
+              { type: 'finish', finishReason: { unified: 'tool-calls' }, usage },
+            ]
+          : [
+              { type: 'stream-start', warnings: [] },
+              { type: 'text-start', id: 'answer' },
+              { type: 'text-delta', id: 'answer', delta: 'superseded' },
+              { type: 'text-end', id: 'answer' },
+              { type: 'finish', finishReason: { unified: 'stop' }, usage },
+            ];
+        return {
+          stream: simulateReadableStream({ chunks, initialDelayInMs: null, chunkDelayInMs: null }),
+        };
+      },
+    });
+    const manager = createManager(runsDir, {
+      createModel: () => model,
+      waitUntilWakeup: () => wakeupGate.promise,
+    });
+    const started = manager.start({
+      runId: 'run-supersede',
+      sessionId: 'session-supersede',
+      messages: [{ role: 'user', content: 'schedule something' }],
+      modelConfig: { provider: 'openai', model: 'test', apiKey: 'test' },
+    });
+    const waiting = await waitForRunStatus(manager, started.id, 'waiting');
+    assert.equal(waiting.wakeup.prompt, 'check the background job');
+
+    // Without supersede the continue is refused.
+    assert.throws(
+      () => manager.continue({ runId: started.id, message: 'new input' }),
+      (error) => error.statusCode === 409
+    );
+
+    // The supersede is accepted synchronously; the loop performs the
+    // waiting→running transition on its wake-up race microtask.
+    manager.continue({
+      runId: started.id,
+      message: 'user changed their mind',
+      supersede: true,
+    });
+    await waitForRunStatus(manager, started.id, 'idle');
+    assert.equal(callCount, 2);
+
+    const secondMessages = prompts[1];
+    const userTexts = secondMessages
+      .filter((part) => part.role === 'user')
+      .map((part) => (Array.isArray(part.content)
+        ? part.content.find((chunk) => chunk.type === 'text')?.text
+        : part.content));
+    assert.ok(userTexts.includes('user changed their mind'));
+    assert.ok(!userTexts.some((text) => String(text || '').includes('check the background job')));
+  } finally {
+    wakeupGate.resolve();
     rmSync(runsDir, { recursive: true, force: true });
   }
 });

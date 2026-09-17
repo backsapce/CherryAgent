@@ -1,109 +1,55 @@
 /**
  * Agent client module.
  *
- * Provides helpers to check whether agent servers are reachable,
- * authenticate via temp-token exchange, and execute commands.
- * Supports multiple agent hosts and E2B cloud sandboxes.
+ * The browser↔agent-server API surface: availability probing, temp-token
+ * authentication, command execution, managed jobs, file transfers, web
+ * proxies, and durable sandbox runs — all multiplexed over the shared
+ * WebSocket connection managed by agentConnection.js. E2B cloud sandboxes
+ * bypass this transport entirely.
  */
 
 import config from '../config/config.js';
+import { assertSecureAgentUrl, getAgentConnection } from './agentConnection.js';
 import { initE2b, getSandboxStatus, executeInSandbox, stopSandbox, enableE2b, listE2bFiles, createE2bFile, createE2bDir, deleteE2bFile, moveE2bFile, uploadE2bFile, downloadE2bFile, readE2bFileText, writeE2bFileText } from './e2b.js';
 
-const E2B_AGENT_ID = '__e2b__';
-// Protocol 3 guarantees bounded startup/model requests and immutable forced
-// cancellation. Older protocol-2 runtimes can accept a run and then leave the
-// browser on an empty assistant message indefinitely.
-const REQUIRED_AGENT_RUN_PROTOCOL = 3;
+export { assertSecureAgentUrl };
 
-const DEFAULT_AGENT_PATH = '/agent';
-const HEALTH_REQUEST_TIMEOUT_MS = 8_000;
+const E2B_AGENT_ID = '__e2b__';
+// Protocol 4 moves run traffic onto the multiplexed WebSocket protocol
+// (subscribe pushes, incremental continue) and coalesces streaming deltas.
+// Older runtimes can accept a run and then leave the browser polling an
+// endpoint that no longer exists.
+const REQUIRED_AGENT_RUN_PROTOCOL = 4;
+
 const AGENT_RUN_REQUEST_TIMEOUT_MS = 15_000;
 const AGENT_RUN_POST_MAX_TIMEOUT_MS = 150_000;
 const AGENT_RUN_POST_GRACE_BYTES = 1024 * 1024;
 const AGENT_RUN_POST_BYTES_PER_SECOND = 1024 * 1024;
-const FILE_REQUEST_TIMEOUT_MS = 15_000;
-// Upper bound for a single wait_command long-poll; matches the 7-day maximum
+// Binary-stream deadlines: the control reply is bounded by the normal request
+// timeout, the byte transfer itself by these generous ceilings.
+const UPLOAD_END_TIMEOUT_MS = 120_000;
+const DOWNLOAD_STREAM_TIMEOUT_MS = 5 * 60_000;
+// Upper bound for a single wait_command bounded wait; matches the 7-day maximum
 // of schedule_wakeup so any wait the model may declare can be served in one call.
 const MAX_COMMAND_WAIT_MS = 7 * 24 * 60 * 60_000;
 
-const LOOPBACK_HOSTNAMES = new Set(['localhost', '127.0.0.1', '::1']);
-
-function isLoopbackHostname(hostname) {
-  const host = String(hostname || '').toLowerCase();
-  return LOOPBACK_HOSTNAMES.has(host) || host.endsWith('.localhost');
+let streamSequence = 0;
+/** Monotonic binary-stream ids shared by uploads and downloads. */
+function nextStreamId() {
+  streamSequence = (streamSequence + 1) % 0x7fffffff;
+  return streamSequence + 1;
 }
 
-/**
- * Reject unencrypted agent endpoints outside the loopback. Requests to the
- * agent server carry its long-lived bearer token and, for sandbox runs, the
- * caller's LLM API key — sending either over plain http to a LAN or remote
- * host leaks a credential that cannot be scoped or expired from the UI.
- * Relative URLs ride the page origin and are always allowed.
- */
-export function assertSecureAgentUrl(url) {
-  if (typeof url !== 'string' || !url.trim()) return;
-  let parsed;
-  try {
-    parsed = new URL(url.trim());
-  } catch {
-    return; // Relative path: same origin as the page.
-  }
-  if (parsed.protocol !== 'http:') return;
-  if (isLoopbackHostname(parsed.hostname)) return;
-  const error = new Error(
-    `Refusing to contact agent server over unencrypted http://${parsed.hostname}. Agent requests carry the auth token (and sandbox runs carry the LLM API key), so use an https:// URL; plain http is only allowed for localhost.`
-  );
-  error.name = 'AgentUrlSecurityError';
-  error.code = 'AGENT_INSECURE_URL';
-  throw error;
+function timeoutError(message) {
+  const error = new Error(message);
+  error.name = 'TimeoutError';
+  error.code = 'AGENT_REQUEST_TIMEOUT';
+  return error;
 }
 
-/**
- * Normalise a host URL into a full agent endpoint.
- * - If the url already contains '/agent', use as-is.
- * - Otherwise append '/agent'.
- * @param {string} [url] - e.g. 'http://localhost:3099' or '/agent'
- * @returns {string}
- */
-function resolveAgentUrl(url) {
-  if (!url) return DEFAULT_AGENT_PATH;
-  assertSecureAgentUrl(url);
-  const u = url.replace(/\/+$/, '');
-  const endpoint = u.endsWith('/agent') ? u : `${u}/agent`;
-  return isLoopbackAgentUrl(endpoint) ? DEFAULT_AGENT_PATH : endpoint;
-}
-
-function resolveAgentWsUrl(url) {
-  if (isLoopbackAgentUrl(url)) {
-    const base = new URL('/agent/ws', window.location.href);
-    base.protocol = base.protocol === 'https:' ? 'wss:' : 'ws:';
-    return base.toString();
-  }
-
-  const endpoint = resolveAgentUrl(url).replace(/\/agent$/, '/agent/ws');
-  const base = new URL(endpoint, window.location.href);
-  base.protocol = base.protocol === 'https:' ? 'wss:' : 'ws:';
-  return base.toString();
-}
-
-function isLoopbackAgentUrl(url) {
-  if (!url) return true;
-  try {
-    const parsed = new URL(url, window.location.href);
-    const page = new URL(window.location.href);
-    const isLoopback = ['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname);
-    const isAgentPath = parsed.pathname === '/agent' || parsed.pathname.startsWith('/agent/');
-    // Port 3099 is the one endpoint deliberately routed through the page's
-    // Vite proxy. An explicit localhost URL on any other port must remain
-    // explicit; treating every `/agent` pathname as proxied silently sends
-    // custom AGENT_PORT installations to the wrong server.
-    return isLoopback && (
-      parsed.port === '3099'
-      || (parsed.origin === page.origin && isAgentPath)
-    );
-  } catch {
-    return false;
-  }
+/** Shared multiplexed WebSocket connection for an agent URL. */
+function connFor(url) {
+  return getAgentConnection(url, { getToken: () => getAgentToken(url) });
 }
 
 function isAbortSignal(value) {
@@ -128,19 +74,6 @@ function requestControls(value, defaultTimeoutMs) {
   };
 }
 
-function requestAbortError(signal, label) {
-  if (signal?.reason instanceof Error) return signal.reason;
-  return new DOMException(`${label} aborted`, 'AbortError');
-}
-
-function requestTimeoutError(label, timeoutMs) {
-  const error = new Error(`${label} timed out after ${timeoutMs} ms`);
-  error.name = 'TimeoutError';
-  error.code = 'AGENT_REQUEST_TIMEOUT';
-  error.timeoutMs = timeoutMs;
-  return error;
-}
-
 function hasExplicitRequestTimeout(value) {
   if (isAbortSignal(value)) return false;
   const timeoutMs = Number(value?.timeoutMs);
@@ -154,55 +87,6 @@ function agentRunPostTimeoutMs(bodyBytes) {
     AGENT_RUN_POST_MAX_TIMEOUT_MS,
     AGENT_RUN_REQUEST_TIMEOUT_MS + uploadSeconds * 1000
   );
-}
-
-function wrapAgentNetworkError(error, label, endpoint) {
-  if (
-    error?.name !== 'TypeError'
-    || !/failed to fetch|fetch failed|networkerror|load failed/i.test(String(error?.message || ''))
-  ) return error;
-  const wrapped = new Error(
-    `${label} could not reach ${endpoint} (${error.message}). Check that cherry-sandbox is running, the URL uses compatible HTTPS, AGENT_ALLOWED_ORIGINS permits this page, and the browser granted Local Network Access.`
-  );
-  wrapped.name = 'AgentRuntimeNetworkError';
-  wrapped.code = 'AGENT_RUNTIME_NETWORK_ERROR';
-  wrapped.cause = error;
-  return wrapped;
-}
-
-/**
- * Bound a complete request operation, including response-body decoding.
- * Promise.race is intentional: AbortSignal alone is insufficient when a
- * browser, proxy, mock, or custom fetch implementation ignores cancellation.
- */
-async function withRequestDeadline(label, controls, operation) {
-  const { signal, timeoutMs } = controls;
-  if (signal?.aborted) throw requestAbortError(signal, label);
-
-  const controller = new AbortController();
-  let timerId;
-  let onAbort;
-  const deadline = new Promise((_, reject) => {
-    onAbort = () => {
-      const error = requestAbortError(signal, label);
-      reject(error);
-      controller.abort(error);
-    };
-    signal?.addEventListener('abort', onAbort, { once: true });
-    timerId = setTimeout(() => {
-      const error = requestTimeoutError(label, timeoutMs);
-      reject(error);
-      controller.abort(error);
-    }, timeoutMs);
-  });
-  const pending = Promise.resolve().then(() => operation(controller.signal));
-
-  try {
-    return await Promise.race([pending, deadline]);
-  } finally {
-    clearTimeout(timerId);
-    signal?.removeEventListener('abort', onAbort);
-  }
 }
 
 /** Build a unique config key for a given agent URL's token. */
@@ -221,45 +105,17 @@ export async function saveAgentToken(url, token) {
   await config.set(tokenKey(url), token);
 }
 
-/** Base headers plus the saved bearer token for an agent URL. */
-function agentHeaders(url, base = {}) {
-  const headers = { ...base };
-  const token = getAgentToken(url);
-  if (token) headers.Authorization = `Bearer ${token}`;
-  return headers;
-}
-
-/** Normalize a non-2xx agent response into an Error with the server's message. */
-async function agentResponseError(res) {
-  const err = await res.json().catch(() => ({ error: 'Agent request failed' }));
-  return new Error(err.error || `Agent returned ${res.status}`);
-}
-
 /**
- * Check if the agent server is available (GET /agent returns 200).
- * Also returns whether the server requires authentication.
+ * Check if the agent server is available by opening (or reusing) the shared
+ * WebSocket connection and reading the hello/welcome exchange.
  * @param {string} [url] - agent host URL (optional, defaults to local /agent)
  * @param {{signal?: AbortSignal, timeoutMs?: number}|AbortSignal} [options]
  * @returns {Promise<{ available: boolean, needsAuth: boolean }>}
  */
-export async function checkAgentAvailable(url, options = {}) {
+export async function checkAgentAvailable(url) {
   try {
-    const endpoint = resolveAgentUrl(url);
-    const headers = agentHeaders(url);
-
-    return await withRequestDeadline(
-      'Agent health check',
-      requestControls(options, HEALTH_REQUEST_TIMEOUT_MS),
-      async (signal) => {
-        const res = await fetch(endpoint, { method: 'GET', headers, signal });
-        if (!res.ok) return { available: false, needsAuth: false };
-        const data = await res.json();
-        return {
-          available: data.status === 'ok',
-          needsAuth: !!data.needsAuth,
-        };
-      }
-    );
+    const welcome = await connFor(url).ready();
+    return { available: true, needsAuth: !!welcome.needsAuth };
   } catch {
     return { available: false, needsAuth: false };
   }
@@ -273,19 +129,10 @@ export async function checkAgentAvailable(url, options = {}) {
  * @returns {Promise<string>} The long-lived token.
  */
 export async function connectAgent(tempToken, url) {
-  const base = resolveAgentUrl(url);
-  // POST to /agent/connect
-  const connectUrl = base.replace(/\/agent$/, '/agent/connect');
-  const res = await fetch(connectUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ token: tempToken }),
-  });
-  const data = await res.json().catch(() => ({ error: 'Invalid response' }));
-  if (!res.ok) {
-    throw new Error(data.error || `Connect failed (${res.status})`);
-  }
-  if (!data.token) {
+  const conn = connFor(url);
+  await conn.ready();
+  const data = await conn.request('connect', { token: tempToken });
+  if (!data?.token) {
     throw new Error('Server did not return a token.');
   }
   // Persist the long-lived token
@@ -294,8 +141,9 @@ export async function connectAgent(tempToken, url) {
 }
 
 /**
- * Execute a shell command via the agent server.
- * Automatically attaches the saved auth token.
+ * Execute a shell command via the agent server over the shared WebSocket
+ * connection. Output streams through push messages so onStdout/onStderr fire
+ * live; resolves with the accumulated executor result on exit.
  * Routes through E2B sandbox if the selected agent is E2B Cloud.
  * @param {string} cmd - The command to run.
  * @param {string} [url] - agent host URL (optional, defaults to local /agent)
@@ -307,30 +155,54 @@ export async function executeCommand(cmd, url, opts = {}) {
     return executeInSandbox(cmd, opts);
   }
 
-  if (typeof WebSocket !== 'undefined' && opts.stream !== false) {
-    try {
-      return await executeCommandStreaming(cmd, url, opts);
-    } catch (err) {
-      if (opts.signal?.aborted) throw err;
-      // Retrying after the command was submitted could execute a mutating
-      // command twice. HTTP fallback is only safe when the socket never
-      // opened (for example, when a proxy does not support WebSockets).
-      if (opts.requireStreaming || err?.agentCommandStarted) throw err;
-      console.warn('[agent] WebSocket command stream failed; falling back to HTTP:', err);
-    }
-  }
+  const conn = connFor(url);
+  const signal = opts.signal;
+  const result = {
+    stdout: '',
+    stderr: '',
+    code: 1,
+  };
 
-  const endpoint = resolveAgentUrl(url);
-  const headers = agentHeaders(url, { 'Content-Type': 'application/json' });
+  await new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener('abort', onAbort);
+      fn(value);
+    };
+    const onAbort = () => {
+      finish(reject, signal.reason instanceof Error ? signal.reason : new DOMException('Command execution aborted', 'AbortError'));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
 
-  const res = await fetch(endpoint, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ cmd }),
-    ...(opts.signal ? { signal: opts.signal } : {}),
+    const subscription = conn.subscribe({
+      request: 'exec.start',
+      payload: { cmd },
+      signal,
+      onData: (type, data) => {
+        if (type === 'exec.start') {
+          Object.assign(result, data);
+        } else if (type === 'exec.data') {
+          if (data.stream === 'stdout') {
+            result.stdout += data.data || '';
+            opts.onStdout?.(data.data || '', { ...result });
+          } else if (data.stream === 'stderr') {
+            result.stderr += data.data || '';
+            opts.onStderr?.(data.data || '', { ...result });
+          }
+        } else if (type === 'exec.exit') {
+          Object.assign(result, data);
+          finish(resolve);
+        } else if (type === 'exec.error') {
+          finish(reject, new Error(data.error || 'Agent command failed'));
+        }
+      },
+      onError: (error) => finish(reject, error),
+    });
+    subscription.ready.catch((error) => finish(reject, error));
   });
-  if (!res.ok) throw await agentResponseError(res);
-  return res.json();
+  return result;
 }
 
 function assertRemoteAgentRuntime(url) {
@@ -348,19 +220,7 @@ function assertRemoteAgentRuntime(url) {
  */
 export async function proxyWebSearch(url, searchConfig, request, options = {}) {
   assertRemoteAgentRuntime(url);
-  const endpoint = `${resolveAgentUrl(url)}/web-search`;
-  const headers = agentHeaders(url, { 'Content-Type': 'application/json' });
-  const controls = requestControls(options, AGENT_RUN_REQUEST_TIMEOUT_MS);
-  return withRequestDeadline('Agent web search', controls, async (signal) => {
-    const res = await fetch(endpoint, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ config: searchConfig, request }),
-      signal,
-    });
-    if (!res.ok) throw await agentResponseError(res);
-    return res.json();
-  });
+  return connFor(url).request('web.search', { config: searchConfig, request }, options);
 }
 
 /**
@@ -369,125 +229,59 @@ export async function proxyWebSearch(url, searchConfig, request, options = {}) {
  */
 export async function proxyWebFetch(url, targetUrl, options = {}) {
   assertRemoteAgentRuntime(url);
-  const endpoint = `${resolveAgentUrl(url)}/web-fetch`;
-  const headers = agentHeaders(url, { 'Content-Type': 'application/json' });
-  const controls = requestControls(options, 60_000);
-  return withRequestDeadline('Agent web fetch', controls, async (signal) => {
-    const res = await fetch(endpoint, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        url: targetUrl,
-        ...(options.maxChars != null ? { max_chars: options.maxChars } : {}),
-      }),
-      signal,
-    });
-    if (!res.ok) throw await agentResponseError(res);
-    return res.json();
-  });
+  return connFor(url).request('web.fetch', {
+    url: targetUrl,
+    ...(options.maxChars != null ? { max_chars: options.maxChars } : {}),
+  }, options);
 }
 
-async function assertAgentRunProtocol(url, controls) {
-  const endpoint = resolveAgentUrl(url);
-  const headers = agentHeaders(url);
-  try {
-    await withRequestDeadline('Agent runtime health check', controls, async (signal) => {
-      const res = await fetch(endpoint, {
-        method: 'GET',
-        headers,
-        cache: 'no-store',
-        signal,
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        const error = new Error(data.error || `Agent runtime health check returned ${res.status}`);
-        error.status = res.status;
-        throw error;
-      }
-      const protocol = Number(data.capabilities?.agentRunProtocol) || 0;
-      if (protocol < REQUIRED_AGENT_RUN_PROTOCOL) {
-        const error = new Error(
-          `Sandbox runtime is outdated (agent run protocol ${protocol || 'missing'}; ${REQUIRED_AGENT_RUN_PROTOCOL} required). Reinstall and restart cherry-sandbox.`
-        );
-        error.code = 'AGENT_RUN_PROTOCOL_OUTDATED';
-        throw error;
-      }
-    });
-  } catch (error) {
-    throw wrapAgentNetworkError(error, 'Agent runtime health check', endpoint);
-  }
-}
-
-/** Reject stale sandbox servers before starting or reattaching to a run. */
-export function assertRemoteAgentRunProtocol(url, signalOrOptions) {
-  assertRemoteAgentRuntime(url);
-  return assertAgentRunProtocol(
-    url,
-    requestControls(signalOrOptions, AGENT_RUN_REQUEST_TIMEOUT_MS)
+function protocolOutdatedError(protocol) {
+  const error = new Error(
+    `Sandbox runtime is outdated (agent run protocol ${protocol || 'missing'}; ${REQUIRED_AGENT_RUN_PROTOCOL} required). Reinstall and restart cherry-sandbox.`
   );
+  error.code = 'AGENT_RUN_PROTOCOL_OUTDATED';
+  return error;
 }
 
-async function requestAgentRun(url, path = '', options = {}) {
+/**
+ * Verify the shared connection's runtime capabilities before starting or
+ * reattaching to a durable run. The welcome exchange doubles as the health
+ * probe, so an unreachable or legacy server surfaces with reconnect guidance.
+ */
+export async function assertRemoteAgentRunProtocol(url) {
   assertRemoteAgentRuntime(url);
-  const endpoint = `${resolveAgentUrl(url)}/runs${path}`;
-  const headers = agentHeaders(url, options.body ? { 'Content-Type': 'application/json' } : {});
-  const method = options.method || 'GET';
-  const controls = requestControls(options, AGENT_RUN_REQUEST_TIMEOUT_MS);
-  const requestOptions = {
-    ...options,
-    headers: { ...headers, ...options.headers },
-    ...(method === 'GET' ? { cache: 'no-store' } : {}),
-  };
-  delete requestOptions.timeoutMs;
-  delete requestOptions.signal;
-  const label = `Agent runtime ${method} ${path || '/'}`;
+  let welcome;
   try {
-    return await withRequestDeadline(label, controls, async (signal) => {
-      const fetchOptions = { ...requestOptions, signal };
-      let res = await fetch(endpoint, fetchOptions);
-      if (method === 'GET' && res.status === 304) {
-        // A durable run is mutable even when its URL and event cursor are the
-        // same. Some reverse proxies incorrectly revalidate it as a static JSON
-        // resource, leaving fetch with an empty 304 response. Retry once with a
-        // unique URL so the current run state cannot be hidden by that cache.
-        const separator = endpoint.includes('?') ? '&' : '?';
-        res = await fetch(`${endpoint}${separator}_=${Date.now()}`, fetchOptions);
-      }
-      const data = await res.json().catch(() => ({ error: 'Invalid agent runtime response' }));
-      if (!res.ok) {
-        const error = new Error(data.error || `Agent runtime returned ${res.status}`);
-        error.status = res.status;
-        throw error;
-      }
-      return data;
-    });
+    welcome = await connFor(url).ready();
   } catch (error) {
-    throw wrapAgentNetworkError(error, label, endpoint);
+    if (error?.code === 'AGENT_INSECURE_URL') throw error;
+    const wrapped = new Error(
+      `Agent runtime health check could not reach ${url || 'the configured sandbox'} (${error?.message || error}). Check that cherry-sandbox is running, the URL uses compatible HTTPS, AGENT_ALLOWED_ORIGINS permits this page, and the browser granted Local Network Access.`
+    );
+    wrapped.name = 'AgentRuntimeNetworkError';
+    wrapped.code = 'AGENT_RUNTIME_NETWORK_ERROR';
+    wrapped.cause = error;
+    throw wrapped;
   }
+  const protocol = Number(welcome?.capabilities?.agentRunProtocol) || 0;
+  if (protocol < REQUIRED_AGENT_RUN_PROTOCOL) throw protocolOutdatedError(protocol);
+  return welcome;
 }
 
 /** Start a background run that continues after the browser disconnects. */
 export async function startRemoteAgentRun(url, input, signalOrOptions) {
   assertRemoteAgentRuntime(url);
   const controls = requestControls(signalOrOptions, AGENT_RUN_REQUEST_TIMEOUT_MS);
-  await assertRemoteAgentRunProtocol(url, controls);
-  const body = JSON.stringify(input);
-  const postControls = hasExplicitRequestTimeout(signalOrOptions)
-    ? controls
-    : {
-        ...controls,
-        timeoutMs: agentRunPostTimeoutMs(new TextEncoder().encode(body).byteLength),
-      };
+  await assertRemoteAgentRunProtocol(url);
+  const bodyBytes = new TextEncoder().encode(JSON.stringify(input)).byteLength;
+  const timeoutMs = hasExplicitRequestTimeout(signalOrOptions)
+    ? controls.timeoutMs
+    : agentRunPostTimeoutMs(bodyBytes);
   try {
-    return await requestAgentRun(url, '', {
-      method: 'POST',
-      body,
-      ...postControls,
-    });
+    return await connFor(url).request('run.start', input, { signal: controls.signal, timeoutMs });
   } catch (error) {
-    // Callers may probe the client-generated id only after the POST was
-    // attempted. A failed protocol preflight cannot possibly have committed a
-    // run and must not leave a provisional "running" session behind.
+    // The protocol preflight passed, so the request was issued over an open
+    // connection: the POST may have committed even if its reply was lost.
     try {
       error.agentRunRequestStarted = true;
     } catch {
@@ -498,26 +292,56 @@ export async function startRemoteAgentRun(url, input, signalOrOptions) {
   }
 }
 
+/**
+ * Continue an idle run with one new user message instead of re-uploading the
+ * conversation. Rejects with HISTORY_DIVERGED when the server's copy no
+ * longer matches; callers fall back to a full startRemoteAgentRun.
+ */
+export function continueRemoteAgentRun(url, payload, options = {}) {
+  assertRemoteAgentRuntime(url);
+  return connFor(url).request('run.continue', payload, options);
+}
+
 /** Read new events and the current durable result for a background run. */
 export function getRemoteAgentRun(url, runId, after = 0, signalOrOptions) {
   const controls = requestControls(signalOrOptions, AGENT_RUN_REQUEST_TIMEOUT_MS);
-  return requestAgentRun(url, `/${encodeURIComponent(runId)}?after=${Math.max(0, Number(after) || 0)}`, {
-    method: 'GET',
-    ...controls,
-  });
+  return connFor(url).request('run.state', {
+    runId,
+    after: Math.max(0, Number(after) || 0),
+  }, { signal: controls.signal, timeoutMs: controls.timeoutMs });
 }
 
 export function listRemoteAgentRuns(url, sessionId, signalOrOptions) {
   const controls = requestControls(signalOrOptions, AGENT_RUN_REQUEST_TIMEOUT_MS);
-  const query = sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : '';
-  return requestAgentRun(url, query, { method: 'GET', ...controls });
+  return connFor(url).request('run.list', { sessionId: sessionId || null }, {
+    signal: controls.signal,
+    timeoutMs: controls.timeoutMs,
+  });
 }
 
 export function abortRemoteAgentRun(url, runId, signalOrOptions) {
   const controls = requestControls(signalOrOptions, AGENT_RUN_REQUEST_TIMEOUT_MS);
-  return requestAgentRun(url, `/${encodeURIComponent(runId)}`, {
-    method: 'DELETE',
-    ...controls,
+  return connFor(url).request('run.cancel', { runId }, {
+    signal: controls.signal,
+    timeoutMs: controls.timeoutMs,
+  });
+}
+
+/**
+ * Subscribe to a durable run's live event stream: replays everything past
+ * `after`, then pushes new event batches and status snapshots until the
+ * subscription is dropped or the connection closes.
+ */
+export function subscribeRemoteAgentRun(url, { runId, after = 0, onEvents, onStatus, onError, signal }) {
+  return connFor(url).subscribe({
+    request: 'run.subscribe',
+    payload: { runId, after: Math.max(0, Number(after) || 0) },
+    signal,
+    onData: (type, data) => {
+      if (type === 'run.events') onEvents?.(data?.events || []);
+      else if (type === 'run.status') onStatus?.(data);
+    },
+    onError,
   });
 }
 
@@ -527,167 +351,96 @@ function assertManagedCommandRuntime(url) {
   }
 }
 
-async function requestManagedCommand(url, path = '', options = {}) {
-  assertManagedCommandRuntime(url);
-  const endpoint = `${resolveAgentUrl(url)}/commands${path}`;
-  const headers = agentHeaders(url, options.body ? { 'Content-Type': 'application/json' } : {});
-  const res = await fetch(endpoint, { ...options, headers: { ...headers, ...options.headers } });
-  const data = await res.json().catch(() => ({ error: 'Invalid background command response' }));
-  if (!res.ok) throw new Error(data.error || `Background command returned ${res.status}`);
-  return data;
-}
-
-/** Start a managed command that continues independently of the browser request. */
+/** Start a managed command that continues independently of the browser. */
 export function startCommand(command, url, signal) {
-  return requestManagedCommand(url, '', {
-    method: 'POST',
-    body: JSON.stringify({ command }),
-    ...(signal ? { signal } : {}),
-  });
+  assertManagedCommandRuntime(url);
+  return connFor(url).request('job.start', { command }, { signal });
 }
 
-/** Read a background command and the next bounded log segment. */
+/** Read a background command and one incremental log segment. */
 export function getCommand(jobId, url, cursor = 0, signal) {
-  const query = `?cursor=${Math.max(0, Number(cursor) || 0)}`;
-  return requestManagedCommand(url, `/${encodeURIComponent(jobId)}${query}`, {
-    method: 'GET',
-    ...(signal ? { signal } : {}),
-  });
+  assertManagedCommandRuntime(url);
+  return connFor(url).request('job.get', { job_id: jobId, cursor: Math.max(0, Number(cursor) || 0) }, { signal });
 }
 
-/** Long-poll for command output or a terminal state. */
-export function waitCommand(jobId, url, { cursor = 0, waitMs = 30_000, signal } = {}) {
-  const query = `?cursor=${Math.max(0, Number(cursor) || 0)}&wait_ms=${Math.min(MAX_COMMAND_WAIT_MS, Math.max(0, Number(waitMs) || 0))}`;
-  return requestManagedCommand(url, `/${encodeURIComponent(jobId)}${query}`, {
-    method: 'GET',
-    ...(signal ? { signal } : {}),
+/**
+ * Wait for a background command: subscribes to job pushes and resolves with
+ * the newest snapshot once the job reaches a terminal state without pending
+ * logs, or when waitMs elapses (mirroring the old long-poll contract).
+ */
+export async function waitCommand(jobId, url, { cursor = 0, waitMs = 30_000, signal } = {}) {
+  assertManagedCommandRuntime(url);
+  const boundedWaitMs = Math.min(MAX_COMMAND_WAIT_MS, Math.max(0, Number(waitMs) || 0));
+  const conn = connFor(url);
+  if (boundedWaitMs === 0) {
+    return conn.request('job.get', { job_id: jobId, cursor }, { signal });
+  }
+
+  let latest = null;
+  let failure = null;
+  let resolveDone;
+  const done = new Promise((resolve) => { resolveDone = resolve; });
+  const subscription = conn.subscribe({
+    request: 'job.subscribe',
+    payload: { job_id: jobId, cursor: Math.max(0, Number(cursor) || 0) },
+    signal,
+    onData: (type, data) => {
+      if (type === 'job.update') {
+        latest = data;
+        if (['completed', 'failed', 'stopped', 'interrupted'].includes(data.status) && !data.hasMore) {
+          resolveDone();
+        }
+      } else if (type === 'job.error') {
+        failure = new Error(data.error || 'Job wait failed');
+        resolveDone();
+      }
+    },
+    onError: (error) => {
+      failure = error;
+      resolveDone();
+    },
   });
+
+  let timeoutId = null;
+  const abortWait = signal
+    ? new Promise((_, reject) => {
+      signal.addEventListener('abort', () => {
+        reject(signal.reason instanceof Error ? signal.reason : new DOMException('Job wait aborted', 'AbortError'));
+      }, { once: true });
+    })
+    : null;
+  const waitBudget = new Promise((resolve) => { timeoutId = setTimeout(resolve, boundedWaitMs); });
+  const racers = [subscription.ready.then(() => done), waitBudget];
+  if (abortWait) racers.push(abortWait);
+  try {
+    await Promise.race(racers);
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+    subscription.unsubscribe();
+  }
+  if (!latest && failure) throw failure;
+  return latest;
 }
 
 /** Stop a managed command and its entire process tree. */
 export function stopCommand(jobId, url, signal) {
-  return requestManagedCommand(url, `/${encodeURIComponent(jobId)}`, {
-    method: 'DELETE',
-    ...(signal ? { signal } : {}),
-  });
-}
-
-function executeCommandStreaming(cmd, url, opts = {}) {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(resolveAgentWsUrl(url));
-    const token = getAgentToken(url);
-    const result = {
-      stdout: '',
-      stderr: '',
-      code: 1,
-    };
-    let started = false;
-    let finished = false;
-
-    const cleanup = () => {
-      opts.signal?.removeEventListener('abort', abort);
-    };
-
-    const fail = (err) => {
-      if (finished) return;
-      finished = true;
-      cleanup();
-      try { ws.close(); } catch { /* ignore */ }
-      if (err && typeof err === 'object') err.agentCommandStarted = started;
-      reject(err);
-    };
-
-    const abort = () => {
-      fail(new DOMException('Command execution aborted', 'AbortError'));
-    };
-
-    if (opts.signal?.aborted) {
-      abort();
-      return;
-    }
-    opts.signal?.addEventListener('abort', abort, { once: true });
-
-    ws.addEventListener('open', () => {
-      try {
-        ws.send(JSON.stringify({ cmd, token }));
-        started = true;
-      } catch (err) {
-        fail(err);
-      }
-    });
-
-    ws.addEventListener('message', (event) => {
-      let message;
-      try {
-        message = JSON.parse(event.data);
-      } catch {
-        return;
-      }
-
-      if (message.type === 'start') {
-        Object.assign(result, {
-          platform: message.platform,
-          shell: message.shell,
-          cwd: message.cwd,
-          filesRoot: message.filesRoot,
-        });
-      } else if (message.type === 'stdout') {
-        result.stdout += message.data || '';
-        opts.onStdout?.(message.data || '', { ...result });
-      } else if (message.type === 'stderr') {
-        result.stderr += message.data || '';
-        opts.onStderr?.(message.data || '', { ...result });
-      } else if (message.type === 'exit') {
-        finished = true;
-        cleanup();
-        Object.assign(result, message);
-        resolve(result);
-      } else if (message.type === 'error') {
-        const err = new Error(message.error || 'Agent WebSocket command failed');
-        err.status = message.status;
-        fail(err);
-      }
-    });
-
-    ws.addEventListener('error', () => {
-      fail(new Error('Agent WebSocket connection failed'));
-    });
-
-    ws.addEventListener('close', () => {
-      if (!finished) {
-        fail(new Error(started ? 'Agent WebSocket closed before command completed' : 'Agent WebSocket failed to open'));
-      }
-    });
-  });
+  assertManagedCommandRuntime(url);
+  return connFor(url).request('job.stop', { job_id: jobId }, { signal });
 }
 
 /**
- * List files from the agent server's files root.
- * Automatically attaches the saved auth token.
+ * List files from the agent server's files root over the shared connection.
  * @param {string} [path] - Directory path relative to files root (empty for root).
  * @param {string} [url] - agent host URL (optional, defaults to local /agent)
  * @param {{recursive?: boolean, includeHidden?: boolean, signal?: AbortSignal, timeoutMs?: number}} [options] - Listing options
  * @returns {Promise<{id: string, name: string, type: string, children: Array}|Array>}
  */
 export async function listRemoteFiles(path = '', url, options = {}) {
-  const base = resolveAgentUrl(url);
-  const searchParams = new URLSearchParams();
-  if (path) searchParams.set('path', path);
-  if (options.recursive) searchParams.set('recursive', 'true');
-  if (options.includeHidden) searchParams.set('includeHidden', 'true');
-  const query = searchParams.toString();
-  const filesUrl = `${base}/files${query ? `?${query}` : ''}`;
-  const headers = agentHeaders(url);
-
-  return withRequestDeadline(
-    `Agent file listing ${path || '/'}`,
-    requestControls(options, FILE_REQUEST_TIMEOUT_MS),
-    async (signal) => {
-      const res = await fetch(filesUrl, { method: 'GET', headers, signal });
-      if (!res.ok) throw await agentResponseError(res);
-      return res.json();
-    }
-  );
+  return connFor(url).request('file.list', {
+    path: path || '',
+    recursive: options.recursive === true,
+    includeHidden: options.includeHidden === true,
+  }, options);
 }
 
 /**
@@ -698,18 +451,8 @@ export async function listRemoteFiles(path = '', url, options = {}) {
  * @param {string} [url] - agent host URL (optional, defaults to local /agent)
  * @returns {Promise<{success: boolean, message: string}>}
  */
-export async function createRemoteFile(path, content = '', isDirectory = false, url) {
-  const base = resolveAgentUrl(url);
-  const filesUrl = `${base}/files`;
-  const headers = agentHeaders(url, { 'Content-Type': 'application/json' });
-
-  const res = await fetch(filesUrl, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ path, content, isDirectory }),
-  });
-  if (!res.ok) throw await agentResponseError(res);
-  return res.json();
+export function createRemoteFile(path, content = '', isDirectory = false, url) {
+  return connFor(url).request('file.create', { path, content, isDirectory });
 }
 
 /**
@@ -718,14 +461,8 @@ export async function createRemoteFile(path, content = '', isDirectory = false, 
  * @param {string} [url] - agent host URL (optional, defaults to local /agent)
  * @returns {Promise<{success: boolean, message: string}>}
  */
-export async function deleteRemoteFile(path, url) {
-  const base = resolveAgentUrl(url);
-  const filesUrl = `${base}/files?path=${encodeURIComponent(path)}`;
-  const headers = agentHeaders(url);
-
-  const res = await fetch(filesUrl, { method: 'DELETE', headers });
-  if (!res.ok) throw await agentResponseError(res);
-  return res.json();
+export function deleteRemoteFile(path, url) {
+  return connFor(url).request('file.delete', { path });
 }
 
 /**
@@ -735,68 +472,59 @@ export async function deleteRemoteFile(path, url) {
  * @param {string} [url] - agent host URL (optional, defaults to local /agent)
  * @returns {Promise<{success: boolean, message: string}>}
  */
-export async function moveRemoteFile(sourcePath, targetPath, url) {
-  const base = resolveAgentUrl(url);
-  const filesUrl = `${base}/files`;
-  const headers = agentHeaders(url, { 'Content-Type': 'application/json' });
-
-  const res = await fetch(filesUrl, {
-    method: 'PATCH',
-    headers,
-    body: JSON.stringify({ sourcePath, targetPath }),
-  });
-  if (!res.ok) throw await agentResponseError(res);
-  return res.json();
+export function moveRemoteFile(sourcePath, targetPath, url) {
+  return connFor(url).request('file.move', { sourcePath, targetPath });
 }
 
 /**
- * Upload a file to the remote agent server.
+ * Upload a file to the remote agent server as a chunked binary stream.
  * @param {string} path - Path relative to files root
  * @param {Blob|File} file - The file to upload
  * @param {string} [url] - agent host URL (optional, defaults to local /agent)
  * @returns {Promise<{success: boolean, message: string}>}
  */
 export async function uploadRemoteFile(path, file, url) {
-  const base = resolveAgentUrl(url);
-  const uploadUrl = `${base}/files/upload`;
-  
-  // Create form data for multipart upload
-  const formData = new FormData();
-  formData.append('path', path);
-  formData.append('file', file);
-
-  const headers = agentHeaders(url);
-
-  const res = await fetch(uploadUrl, {
-    method: 'POST',
-    headers,
-    body: formData,
-  });
-  if (!res.ok) throw await agentResponseError(res);
-  return res.json();
+  const conn = connFor(url);
+  const streamId = nextStreamId();
+  await conn.request('file.upload.begin', { streamId, path, size: file.size });
+  await conn.sendStream(streamId, file);
+  return conn.request('file.upload.end', { streamId }, { timeoutMs: UPLOAD_END_TIMEOUT_MS });
 }
 
 /**
- * Download a file from the remote agent server.
+ * Download a file from the remote agent server as a chunked binary stream
+ * reassembled into a Blob.
  * @param {string} path - Path relative to files root
  * @param {string} [url] - agent host URL (optional, defaults to local /agent)
  * @param {{signal?: AbortSignal, timeoutMs?: number}|AbortSignal} [options]
  * @returns {Promise<Blob>}
  */
 export async function downloadRemoteFile(path, url, options = {}) {
-  const base = resolveAgentUrl(url);
-  const downloadUrl = `${base}/files/download?path=${encodeURIComponent(path)}`;
-  const headers = agentHeaders(url);
-
-  return withRequestDeadline(
-    `Agent file download ${path}`,
-    requestControls(options, FILE_REQUEST_TIMEOUT_MS),
-    async (signal) => {
-      const res = await fetch(downloadUrl, { method: 'GET', headers, signal });
-      if (!res.ok) throw await agentResponseError(res);
-      return res.blob();
-    }
-  );
+  const conn = connFor(url);
+  const streamId = nextStreamId();
+  const received = conn.receiveStream(streamId);
+  // Callers can abandon a download (catalog deadlines, aborts) before the
+  // stream settles; keep a no-op consumer so a late rejection never becomes
+  // an unhandled rejection while the real race still sees the original.
+  received.catch(() => {});
+  let streamTimer = null;
+  try {
+    await conn.request('file.download', { path, streamId }, options);
+    const chunks = await Promise.race([
+      received,
+      new Promise((_, reject) => {
+        streamTimer = setTimeout(() => {
+          reject(timeoutError(`Agent file download timed out: ${path}`));
+        }, DOWNLOAD_STREAM_TIMEOUT_MS);
+      }),
+    ]);
+    return new Blob(chunks, { type: 'application/octet-stream' });
+  } catch (error) {
+    conn.cancelStream(streamId, `Download failed: ${path}`);
+    throw error;
+  } finally {
+    if (streamTimer) clearTimeout(streamTimer);
+  }
 }
 
 /**

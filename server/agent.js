@@ -31,10 +31,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
-  renameSync,
-  rmSync,
   statSync,
-  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import {
@@ -51,6 +48,10 @@ import { migrateLegacyAgentState, resolveAgentStatePaths } from './agent-state.j
 import { createCommandExecutor } from './command-executor.js';
 import { createCommandJobManager } from './command-jobs.js';
 import { createFilePathPolicy } from './file-path-policy.js';
+import { createAgentWsServer } from './ws-protocol.js';
+import { createDomainHandlers } from './ws-handlers.js';
+import { createFileHandlers, createFileOperations } from './ws-files.js';
+import { createRunHandlers } from './ws-runs.js';
 import { fetchWebPage, isPrivateWebHostname, normalizeWebUrl } from '../src/agent/webFetch.js';
 import { runWebSearch } from '../src/models/search.js';
 
@@ -80,11 +81,7 @@ const HOST = process.env.AGENT_HOST
 const MAX_TIMEOUT = 30_000;
 // Ceiling for one wait_command long-poll (7 days, matching schedule_wakeup).
 // Node's setTimeout accepts up to ~24.8 days, so this stays within its range.
-const MAX_COMMAND_WAIT_MS = 7 * 24 * 60 * 60_000;
 const MAX_OUTPUT_BYTES = 10 * 1024 * 1024;
-const MAX_AGENT_RUN_REQUEST_BYTES = 128 * 1024 * 1024;
-const MAX_JSON_BODY_BYTES = envPositiveBytes('AGENT_MAX_JSON_BODY_BYTES', 10 * 1024 * 1024);
-const MAX_CONNECT_BODY_BYTES = 4 * 1024;
 const MAX_UPLOAD_BYTES = envPositiveBytes('AGENT_MAX_UPLOAD_BYTES', 256 * 1024 * 1024);
 const MAX_WS_FRAME_BYTES = 1024 * 1024;
 const MAX_WS_BUFFER_BYTES = 8 * 1024 * 1024;
@@ -177,7 +174,6 @@ function printBootConfig() {
       jobsDir: JOBS_DIR,
       runIdleTimeoutMs: RUN_IDLE_TIMEOUT_MS,
       stateRetentionMs: STATE_RETENTION_MS,
-      maxJsonBodyBytes: MAX_JSON_BODY_BYTES,
       maxUploadBytes: MAX_UPLOAD_BYTES,
       staticDir: STATIC_DIR,
     },
@@ -219,38 +215,6 @@ function resolveStaticPath(pathname) {
   return resolvedPath === STATIC_DIR || resolvedPath.startsWith(STATIC_DIR + sep)
     ? resolvedPath
     : null;
-}
-
-// ─── CORS ───────────────────────────────────────────────────────────────────
-
-function corsHeaders(req) {
-  const origin = req.headers['origin'] || '';
-  // Echo the request origin only when it is allowlisted; an untrusted origin
-  // gets no Access-Control-Allow-Origin at all.
-  if (origin && ALLOWED_ORIGINS.includes(origin)) {
-    return {
-      'Access-Control-Allow-Origin': origin,
-      'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-    };
-  }
-  return {
-    'Access-Control-Allow-Origin': ALLOWED_ORIGINS[0],
-    'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-  };
-}
-
-/**
- * CSRF guard for mutating requests. Browsers always attach an Origin header to
- * cross-origin POST/PATCH/DELETE (including no-preflight "simple" requests
- * like text/plain forms). Non-browser clients and same-origin requests may
- * omit it. When auth is disabled this is the only thing standing between any
- * website and arbitrary command execution, so reject untrusted origins.
- */
-function isAllowedHttpOrigin(req) {
-  const origin = req.headers['origin'] || '';
-  return !origin || ALLOWED_ORIGINS.includes(origin);
 }
 
 // ─── Rate limiting ──────────────────────────────────────────────────────────
@@ -321,13 +285,6 @@ function saveTokens() {
   }
 }
 
-function isAuthorized(req) {
-  if (AUTH_DISABLED) return true;
-  const auth = req.headers['authorization'] || '';
-  const token = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
-  return validTokens.has(token);
-}
-
 // ─── Command validation ─────────────────────────────────────────────────────
 
 const BLOCKED_PATTERNS = [
@@ -390,45 +347,15 @@ function runtimePath(inputPath = '') {
   return resolve(join(FILES_ROOT_DIR, normalize(inputPath)));
 }
 
-function listFileEntries(resolvedPath, normalizedPath, recursive = false, includeHidden = false) {
-  const files = [];
-  const entries = readdirSync(resolvedPath, { withFileTypes: true });
-
-  for (const entry of entries) {
-    if (!includeHidden && entry.name.startsWith('.')) continue;
-
-    const entryPath = join(resolvedPath, entry.name);
-    if (isProtectedControlPath(entryPath)) continue;
-    let size = 0;
-    let lastModified = null;
-    try {
-      const entryStats = statSync(entryPath);
-      size = entryStats.size;
-      lastModified = entryStats.mtimeMs;
-    } catch { /* ignore */ }
-
-    const relativePath = join(normalizedPath, entry.name);
-    files.push({
-      id: `${entry.isDirectory() ? 'dir' : 'file'}-${normalizedPath}-${entry.name}`,
-      name: entry.name,
-      type: entry.isDirectory() ? 'directory' : 'file',
-      size,
-      lastModified,
-      path: relativePath,
-      parentDir: normalizedPath === '.' ? '' : normalizedPath,
-    });
-
-    if (recursive && entry.isDirectory()) {
-      try {
-        files.push(...listFileEntries(entryPath, relativePath, true, includeHidden));
-      } catch {
-        // One unreadable directory should not make the entire search fail.
-      }
-    }
-  }
-
-  return files;
-}
+const fileOperations = createFileOperations({
+  filesRootDir: FILES_ROOT_DIR,
+  isSafePath,
+  isSafeMutationPath,
+  isProtectedControlPath,
+  isSameOrChildPath: isSameOrChildResolvedPath,
+  maxUploadBytes: MAX_UPLOAD_BYTES,
+  log: (...args) => console.log('[agent]', ...args),
+});
 
 const agentRunManager = createAgentRunManager({
   runsDir: RUNS_DIR,
@@ -464,747 +391,83 @@ const agentRunManager = createAgentRunManager({
   },
 });
 
-function json(res, status, data, req) {
-  if (res.writableEnded) return;
-  const headers = {
-    'Content-Type': 'application/json',
-    // API JSON is live state, especially /agent/runs/:id. Prevent browsers
-    // and reverse proxies from turning repeated run polling into an empty 304.
-    'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
-    'Pragma': 'no-cache',
-    'Expires': '0',
-    ...corsHeaders(req),
-  };
-  res.writeHead(status, headers);
-  res.end(JSON.stringify(data));
-}
-
-async function readBody(req, maxBytes = MAX_JSON_BODY_BYTES) {
-  const declaredBytes = Number(req.headers['content-length']);
-  if (Number.isFinite(declaredBytes) && declaredBytes > maxBytes) {
-    const error = new Error(`Request body exceeds ${maxBytes} bytes.`);
-    error.statusCode = 413;
-    throw error;
-  }
-  let body = '';
-  let receivedBytes = 0;
-  for await (const chunk of req) {
-    receivedBytes += Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(chunk);
-    if (receivedBytes > maxBytes) {
-      const error = new Error(`Request body exceeds ${maxBytes} bytes.`);
-      error.statusCode = 413;
-      throw error;
-    }
-    body += chunk;
-  }
-  return body;
-}
-
-/**
- * Read and parse a JSON request body. Returns undefined when the body is not
- * valid JSON; body-size errors from readBody propagate to the outer handler.
- */
-async function readJsonBody(req, maxBytes) {
-  const body = await readBody(req, maxBytes);
-  try {
-    return JSON.parse(body);
-  } catch {
-    return undefined;
-  }
-}
-
-async function readBodyBuffer(req, maxBytes = MAX_UPLOAD_BYTES) {
-  const declaredBytes = Number(req.headers['content-length']);
-  if (Number.isFinite(declaredBytes) && declaredBytes > maxBytes) {
-    const error = new Error(`Request body exceeds ${maxBytes} bytes.`);
-    error.statusCode = 413;
-    throw error;
-  }
-  const chunks = [];
-  let receivedBytes = 0;
-  for await (const chunk of req) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    receivedBytes += buffer.length;
-    if (receivedBytes > maxBytes) {
-      const error = new Error(`Request body exceeds ${maxBytes} bytes.`);
-      error.statusCode = 413;
-      throw error;
-    }
-    chunks.push(buffer);
-  }
-  return Buffer.concat(chunks);
-}
-
 function isAllowedWsOrigin(req) {
   const origin = req.headers.origin || '';
   return !origin || ALLOWED_ORIGINS.includes(origin);
 }
 
-function sendWsFrame(socket, value) {
-  if (socket.destroyed) return;
-  const payload = Buffer.from(JSON.stringify(value));
-  let header;
-  if (payload.length < 126) {
-    header = Buffer.from([0x81, payload.length]);
-  } else if (payload.length < 65536) {
-    header = Buffer.alloc(4);
-    header[0] = 0x81;
-    header[1] = 126;
-    header.writeUInt16BE(payload.length, 2);
-  } else {
-    header = Buffer.alloc(10);
-    header[0] = 0x81;
-    header[1] = 127;
-    header.writeBigUInt64BE(BigInt(payload.length), 2);
-  }
-  socket.write(Buffer.concat([header, payload]));
-}
-
-function closeWs(socket, code = 1000, reason = '') {
-  if (socket.destroyed) return;
-  // A close frame carries the reason in a <=123-byte payload (125 minus the
-  // 2-byte status code); longer reasons must be truncated, not wrapped.
-  const reasonBuffer = Buffer.from(String(reason || ''), 'utf8').subarray(0, 123);
-  const payload = Buffer.alloc(2 + reasonBuffer.length);
-  payload.writeUInt16BE(code, 0);
-  reasonBuffer.copy(payload, 2);
-  const header = Buffer.from([0x88, payload.length]);
-  socket.end(Buffer.concat([header, payload]));
-}
-
-function parseWsFrames(buffer) {
-  const frames = [];
-  let offset = 0;
-
-  while (offset + 2 <= buffer.length) {
-    const first = buffer[offset];
-    const second = buffer[offset + 1];
-    const opcode = first & 0x0f;
-    const masked = (second & 0x80) !== 0;
-    let length = second & 0x7f;
-    let headerLength = 2;
-
-    if (length === 126) {
-      if (offset + 4 > buffer.length) break;
-      length = buffer.readUInt16BE(offset + 2);
-      headerLength = 4;
-    } else if (length === 127) {
-      if (offset + 10 > buffer.length) break;
-      const bigLength = buffer.readBigUInt64BE(offset + 2);
-      if (bigLength > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error('WebSocket frame too large');
-      length = Number(bigLength);
-      headerLength = 10;
-    }
-
-    if (length > MAX_WS_FRAME_BYTES) throw new Error('WebSocket frame too large');
-
-    const maskLength = masked ? 4 : 0;
-    const frameEnd = offset + headerLength + maskLength + length;
-    if (frameEnd > buffer.length) break;
-
-    let payload = buffer.slice(offset + headerLength + maskLength, frameEnd);
-    if (masked) {
-      const mask = buffer.slice(offset + headerLength, offset + headerLength + 4);
-      payload = Buffer.from(payload.map((byte, index) => byte ^ mask[index % 4]));
-    }
-
-    frames.push({ opcode, payload });
-    offset = frameEnd;
-  }
-
-  return { frames, rest: buffer.slice(offset) };
-}
-
 // ─── Server ─────────────────────────────────────────────────────────────────
+// All agent traffic rides the WebSocket protocol; HTTP serves only the
+// bundled frontend assets.
 
-const server = createServer(async (req, res) => {
+const server = createServer((req, res) => {
   try {
-  // CORS preflight
-  if (req.method === 'OPTIONS') {
-    if (res.writableEnded) return;
-    res.writeHead(204, corsHeaders(req));
-    return res.end();
+    const url = new URL(req.url, `http://localhost:${PORT}`);
+    let staticPath = resolveStaticPath(url.pathname === '/' ? '/index.html' : url.pathname);
+    if (staticPath && serveStatic(res, staticPath)) return;
+
+    staticPath = join(STATIC_DIR, 'index.html');
+    if (serveStatic(res, staticPath)) return;
+
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Not found' }));
+  } catch (err) {
+    console.error(`[agent] Unhandled error: ${err.message}`);
+    if (!res.writableEnded) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Internal server error' }));
+    }
   }
+});
 
-  // CSRF guard: reject mutating requests whose browser-supplied Origin is not
-  // allowlisted. This matters most when AGENT_DISABLE_AUTH is set, because a
-  // no-preflight text/plain POST from any website would otherwise execute a
-  // command even though its response stays unreadable.
-  if (['POST', 'PATCH', 'DELETE'].includes(req.method) && !isAllowedHttpOrigin(req)) {
-    return json(res, 403, {
-      error: 'Origin not allowed. Add the page origin to AGENT_ALLOWED_ORIGINS and restart the agent server.',
-    }, req);
-  }
+// ─── WebSocket protocol (all agent traffic) ─────────────────────────────────// ─── WebSocket protocol (all agent traffic) ─────────────────────────────────
 
-  const url = new URL(req.url, `http://localhost:${PORT}`);
-
-  // ── Health check ───────────────────────────────────────────────────────
-  if ((url.pathname === '/agent' || url.pathname === '/agent/health') && req.method === 'GET') {
-    const authed = isAuthorized(req);
-
-    // Rotate only when the printed token has aged out. Rotating on every
-    // unauthenticated GET would let any network client invalidate the token
-    // the operator just copied from the console.
-    if (!AUTH_DISABLED && !authed) ensureFreshTempToken();
-
-    return json(res, 200, {
-      status: 'ok',
-      needsAuth: !authed,
-      authRequired: !AUTH_DISABLED,
-      authenticated: authed,
-      platform: process.platform,
-      shell: COMMAND_SHELL || 'default',
-      cwd: PUBLIC_WORKSPACE_LABEL,
-      filesRoot: PUBLIC_WORKSPACE_LABEL,
-      capabilities: {
-        backgroundAgentRuns: true,
-        // Protocol 3 additionally guarantees bounded no-progress runs and an
-        // immutable terminal state after forced cancellation.
-        agentRunProtocol: 3,
-        backgroundCommands: true,
-        backgroundCommandProtocol: 1,
-      },
-    }, req);
-  }
-
-  // ── Token exchange (connect) ───────────────────────────────────────────
-  if (url.pathname === '/agent/connect' && req.method === 'POST') {
-    const clientIp = req.socket.remoteAddress;
-    if (isRateLimited(`connect:${clientIp}`, 5, 60_000)) {
-      return json(res, 429, { error: 'Too many connect attempts. Try again later.' }, req);
+const agentWsServer = createAgentWsServer({
+  authDisabled: AUTH_DISABLED,
+  isValidToken: (token) => validTokens.has(token),
+  exchangeTempToken: (candidate) => {
+    if (candidate !== tempToken) {
+      // With the HTTP health probe gone, expiry rotation happens here: an
+      // aged-out printed token is invalidated instead of lingering forever.
+      ensureFreshTempToken();
+      return null;
     }
-
-    const parsed = await readJsonBody(req, MAX_CONNECT_BODY_BYTES);
-    if (parsed === undefined) {
-      return json(res, 400, { error: 'Invalid JSON body' }, req);
-    }
-
-    const { token } = parsed;
-    if (!token || typeof token !== 'string') {
-      return json(res, 400, { error: 'Missing or invalid "token" field' }, req);
-    }
-
-    if (token !== tempToken) {
-      return json(res, 403, { error: 'Invalid token. Check the server console for the correct token.' }, req);
-    }
-
     const longLivedToken = generateToken(48);
     validTokens.add(longLivedToken);
     saveTokens();
-
     rotateTempToken('rotated after connect');
-
-    console.log('[agent] Client authenticated successfully.');
-    return json(res, 200, { token: longLivedToken }, req);
-  }
-
-  // ── Execute command (requires auth) ────────────────────────────────────
-  if (url.pathname === '/agent' && req.method === 'POST') {
-    if (!isAuthorized(req)) {
-      return json(res, 401, { error: 'Unauthorized.' }, req);
-    }
-
-    const clientIp = req.socket.remoteAddress;
-    if (isRateLimited(`cmd:${clientIp}`, 30, 60_000)) {
-      return json(res, 429, { error: 'Too many commands. Slow down.' }, req);
-    }
-
-    const parsed = await readJsonBody(req);
-    if (parsed === undefined) {
-      return json(res, 400, { error: 'Invalid JSON body' }, req);
-    }
-
-    const { cmd } = parsed;
-    if (!cmd || typeof cmd !== 'string') {
-      return json(res, 400, { error: 'Missing or invalid "cmd" field' }, req);
-    }
-
-    const validation = validateCommand(cmd);
-    if (validation.blocked) {
-      console.warn(`[agent] BLOCKED command: ${cmd} (${validation.reason})`);
-      return json(res, 403, { error: `Command blocked: ${validation.reason}` }, req);
-    }
-
-    console.log(`[agent] exec: ${cmd}`);
-    const controller = new AbortController();
-    const abortDisconnectedCommand = () => {
-      if (!res.writableEnded) controller.abort();
-    };
-    res.once('close', abortDisconnectedCommand);
-    let result;
-    try {
-      result = await execCommand(cmd, { signal: controller.signal });
-    } catch (error) {
-      if (error?.name === 'AbortError' && !res.writableEnded) return;
-      throw error;
-    } finally {
-      res.removeListener('close', abortDisconnectedCommand);
-    }
-    console.log(`[agent] exit code: ${result.code} (${result.platform}, ${result.shell}, cwd=${result.cwd})`);
-    if (result.code !== 0) {
-      if (result.stdout) console.log(`[agent] stdout:\n${truncateLog(result.stdout)}`);
-      if (result.stderr) console.warn(`[agent] stderr:\n${truncateLog(result.stderr)}`);
-    }
-    return json(res, 200, result, req);
-  }
-
-  // ── Managed background commands (requires auth) ───────────────────────
-  if (url.pathname === '/agent/commands' && req.method === 'POST') {
-    if (!isAuthorized(req)) return json(res, 401, { error: 'Unauthorized.' }, req);
-    const clientIp = req.socket.remoteAddress;
-    if (isRateLimited(`cmd:${clientIp}`, 30, 60_000)) {
-      return json(res, 429, { error: 'Too many commands. Slow down.' }, req);
-    }
-    const parsed = await readJsonBody(req);
-    if (parsed === undefined) {
-      return json(res, 400, { error: 'Invalid JSON body' }, req);
-    }
-    const command = parsed?.command;
-    if (!command || typeof command !== 'string') {
-      return json(res, 400, { error: 'Missing or invalid "command" field' }, req);
-    }
-    const validation = validateCommand(command);
-    if (validation.blocked) {
-      return json(res, 403, { error: `Command blocked: ${validation.reason}` }, req);
-    }
-    try {
-      console.log(`[agent] background exec: ${command}`);
-      return json(res, 202, commandJobManager.start(command), req);
-    } catch (error) {
-      return json(res, 400, { error: error.message || 'Could not start background command' }, req);
-    }
-  }
-
-  const commandRoute = url.pathname.match(/^\/agent\/commands\/([^/]+)$/);
-  if (commandRoute && req.method === 'GET') {
-    if (!isAuthorized(req)) return json(res, 401, { error: 'Unauthorized.' }, req);
-    const id = decodeURIComponent(commandRoute[1]);
-    const cursor = Number(url.searchParams.get('cursor')) || 0;
-    const waitMs = Math.min(MAX_COMMAND_WAIT_MS, Math.max(0, Number(url.searchParams.get('wait_ms')) || 0));
-    let result;
-    if (waitMs > 0) {
-      const controller = new AbortController();
-      const abortWait = () => {
-        if (!res.writableEnded) controller.abort();
-      };
-      res.once('close', abortWait);
-      try {
-        result = await commandJobManager.wait(id, { cursor, waitMs, signal: controller.signal });
-      } catch (error) {
-        if (error?.name === 'AbortError' && !res.writableEnded) return;
-        throw error;
-      } finally {
-        res.removeListener('close', abortWait);
-      }
-    } else {
-      result = commandJobManager.get(id, cursor);
-    }
-    return result
-      ? json(res, 200, result, req)
-      : json(res, 404, { error: 'Background command not found' }, req);
-  }
-
-  if (commandRoute && req.method === 'DELETE') {
-    if (!isAuthorized(req)) return json(res, 401, { error: 'Unauthorized.' }, req);
-    const result = await commandJobManager.stop(decodeURIComponent(commandRoute[1]));
-    return result
-      ? json(res, 202, result, req)
-      : json(res, 404, { error: 'Background command not found' }, req);
-  }
-
-  // ── Durable sandbox agent runs (requires auth) ─────────────────────────
-  if (url.pathname === '/agent/runs' && req.method === 'POST') {
-    if (!isAuthorized(req)) return json(res, 401, { error: 'Unauthorized.' }, req);
-    try {
-      const input = JSON.parse(await readBody(req, MAX_AGENT_RUN_REQUEST_BYTES));
-      const run = agentRunManager.start(input);
-      return json(res, 202, run, req);
-    } catch (error) {
-      return json(res, error.statusCode || 400, { error: error.message || 'Invalid agent run request' }, req);
-    }
-  }
-
-  if (url.pathname === '/agent/runs' && req.method === 'GET') {
-    if (!isAuthorized(req)) return json(res, 401, { error: 'Unauthorized.' }, req);
-    return json(res, 200, { runs: agentRunManager.list(url.searchParams.get('sessionId')) }, req);
-  }
-
-  const runRoute = url.pathname.match(/^\/agent\/runs\/([^/]+)$/);
-  if (runRoute && req.method === 'GET') {
-    if (!isAuthorized(req)) return json(res, 401, { error: 'Unauthorized.' }, req);
-    const run = agentRunManager.get(decodeURIComponent(runRoute[1]), Number(url.searchParams.get('after')) || 0);
-    return run ? json(res, 200, run, req) : json(res, 404, { error: 'Agent run not found' }, req);
-  }
-
-  if (runRoute && req.method === 'DELETE') {
-    if (!isAuthorized(req)) return json(res, 401, { error: 'Unauthorized.' }, req);
-    const run = await agentRunManager.abort(decodeURIComponent(runRoute[1]));
-    return run ? json(res, 202, run, req) : json(res, 404, { error: 'Agent run not found' }, req);
-  }
-
-  // ── Web search proxy (requires auth) ───────────────────────────────────
-  // Runs a provider search server-side for browser clients that cannot reach
-  // the provider directly (no CORS). The request carries the provider
-  // credential, so it rides the same authenticated channel as run payloads.
-  if (url.pathname === '/agent/web-search' && req.method === 'POST') {
-    if (!isAuthorized(req)) return json(res, 401, { error: 'Unauthorized.' }, req);
-    const clientIp = req.socket.remoteAddress;
-    if (isRateLimited(`websearch:${clientIp}`, 30, 60_000)) {
-      return json(res, 429, { error: 'Too many search requests. Slow down.' }, req);
-    }
-
-    const parsed = await readJsonBody(req, 64 * 1024);
-    if (parsed === undefined) {
-      return json(res, 400, { error: 'Invalid JSON body' }, req);
-    }
-    const { config: searchConfig = {}, request: searchRequest = {} } = parsed || {};
-    if (!searchRequest || typeof searchRequest.query !== 'string' || !searchRequest.query.trim()) {
-      return json(res, 400, { error: 'Missing or invalid "request.query" field' }, req);
-    }
-
-    console.log(`[agent] web-search: ${searchConfig.provider} "${searchRequest.query.slice(0, 200)}"`);
-    try {
-      const result = await runWebSearch(searchConfig, searchRequest, {});
-      return json(res, 200, result, req);
-    } catch (error) {
-      console.warn(`[agent] web-search failed: ${error.message}`);
-      return json(res, error.statusCode && error.statusCode >= 400 && error.statusCode < 500 ? error.statusCode : 502, {
-        error: error.message || 'Web search failed',
-      }, req);
-    }
-  }
-
-  // ── Web fetch proxy (requires auth) ────────────────────────────────────
-  // Fetches one public web page for the browser client, bypassing browser
-  // CORS limits, and returns the converted readable text.
-  if (url.pathname === '/agent/web-fetch' && req.method === 'POST') {
-    if (!isAuthorized(req)) return json(res, 401, { error: 'Unauthorized.' }, req);
-    const clientIp = req.socket.remoteAddress;
-    if (isRateLimited(`webfetch:${clientIp}`, 60, 60_000)) {
-      return json(res, 429, { error: 'Too many fetch requests. Slow down.' }, req);
-    }
-
-    const parsed = await readJsonBody(req, 64 * 1024);
-    if (parsed === undefined) {
-      return json(res, 400, { error: 'Invalid JSON body' }, req);
-    }
-    const { url: targetUrl, max_chars: maxChars } = parsed || {};
-    const normalizedTarget = normalizeWebUrl(targetUrl);
-    if (!normalizedTarget) {
-      return json(res, 400, { error: 'Missing or invalid "url" field: only http(s) URLs are supported' }, req);
-    }
-    // Defense-in-depth for CSRF-shaped misuse when auth is disabled: private
-    // addresses stay unreachable unless the operator opts in. A token holder
-    // can already run arbitrary shell, so this is not a hard boundary.
-    let targetHost = null;
-    try {
-      targetHost = new URL(normalizedTarget).hostname;
-    } catch { /* unreachable: normalizeWebUrl validated it */ }
-    if (!ALLOW_PRIVATE_WEB_FETCH && isPrivateWebHostname(targetHost)) {
-      return json(res, 403, { error: 'Refusing to fetch private or loopback addresses through the web proxy (set AGENT_ALLOW_PRIVATE_WEB_FETCH=1 to allow).' }, req);
-    }
-
-    console.log(`[agent] web-fetch: ${normalizedTarget}`);
-    try {
-      const page = await fetchWebPage(normalizedTarget, {
-        maxChars,
-        timeoutMs: 30_000,
-        // The proxy is the shared cache owner; each request re-validates the
-        // TTL centrally instead of trusting a client-supplied cache flag.
-        noCache: false,
-      });
-      return json(res, 200, page, req);
-    } catch (error) {
-      console.warn(`[agent] web-fetch failed: ${error.message}`);
-      return json(res, error.statusCode || 502, { error: error.message || 'Web fetch failed' }, req);
-    }
-  }
-
-  // ── List files (requires auth) ─────────────────────────────────────────
-  if (url.pathname === '/agent/files' && req.method === 'GET') {
-    if (!isAuthorized(req)) {
-      return json(res, 401, { error: 'Unauthorized.' }, req);
-    }
-
-    const searchParams = new URLSearchParams(url.search);
-    const dirPath = searchParams.get('path') || '';
-    const recursive = searchParams.get('recursive') === 'true';
-    const includeHidden = searchParams.get('includeHidden') === 'true';
-
-    if (!isSafePath(dirPath)) {
-      return json(res, 403, { error: 'Access denied: Path outside agent files root' }, req);
-    }
-
-    try {
-      const normalizedPath = normalize(dirPath);
-      const resolvedPath = resolve(join(FILES_ROOT_DIR, normalizedPath));
-
-      if (!existsSync(resolvedPath)) {
-        return json(res, 404, { error: 'Directory not found' }, req);
-      }
-
-      const stats = statSync(resolvedPath);
-      if (!stats.isDirectory()) {
-        return json(res, 400, { error: 'Not a directory' }, req);
-      }
-
-      const files = listFileEntries(resolvedPath, normalizedPath, recursive, includeHidden);
-
-      const result = recursive || normalizedPath === '.' || normalizedPath === ''
-        ? {
-          id: 'root',
-          name: '/',
-          type: 'directory',
-          ...(recursive ? { recursive: true } : {}),
-          children: files,
-        }
-        : files;
-
-      return json(res, 200, result, req);
-    } catch (err) {
-      console.error(`[agent] Error listing files: ${err.message}`);
-      return json(res, 500, { error: 'Failed to list files' }, req);
-    }
-  }
-
-  // ── Create file/directory (requires auth) ──────────────────────────────
-  if (url.pathname === '/agent/files' && req.method === 'POST') {
-    if (!isAuthorized(req)) {
-      return json(res, 401, { error: 'Unauthorized.' }, req);
-    }
-
-    const parsed = await readJsonBody(req);
-    if (parsed === undefined) {
-      return json(res, 400, { error: 'Invalid JSON body' }, req);
-    }
-
-    const { path, content, isDirectory } = parsed;
-    if (!path || typeof path !== 'string') {
-      return json(res, 400, { error: 'Missing or invalid "path" field' }, req);
-    }
-
-    if (!isSafePath(path)) {
-      return json(res, 403, { error: 'Access denied: Path outside agent files root' }, req);
-    }
-
-    try {
-      const resolvedPath = resolve(join(FILES_ROOT_DIR, normalize(path)));
-
-      if (isDirectory) {
-        mkdirSync(resolvedPath, { recursive: true });
-        return json(res, 200, { success: true, message: 'Directory created' }, req);
-      } else {
-        const parentDir = join(resolvedPath, '..');
-        if (!existsSync(parentDir)) mkdirSync(parentDir, { recursive: true });
-        writeFileSync(resolvedPath, content || '');
-        return json(res, 200, { success: true, message: 'File created' }, req);
-      }
-    } catch (err) {
-      console.error(`[agent] Error creating file: ${err.message}`);
-      return json(res, 500, { error: 'Failed to create file' }, req);
-    }
-  }
-
-  // ── Upload file (requires auth) ────────────────────────────────────────
-  if (url.pathname === '/agent/files/upload' && req.method === 'POST') {
-    if (!isAuthorized(req)) {
-      return json(res, 401, { error: 'Unauthorized.' }, req);
-    }
-
-    try {
-      const contentType = req.headers['content-type'] || '';
-      const boundaryMatch = contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i);
-      if (!boundaryMatch) {
-        return json(res, 400, { error: 'Invalid multipart form data' }, req);
-      }
-
-      const boundary = `--${boundaryMatch[1] || boundaryMatch[2]}`;
-      const body = (await readBodyBuffer(req)).toString('latin1');
-      const parts = body.split(boundary);
-      let filePath = '';
-      let fileContent = null;
-
-      for (const part of parts) {
-        if (!part || part === '--' || part === '--\r\n') continue;
-        const cleanPart = part.replace(/^\r?\n/, '');
-        const headerEnd = cleanPart.indexOf('\r\n\r\n');
-        if (headerEnd === -1) continue;
-        const headers = cleanPart.slice(0, headerEnd);
-        let content = cleanPart.slice(headerEnd + 4);
-        if (content.endsWith('\r\n')) content = content.slice(0, -2);
-        const contentDisposition = headers.match(/Content-Disposition:\s*form-data;\s*(.*)/i);
-        if (contentDisposition) {
-          const nameMatch = contentDisposition[1].match(/name="([^"]+)"/);
-          const filenameMatch = contentDisposition[1].match(/filename="([^"]+)"/);
-          if (nameMatch && nameMatch[1] === 'path') filePath = content.trim();
-          if (filenameMatch) fileContent = Buffer.from(content, 'latin1');
-        }
-      }
-
-      if (!filePath || fileContent === null) {
-        return json(res, 400, { error: 'Missing file or path' }, req);
-      }
-
-      if (!isSafePath(filePath)) {
-        return json(res, 403, { error: 'Access denied: Path outside agent files root' }, req);
-      }
-
-      const resolvedPath = resolve(join(FILES_ROOT_DIR, normalize(filePath)));
-      const parentDir = join(resolvedPath, '..');
-      if (!existsSync(parentDir)) mkdirSync(parentDir, { recursive: true });
-      writeFileSync(resolvedPath, fileContent || '');
-      return json(res, 200, { success: true, message: 'File uploaded' }, req);
-    } catch (err) {
-      console.error(`[agent] Error uploading file: ${err.message}`);
-      return json(res, 500, { error: 'Failed to upload file' }, req);
-    }
-  }
-
-  // ── Move file/directory (requires auth) ───────────────────────────────
-  if (url.pathname === '/agent/files' && req.method === 'PATCH') {
-    if (!isAuthorized(req)) {
-      return json(res, 401, { error: 'Unauthorized.' }, req);
-    }
-
-    const parsed = await readJsonBody(req);
-    if (parsed === undefined) {
-      return json(res, 400, { error: 'Invalid JSON body' }, req);
-    }
-
-    const { sourcePath, targetPath } = parsed;
-    if (!sourcePath || typeof sourcePath !== 'string' || !targetPath || typeof targetPath !== 'string') {
-      return json(res, 400, { error: 'Missing or invalid "sourcePath" or "targetPath" field' }, req);
-    }
-
-    if (!isSafeMutationPath(sourcePath) || !isSafePath(targetPath)) {
-      return json(res, 403, { error: 'Access denied: Path outside agent files root' }, req);
-    }
-
-    const normalizedSource = normalize(sourcePath);
-    const normalizedTarget = normalize(targetPath);
-    if (normalizedSource === normalizedTarget) {
-      return json(res, 200, { success: true, message: 'Already at target path' }, req);
-    }
-
-    try {
-      const resolvedSource = resolve(join(FILES_ROOT_DIR, normalizedSource));
-      const resolvedTarget = resolve(join(FILES_ROOT_DIR, normalizedTarget));
-
-      if (!existsSync(resolvedSource)) {
-        return json(res, 404, { error: 'Source file or directory not found' }, req);
-      }
-
-      if (existsSync(resolvedTarget)) {
-        return json(res, 409, { error: 'Destination already exists' }, req);
-      }
-
-      const stats = statSync(resolvedSource);
-      if (stats.isDirectory() && isSameOrChildResolvedPath(resolvedTarget, resolvedSource)) {
-        return json(res, 400, { error: 'Cannot move a directory into itself' }, req);
-      }
-
-      const targetParent = join(resolvedTarget, '..');
-      if (!existsSync(targetParent)) mkdirSync(targetParent, { recursive: true });
-      if (!statSync(targetParent).isDirectory()) {
-        return json(res, 400, { error: 'Target parent is not a directory' }, req);
-      }
-
-      renameSync(resolvedSource, resolvedTarget);
-      return json(res, 200, { success: true, message: 'Moved successfully' }, req);
-    } catch (err) {
-      console.error(`[agent] Error moving file: ${err.message}`);
-      return json(res, 500, { error: 'Failed to move file' }, req);
-    }
-  }
-
-  // ── Delete file/directory (requires auth) ──────────────────────────────
-  if (url.pathname === '/agent/files' && req.method === 'DELETE') {
-    if (!isAuthorized(req)) {
-      return json(res, 401, { error: 'Unauthorized.' }, req);
-    }
-
-    const searchParams = new URLSearchParams(url.search);
-    const filePath = searchParams.get('path') || '';
-
-    if (!filePath) {
-      return json(res, 400, { error: 'Missing "path" parameter' }, req);
-    }
-
-    if (!isSafeMutationPath(filePath)) {
-      return json(res, 403, { error: 'Access denied: Path outside agent files root' }, req);
-    }
-
-    try {
-      const resolvedPath = resolve(join(FILES_ROOT_DIR, normalize(filePath)));
-      if (!existsSync(resolvedPath)) {
-        return json(res, 404, { error: 'File or directory not found' }, req);
-      }
-      const stats = statSync(resolvedPath);
-      if (stats.isDirectory()) {
-        rmSync(resolvedPath, { recursive: true });
-      } else {
-        unlinkSync(resolvedPath);
-      }
-      return json(res, 200, { success: true, message: 'Deleted successfully' }, req);
-    } catch (err) {
-      console.error(`[agent] Error deleting file: ${err.message}`);
-      return json(res, 500, { error: 'Failed to delete file' }, req);
-    }
-  }
-
-  // ── Download file (requires auth) ──────────────────────────────────────
-  if (url.pathname === '/agent/files/download' && req.method === 'GET') {
-    if (!isAuthorized(req)) {
-      return json(res, 401, { error: 'Unauthorized.' }, req);
-    }
-
-    const searchParams = new URLSearchParams(url.search);
-    const filePath = searchParams.get('path') || '';
-
-    if (!filePath) {
-      return json(res, 400, { error: 'Missing "path" parameter' }, req);
-    }
-
-    if (!isSafePath(filePath)) {
-      return json(res, 403, { error: 'Access denied: Path outside agent files root' }, req);
-    }
-
-    try {
-      const resolvedPath = resolve(join(FILES_ROOT_DIR, normalize(filePath)));
-      if (!existsSync(resolvedPath)) {
-        return json(res, 404, { error: 'File not found' }, req);
-      }
-      const stats = statSync(resolvedPath);
-      if (stats.isDirectory()) {
-        return json(res, 400, { error: 'Cannot download a directory' }, req);
-      }
-      const fileData = readFileSync(resolvedPath);
-      const fileName = normalize(filePath).split(/[\\/]/).pop();
-      if (res.writableEnded) return;
-      res.writeHead(200, {
-        'Content-Type': 'application/octet-stream',
-        'Content-Disposition': `attachment; filename="${fileName}"`,
-        ...corsHeaders(req),
-      });
-      res.end(fileData);
-    } catch (err) {
-      console.error(`[agent] Error downloading file: ${err.message}`);
-      return json(res, 500, { error: 'Failed to download file' }, req);
-    }
-  }
-
-  // ── Serve static frontend assets ──────────────────────────────────────
-  let staticPath = resolveStaticPath(url.pathname === '/' ? '/index.html' : url.pathname);
-  if (staticPath && serveStatic(res, staticPath)) return;
-
-  staticPath = join(STATIC_DIR, 'index.html');
-  if (serveStatic(res, staticPath)) return;
-
-  json(res, 404, { error: 'Not found' }, req);
-  } catch (err) {
-    console.error(`[agent] Unhandled error: ${err.message}`);
-    json(res, 500, { error: 'Internal server error' }, req);
-  }
+    return longLivedToken;
+  },
+  capabilities: () => ({
+    backgroundAgentRuns: true,
+    // Protocol 4 moves run traffic onto the WebSocket protocol (subscribe
+    // pushes, incremental continue) and coalesces streaming deltas.
+    agentRunProtocol: 4,
+    backgroundCommands: true,
+    backgroundCommandProtocol: 1,
+    wsProtocol: 1,
+  }),
+  rateLimit: isRateLimited,
+  handlers: {
+    ...createDomainHandlers({
+      streamCommand,
+      validateCommand,
+      rateLimit: isRateLimited,
+      jobManager: commandJobManager,
+      runWebSearch,
+      fetchWebPage,
+      normalizeWebUrl,
+      isPrivateWebHostname,
+      allowPrivateWebFetch: ALLOW_PRIVATE_WEB_FETCH,
+      log: (...args) => console.log('[agent]', ...args),
+      warn: (...args) => console.warn('[agent]', ...args),
+      truncateLog,
+    }),
+    ...createFileHandlers(fileOperations),
+    ...createRunHandlers({ runManager: agentRunManager }),
+  },
+  maxFrameBytes: MAX_WS_FRAME_BYTES,
+  maxBufferBytes: MAX_WS_BUFFER_BYTES,
 });
 
 server.on('upgrade', (req, socket) => {
@@ -1239,103 +502,7 @@ server.on('upgrade', (req, socket) => {
     '\r\n',
   ].join('\r\n'));
 
-  let pending = Buffer.alloc(0);
-  let child = null;
-  let started = false;
-
-  const fail = (status, error) => {
-    sendWsFrame(socket, { type: 'error', error, status });
-    closeWs(socket, 1008, error);
-  };
-
-  socket.on('data', (chunk) => {
-    pending = Buffer.concat([pending, chunk]);
-    if (pending.length > MAX_WS_BUFFER_BYTES) {
-      fail(400, 'WebSocket message too large');
-      socket.destroy();
-      return;
-    }
-    let parsed;
-    try {
-      parsed = parseWsFrames(pending);
-    } catch (err) {
-      fail(400, err.message);
-      return;
-    }
-    pending = parsed.rest;
-
-    for (const frame of parsed.frames) {
-      if (frame.opcode === 0x8) {
-        child?.terminate('aborted');
-        socket.end();
-        return;
-      }
-      if (frame.opcode !== 0x1 || started) continue;
-      started = true;
-
-      let body;
-      try {
-        body = JSON.parse(frame.payload.toString('utf8'));
-      } catch {
-        fail(400, 'Invalid JSON body');
-        return;
-      }
-
-      const { cmd, token } = body;
-      const authed = AUTH_DISABLED || (typeof token === 'string' && validTokens.has(token));
-      if (!authed) {
-        fail(401, 'Unauthorized.');
-        return;
-      }
-
-      const clientIp = req.socket.remoteAddress;
-      if (isRateLimited(`cmd:${clientIp}`, 30, 60_000)) {
-        fail(429, 'Too many commands. Slow down.');
-        return;
-      }
-
-      if (!cmd || typeof cmd !== 'string') {
-        fail(400, 'Missing or invalid "cmd" field');
-        return;
-      }
-
-      const validation = validateCommand(cmd);
-      if (validation.blocked) {
-        console.warn(`[agent] BLOCKED command: ${cmd} (${validation.reason})`);
-        fail(403, `Command blocked: ${validation.reason}`);
-        return;
-      }
-
-      console.log(`[agent] ws exec: ${cmd}`);
-      child = streamCommand(cmd, {
-        onStart: (meta) => sendWsFrame(socket, { type: 'start', ...meta }),
-        onStdout: (data) => sendWsFrame(socket, { type: 'stdout', data }),
-        onStderr: (data) => sendWsFrame(socket, { type: 'stderr', data }),
-        onError: (err) => {
-          console.warn(`[agent] ws exec error: ${err.message}`);
-          sendWsFrame(socket, { type: 'error', error: err.message });
-          closeWs(socket, 1011, err.message);
-        },
-        onExit: (result) => {
-          console.log(`[agent] ws exit code: ${result.code} (${result.platform}, ${result.shell}, cwd=${result.cwd})`);
-          if (result.code !== 0) {
-            if (result.stdout) console.log(`[agent] stdout:\n${truncateLog(result.stdout)}`);
-            if (result.stderr) console.warn(`[agent] stderr:\n${truncateLog(result.stderr)}`);
-          }
-          sendWsFrame(socket, { type: 'exit', ...result });
-          closeWs(socket);
-        },
-      });
-    }
-  });
-
-  socket.on('close', () => {
-    child?.terminate('aborted');
-  });
-
-  socket.on('error', () => {
-    child?.terminate('aborted');
-  });
+  agentWsServer.handleUpgrade(socket, req.socket.remoteAddress);
 });
 
 // ─── Start ───────────────────────────────────────────────────────────────────
@@ -1360,7 +527,7 @@ server.listen(PORT, HOST, () => {
   }
 
   printBootConfig();
-  console.log(`[agent] Server listening on http://${HOST}:${PORT}/agent`);
+  console.log(`[agent] Server listening on http://${HOST}:${PORT} (WebSocket agent protocol at /agent/ws)`);
   if (HOST === '127.0.0.1' || HOST === 'localhost' || HOST === '::1') {
     console.log('[agent] Bound to loopback only (bare host default). Set AGENT_HOST=0.0.0.0 to expose to the network (not recommended without a trusted boundary).');
   } else if (!process.env.AGENT_HOST) {

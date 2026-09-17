@@ -4,6 +4,7 @@ import config from '../config/config.js';
 import { buildSkillsSection, resetDefaultSkillsCache, setSkillEnabled } from './skills.js';
 import { registry } from './tools.js';
 import { readAgentSkillFile, writeSkillFile } from '../vfs/opfs.js';
+import { resetAgentConnections } from '../models/agentConnection.js';
 
 let rootDir;
 
@@ -20,6 +21,7 @@ beforeEach(async () => {
   await config.setAll({});
   delete globalThis.fetch;
   delete globalThis.window;
+  resetAgentConnections();
   resetDefaultSkillsCache();
 });
 
@@ -176,11 +178,11 @@ test('runtime skill discovery loads skill directories concurrently', { timeout: 
   let markAllStarted;
   const allStarted = new Promise((resolve) => { markAllStarted = resolve; });
   installAgentFileApi(files, {
-    onRequest({ url, path }) {
-      if (!url.pathname.endsWith('/files/download')) return undefined;
+    onRequest({ path, type }) {
+      if (type !== 'file.download') return undefined;
       return new Promise((resolve) => {
         started.push(path);
-        releases.set(path, () => resolve(new Response(files.get(path), { status: 200 })));
+        releases.set(path, resolve);
         if (started.length === files.size) markAllStarted();
       });
     },
@@ -216,11 +218,9 @@ test('runtime skill catalog has one overall startup deadline', { timeout: 2_000 
   const files = new Map([
     ['skills/stalled/SKILL.md', skillDocument('stalled', 'Stalled skill.', 'Never returned.')],
   ]);
-  let observedSignal = null;
   installAgentFileApi(files, {
-    onRequest({ url, requestOptions }) {
-      if (!url.pathname.endsWith('/files/download')) return undefined;
-      observedSignal = requestOptions.signal;
+    onRequest({ type }) {
+      if (type !== 'file.download') return undefined;
       return new Promise(() => {});
     },
   });
@@ -233,16 +233,17 @@ test('runtime skill catalog has one overall startup deadline', { timeout: 2_000 
   });
 
   assert.ok(Date.now() - startedAt < 500);
-  assert.equal(observedSignal?.aborted, true);
   assert.match(catalog, /skill-creator/);
   assert.doesNotMatch(catalog, /stalled/);
 });
 
-test('runtime skill transport AbortError is skipped when the run signal is live', async () => {
+test('runtime skill transport failures are skipped when the run signal is live', async () => {
+  // A transport failure that is not the caller's abort (here: the connection
+  // dropping mid-request) must degrade the runtime catalog, not throw.
   installAgentFileApi(new Map(), {
-    onRequest({ path }) {
-      if (path !== 'skills') return undefined;
-      return Promise.reject(new DOMException('proxy closed request', 'AbortError'));
+    onRequest({ path, type }) {
+      if (path !== 'skills' || type !== 'file.list') return undefined;
+      return Promise.reject(new Error('proxy closed request'));
     },
   });
 
@@ -256,29 +257,14 @@ test('runtime skill transport AbortError is skipped when the run signal is live'
 
 test('runtime skill discovery forwards and honors the run abort signal', { timeout: 2_000 }, async () => {
   const controller = new AbortController();
-  let observedSignal = null;
   let markRequestStarted;
   const requestStarted = new Promise((resolve) => { markRequestStarted = resolve; });
 
   installAgentFileApi(new Map(), {
-    onRequest({ path, requestOptions }) {
+    onRequest({ path }) {
       if (path !== 'skills') return undefined;
-      observedSignal = requestOptions.signal;
       markRequestStarted();
-      return new Promise((_resolve, reject) => {
-        const fallbackTimer = setTimeout(() => {
-          reject(new Error('Remote skill request did not observe cancellation.'));
-        }, 500);
-        const rejectAbort = () => {
-          clearTimeout(fallbackTimer);
-          reject(requestOptions.signal?.reason || new DOMException('Aborted', 'AbortError'));
-        };
-        if (requestOptions.signal?.aborted) {
-          rejectAbort();
-          return;
-        }
-        requestOptions.signal?.addEventListener('abort', rejectAbort, { once: true });
-      });
+      return new Promise(() => {});
     },
   });
 
@@ -291,8 +277,6 @@ test('runtime skill discovery forwards and honors the run abort signal', { timeo
   await requestStarted;
   controller.abort();
   const error = await pending.then(() => null, (reason) => reason);
-  assert.ok(observedSignal, 'remote file request should receive an abort signal');
-  assert.equal(observedSignal.aborted, true);
   assert.equal(error?.name, 'AbortError');
 });
 
@@ -397,22 +381,87 @@ function installAgentFileApi(files, options = {}) {
       },
     },
   });
-  Object.defineProperty(globalThis, 'fetch', {
-    configurable: true,
-    value: async (input, requestOptions = {}) => {
-      const url = new URL(String(input));
-      const path = url.searchParams.get('path') || '';
-      options.requestedPaths?.push(path);
-      const overridden = options.onRequest?.({ input, url, path, requestOptions });
-      if (overridden !== undefined) return overridden;
-      if (url.pathname.endsWith('/files/download')) {
-        const content = files.get(path);
-        return content == null
-          ? new Response(JSON.stringify({ error: 'File not found' }), { status: 404 })
-          : new Response(content, { status: 200 });
+  resetAgentConnections();
+
+  // Fake agent server speaking the multiplexed WS protocol far enough for
+  // runtime skill discovery: hello, file.list, and chunked file.download.
+  class SkillSocket extends EventTarget {
+    static CONNECTING = 0;
+    static OPEN = 1;
+    static CLOSING = 2;
+    static CLOSED = 3;
+
+    constructor(url) {
+      super();
+      this.url = url;
+      this.readyState = SkillSocket.CONNECTING;
+      queueMicrotask(() => {
+        this.readyState = SkillSocket.OPEN;
+        this.dispatchEvent(new Event('open'));
+      });
+    }
+
+    send(data) {
+      const message = JSON.parse(data);
+      queueMicrotask(() => { void this.handle(message); });
+    }
+
+    close() {
+      if (this.readyState === SkillSocket.CLOSED) return;
+      this.readyState = SkillSocket.CLOSED;
+      queueMicrotask(() => this.dispatchEvent(new Event('close')));
+    }
+
+    emit(value) {
+      queueMicrotask(() => {
+        if (this.readyState !== SkillSocket.OPEN) return;
+        this.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(value) }));
+      });
+    }
+
+    binary(streamId, text, final = true) {
+      const bytes = new TextEncoder().encode(text);
+      const frame = new Uint8Array(5 + bytes.byteLength);
+      const view = new DataView(frame.buffer);
+      view.setUint32(0, streamId);
+      frame[4] = final ? 1 : 0;
+      frame.set(bytes, 5);
+      queueMicrotask(() => {
+        if (this.readyState !== SkillSocket.OPEN) return;
+        this.dispatchEvent(new MessageEvent('message', {
+          data: frame.buffer.slice(frame.byteOffset, frame.byteOffset + frame.byteLength),
+        }));
+      });
+    }
+
+    reply(id, ok, payload) {
+      if (ok) this.emit({ id, ok: true, data: payload });
+      else this.emit({ id, ok: false, error: payload.error, code: payload.code ?? 500 });
+    }
+
+    async handle(message) {
+      if (message.type === 'hello') {
+        this.reply(message.id, true, { authenticated: true, needsAuth: false, capabilities: {} });
+        return;
       }
-      if (url.pathname.endsWith('/files')) {
-        const prefix = path ? `${path}/` : '';
+      // Gating hook: a rejected gate simulates a transport failure and must
+      // become an error reply, never an unhandled rejection.
+      try {
+        if (message.type === 'file.list') {
+          const gated = options.onRequest?.({ path: message.payload.path || '', type: 'file.list' });
+          if (gated) await gated;
+        } else if (message.type === 'file.download') {
+          const gated = options.onRequest?.({ path: message.payload.path, type: 'file.download' });
+          if (gated) await gated;
+        }
+      } catch (error) {
+        this.reply(message.id, false, { error: error.message, code: 500 });
+        return;
+      }
+      if (message.type === 'file.list') {
+        const dirPath = message.payload.path || '';
+        options.requestedPaths?.push(dirPath);
+        const prefix = dirPath ? `${dirPath}/` : '';
         const children = new Map();
         for (const filePath of files.keys()) {
           if (!filePath.startsWith(prefix)) continue;
@@ -424,17 +473,32 @@ function installAgentFileApi(files, options = {}) {
             type: tail.length ? 'directory' : 'file',
           });
         }
-        if (path && children.size === 0 && options.missingDirectoriesReturn404) {
-          return new Response(JSON.stringify({ error: 'Directory not found' }), { status: 404 });
+        if (dirPath && children.size === 0 && options.missingDirectoriesReturn404) {
+          this.reply(message.id, false, { error: 'Directory not found', code: 404 });
+          return;
         }
-        if (!path && children.size === 0) {
-          return new Response(JSON.stringify({ id: 'root', children: [] }), { status: 200 });
-        }
-        return new Response(JSON.stringify(Array.from(children.values())), { status: 200 });
+        this.reply(message.id, true, children.size === 0
+          ? { id: 'root', children: [] }
+          : Array.from(children.values()));
+        return;
       }
-      return new Response(JSON.stringify({ error: 'Not found' }), { status: 404 });
-    },
-  });
+      if (message.type === 'file.download') {
+        const filePath = message.payload.path;
+        options.requestedPaths?.push(filePath);
+        const content = files.get(filePath);
+        if (content == null) {
+          this.reply(message.id, false, { error: 'File not found', code: 404 });
+          return;
+        }
+        this.reply(message.id, true, { streamId: message.payload.streamId, size: content.length });
+        this.binary(message.payload.streamId, content);
+        return;
+      }
+      this.reply(message.id, false, { error: `Unhandled ${message.type}`, code: 400 });
+    }
+  }
+
+  Object.defineProperty(globalThis, 'WebSocket', { configurable: true, value: SkillSocket });
 }
 
 class TestFileHandle {

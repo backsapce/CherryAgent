@@ -29,7 +29,7 @@ CherryAgent is a browser-based AI agent framework. It's a React SPA that connect
 2. **Agent loop** (`src/agent/`) — autonomous multi-turn tool execution over Vercel AI SDK `streamText`, with context packing, summary compaction, memory, skills, and a UI-safe event protocol
 3. **LLM layer** (`src/models/`) — provider-neutral AI SDK model factory (`ai.js`), profile/connection settings (`llm.js`, `llmSettingsSchema.js`), agent-server client (`agent.js`), E2B integration (`e2b.js`)
 4. **Persistence** (`src/vfs/opfs.js`) — OPFS-backed virtual file system for sessions, files, memory, and skills
-5. **Agent server** (`server/`) — optional Node.js server for local shell execution, managed background jobs, and durable sandbox runs
+5. **Agent server** (`server/`) — optional Node.js server for local shell execution, managed background jobs, and durable sandbox runs; all browser↔server traffic rides one multiplexed WebSocket connection (`/agent/ws`)
 6. **Sync** (`src/sync/`) — S3/OSS-backed multi-device sync with ETag CAS, sharded causal manifests, and Yjs three-way merges
 
 ### Agent loop (`src/agent/`)
@@ -50,14 +50,14 @@ The loop is built on the Vercel AI SDK: `streamText` owns the model → tool →
 
 - **`ai.js`** — AI SDK model factory for all providers (Anthropic gets the direct-browser-access header; OpenRouter gets referer headers). `toModelMessages()` converts persisted history; assistant tool history crosses turns as XML blocks embedded in assistant content (App.jsx `expandMessagesForLlm`), not native tool-role messages.
 - **`llm.js`** — profile/connection settings: provider connections own credentials, LLM records select a model. API keys never leave `getRuntimeConfig()`/`getLanguageModel()` except over the authenticated sandbox-run channel. Context windows resolved from models.dev with a static fallback (`contextWindow.js` + tokenlens).
-- **`agent.js`** — agent-server client: temp-token connect flow (tokens persisted per-URL in config), command execution over WebSocket with HTTP fallback, managed background commands, file CRUD, durable run APIs. Enforces https for non-loopback agent URLs (`assertSecureAgentUrl`).
+- **`agent.js`** — agent-server client API surface over the shared WebSocket connection from `agentConnection.js`: hello/connect auth, streamed `executeCommand`, managed jobs, file CRUD + binary transfer, web proxies, and durable runs (`start`/`continue`/`state`/`subscribe`/`cancel`). Enforces wss for non-loopback agent URLs (`assertSecureAgentUrl`).
 
 ### Agent server (`server/`)
 
-- **`agent.js`** — HTTP + WS server. Binds 127.0.0.1 on bare hosts and 0.0.0.0 when a container runtime is detected (`AGENT_HOST` overrides either). Token auth (token file mode 0600, temp token printed to console, rotates on use or every 10 min). Mutating requests enforce an Origin allowlist (CSRF guard when auth is disabled). Request bodies and WS frames are size-bounded. A small blocklist rejects catastrophic commands (fork bombs, `rm -rf /`, `curl | sh`).
+- **`agent.js`** — WebSocket server (plus static frontend hosting). Binds 127.0.0.1 on bare hosts and 0.0.0.0 when a container runtime is detected (`AGENT_HOST` overrides either). Token auth via first-frame `hello`/`connect` (token file mode 0600, temp token printed to console, rotates on use or after 10 min). The upgrade-time Origin allowlist is the CSRF guard when auth is disabled. WS frames are size-bounded (small caps pre-auth, large caps for run payloads after auth). A small blocklist rejects catastrophic commands (fork bombs, `rm -rf /`, `curl | sh`).
 - **`command-executor.js`** — spawns commands in their own process group with tree-kill on timeout/abort/output-limit, streaming UTF-8 decoding, and a settle watchdog.
 - **`command-jobs.js`** — durable background jobs with incremental byte-cursor logs (UTF-8-boundary-safe reads), capped active jobs, and retention-based cleanup.
-- **`agent-runtime.js`** — durable sandbox runs: the server runs the agent loop itself (model calls included) with an idle watchdog, wake-up continuations that survive restarts, immutable forced cancellation, and retention-based pruning of terminal runs. Run/job state files are mode 0600 because waiting runs carry the caller's model credentials.
+- **`agent-runtime.js`** — durable sandbox runs: the server runs the agent loop itself (model calls included) with an idle watchdog, wake-up continuations that survive restarts, immutable forced cancellation, and retention-based pruning. Protocol 4: completed turns leave the run `idle` and continuable (`run.continue` appends one user message instead of re-uploading history; divergence is detected via the client's user-message count), streaming deltas are coalesced (~100ms batches) before hitting the ndjson log, the log stores bare events (scope prefixes are applied at serve time), and live subscriptions push event batches + status snapshots. Run state files are mode 0600 because waiting/idle runs carry the caller's model credentials.
 - **`file-path-policy.js`** — path safety: lexical + realpath + symlink-never-followed checks for the files root and protected control-plane paths.
 
 ### OPFS VFS (`src/vfs/opfs.js`)
@@ -82,7 +82,7 @@ React context i18n with dot-path keys and `{param}` interpolation (en, zh-CN, ja
 2. `runAgentLoop()` loads memory snapshot + skills catalog, packs context with the persisted `summaryState` (validated by anchor), streams with tool schemas
 3. Tool calls dispatch through the registry (dangerous commands pause for user approval in the browser); results are capped, middle-truncated, and fed back
 4. Loop continues up to the round budget; the final result carries the updated `summaryState`, persisted on the assistant reply for the next turn
-5. Sandbox-runtime sessions instead POST a durable run to the agent server and poll/replay its event log; wake-ups continue the run across disconnects and server restarts
+5. Sandbox-runtime sessions start (or incrementally continue) a durable run on the agent server and subscribe to its live event stream; the ndjson event log and `remoteSequence` cursor remain the reconnect/replay source of truth, and wake-ups continue the run across disconnects and server restarts
 
 ## Important conventions
 
@@ -91,5 +91,6 @@ React context i18n with dot-path keys and `{param}` interpolation (en, zh-CN, ja
 - Vite dev port (5173) matches preview port so OPFS data survives dev/preview switches
 - Streaming state is flushed to React via requestAnimationFrame; MessagePanel caches rendered markdown by content (bypassed for the live streaming message)
 - Tool schemas are filtered by `checkAvailable()` before sending to the LLM
+- All browser↔agent-server traffic (auth, commands, jobs, files, web proxies, runs) multiplexes over one WebSocket per agent URL (`src/models/agentConnection.js` + `server/ws-protocol.js`); there is no `/agent` HTTP API anymore
 - Memory is a frozen snapshot loaded once per run; mid-session writes update disk but not the active prompt
 - Security invariants worth preserving: agent server stays loopback by default; secrets never sync by default; permission approval gates destructive commands; file-path policy rejects symlinks below the files root

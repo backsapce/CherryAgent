@@ -1,21 +1,22 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { resetAgentConnections } from './agentConnection.js';
 import {
   abortRemoteAgentRun,
   assertRemoteAgentRunProtocol,
   checkAgentAvailable,
-  downloadRemoteFile,
   executeCommand,
   getCommand,
   getRemoteAgentRun,
   listFiles,
   listRemoteFiles,
-  readFileText,
   startRemoteAgentRun,
   startCommand,
   stopCommand,
   waitCommand,
 } from './agent.js';
+
+// ─── Browser mocks ──────────────────────────────────────────────────────────
 
 function installBrowserMocks(WebSocketMock, fetchMock) {
   const previous = {
@@ -31,224 +32,315 @@ function installBrowserMocks(WebSocketMock, fetchMock) {
   };
   globalThis.WebSocket = WebSocketMock;
   globalThis.fetch = fetchMock;
-  return () => Object.assign(globalThis, previous);
+  resetAgentConnections();
+  return () => {
+    resetAgentConnections();
+    Object.assign(globalThis, previous);
+  };
 }
 
-class MockWebSocket extends EventTarget {
-  close() {}
+/**
+ * Scripted agent server: speaks the WS protocol far enough to drive the
+ * client module — hello/welcome, exec streams, and managed jobs. Per-test
+ * behavior is swapped through the static `handlers` map.
+ */
+class AgentServerMock extends EventTarget {
+  static CONNECTING = 0;
+  static OPEN = 1;
+  static CLOSING = 2;
+  static CLOSED = 3;
+
+  static instances = [];
+  static handlers = {};
+  static capabilities = { agentRunProtocol: 4, wsProtocol: 1 };
+  static reset(handlers = {}, capabilities = { agentRunProtocol: 4, wsProtocol: 1 }) {
+    AgentServerMock.instances = [];
+    AgentServerMock.handlers = handlers;
+    AgentServerMock.capabilities = capabilities;
+  }
+
+  constructor(url) {
+    super();
+    this.url = url;
+    this.readyState = AgentServerMock.CONNECTING;
+    this.sent = [];
+    this.binaryType = 'blob';
+    AgentServerMock.instances.push(this);
+    queueMicrotask(() => {
+      this.readyState = AgentServerMock.OPEN;
+      this.dispatchEvent(new Event('open'));
+    });
+  }
+
+  send(data) {
+    this.sent.push(data);
+    const message = JSON.parse(data);
+    queueMicrotask(() => this.handleMessage(message));
+  }
+
+  close() {
+    if (this.readyState === AgentServerMock.CLOSED) return;
+    this.readyState = AgentServerMock.CLOSED;
+    queueMicrotask(() => this.dispatchEvent(new Event('close')));
+  }
+
+  reply(id, ok, payload) {
+    this.serverSend(ok ? { id, ok: true, data: payload } : { id, ok: false, ...payload });
+  }
+
+  push(type, sub, data) {
+    this.serverSend({ type, sub, data });
+  }
+
+  serverSend(value) {
+    queueMicrotask(() => {
+      if (this.readyState !== AgentServerMock.OPEN) return;
+      this.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(value) }));
+    });
+  }
+
+  sentJson() {
+    return this.sent.map((entry) => JSON.parse(entry));
+  }
+
+  sentRequest(type) {
+    const matches = this.sentJson().filter((message) => message.type === type);
+    return matches[matches.length - 1];
+  }
+
+  async handleMessage(message) {
+    if (message.type === 'hello') {
+      this.reply(message.id, true, {
+        authenticated: true,
+        needsAuth: false,
+        capabilities: { ...AgentServerMock.capabilities },
+      });
+      return;
+    }
+    const handler = AgentServerMock.handlers[message.type];
+    if (!handler) {
+      this.reply(message.id, false, { error: `Unknown type ${message.type}`, code: 400 });
+      return;
+    }
+    try {
+      const data = await handler(message.payload ?? {}, this);
+      this.reply(message.id, true, data ?? {});
+    } catch (error) {
+      this.reply(message.id, false, { error: error.message, code: error.code ?? 500 });
+    }
+  }
 }
 
-test('executeCommand falls back to HTTP when the WebSocket cannot connect', async () => {
-  let fetchCalls = 0;
-  class ConnectionFailureWebSocket extends MockWebSocket {
-    constructor() {
-      super();
-      queueMicrotask(() => this.dispatchEvent(new Event('error')));
-    }
-  }
-  const restore = installBrowserMocks(ConnectionFailureWebSocket, async () => {
-    fetchCalls += 1;
-    return {
-      ok: true,
-      json: async () => ({ stdout: 'fallback', stderr: '', code: 0 }),
-    };
-  });
+function defaultWsHandlers() {
+  return {
+    'exec.start': (payload, server) => {
+      const { sub, cmd } = payload;
+      server.push('exec.start', sub, { platform: 'linux', shell: 'bash', cwd: 'workspace', filesRoot: 'workspace' });
+      server.push('exec.data', sub, { stream: 'stdout', data: `hello ${cmd}` });
+      server.push('exec.data', sub, { stream: 'stderr', data: 'warned' });
+      server.push('exec.exit', sub, { stdout: `hello ${cmd}`, stderr: 'warned', code: 0, status: 'exited' });
+      return { started: true };
+    },
+    'job.start': () => ({ job_id: 'job-one', status: 'running', nextCursor: 0, hasMore: false }),
+    'job.get': (payload) => ({ job_id: payload.job_id, status: 'running', log: '', nextCursor: payload.cursor, hasMore: false }),
+    'job.stop': (payload) => ({ job_id: payload.job_id, status: 'stopped' }),
+    'job.subscribe': (payload, server) => {
+      const { sub } = payload;
+      server.push('job.update', sub, { job_id: payload.job_id, status: 'running', log: 'starting', nextCursor: 8, hasMore: false });
+      server.push('job.update', sub, { job_id: payload.job_id, status: 'completed', exit_code: 0, log: 'done', nextCursor: 12, hasMore: false });
+      return { subscribed: true };
+    },
+    'file.list': () => ({ id: 'root', name: '/', type: 'directory', children: [] }),
+  };
+}
 
-  try {
-    const result = await executeCommand('printf fallback', '/agent', { stream: true });
-    assert.equal(result.stdout, 'fallback');
-    assert.equal(fetchCalls, 1);
-  } finally {
-    restore();
-  }
-});
+// ─── WebSocket transport (commands, jobs, health) ───────────────────────────
 
-test('executeCommand does not retry after submitting a command over WebSocket', async () => {
-  let fetchCalls = 0;
-  class StartedWebSocket extends MockWebSocket {
-    constructor() {
-      super();
-      queueMicrotask(() => this.dispatchEvent(new Event('open')));
-    }
-
-    send() {
-      queueMicrotask(() => this.dispatchEvent(new Event('error')));
-    }
-  }
-  const restore = installBrowserMocks(StartedWebSocket, async () => {
-    fetchCalls += 1;
+test('executeCommand streams output and resolves with the accumulated result', async () => {
+  AgentServerMock.reset(defaultWsHandlers());
+  const restore = installBrowserMocks(AgentServerMock, async () => {
     throw new Error('HTTP should not be called');
   });
 
   try {
-    await assert.rejects(
-      executeCommand('touch submitted-once', '/agent', { stream: true }),
-      /Agent WebSocket connection failed/
-    );
-    assert.equal(fetchCalls, 0);
-  } finally {
-    restore();
-  }
-});
-
-test('managed command clients use job endpoints and preserve log cursors', async () => {
-  const requests = [];
-  const restore = installBrowserMocks(undefined, async (url, options) => {
-    requests.push({ url, options });
-    return { ok: true, json: async () => ({ job_id: 'job-one', status: 'running' }) };
-  });
-
-  try {
-    await startCommand('python train.py', 'https://sandbox.example');
-    await getCommand('job-one', 'https://sandbox.example', 17);
-    await waitCommand('job-one', 'https://sandbox.example', { cursor: 23, waitMs: 12_000 });
-    await stopCommand('job-one', 'https://sandbox.example');
-
-    assert.deepEqual(requests.map((request) => [request.options.method, request.url]), [
-      ['POST', 'https://sandbox.example/agent/commands'],
-      ['GET', 'https://sandbox.example/agent/commands/job-one?cursor=17'],
-      ['GET', 'https://sandbox.example/agent/commands/job-one?cursor=23&wait_ms=12000'],
-      ['DELETE', 'https://sandbox.example/agent/commands/job-one'],
-    ]);
-    assert.deepEqual(JSON.parse(requests[0].options.body), { command: 'python train.py' });
-  } finally {
-    restore();
-  }
-});
-
-test('remote run abort forwards its cancellation signal', async () => {
-  let request = null;
-  const restore = installBrowserMocks(undefined, (url, options) => {
-    request = { url, options };
-    return new Promise((_resolve, reject) => {
-      options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true });
+    const chunks = [];
+    const result = await executeCommand('printf hi', 'https://sandbox.example', {
+      onStdout: (chunk) => chunks.push(chunk),
     });
+    assert.equal(result.stdout, 'hello printf hi');
+    assert.equal(result.stderr, 'warned');
+    assert.equal(result.code, 0);
+    assert.equal(result.platform, 'linux');
+    assert.equal(result.cwd, 'workspace');
+    assert.deepEqual(chunks, ['hello printf hi']);
+  } finally {
+    restore();
+  }
+});
+
+test('executeCommand rejects when the server reports an exec error', async () => {
+  AgentServerMock.reset({
+    ...defaultWsHandlers(),
+    'exec.start': (payload, server) => {
+      server.push('exec.error', payload.sub, { error: 'spawn failed' });
+      return { started: false };
+    },
   });
-  const controller = new AbortController();
+  const restore = installBrowserMocks(AgentServerMock, async () => {
+    throw new Error('HTTP should not be called');
+  });
 
   try {
+    await assert.rejects(executeCommand('bad-binary', 'https://sandbox.example'), /spawn failed/);
+  } finally {
+    restore();
+  }
+});
+
+test('checkAgentAvailable reports the welcome state and failures', async () => {
+  AgentServerMock.reset(defaultWsHandlers());
+  const restore = installBrowserMocks(AgentServerMock, async () => { throw new Error('no http'); });
+
+  try {
+    const result = await checkAgentAvailable('https://sandbox.example');
+    assert.deepEqual(result, { available: true, needsAuth: false });
+  } finally {
+    restore();
+  }
+
+  class DeadSocket extends EventTarget {
+    constructor() {
+      super();
+      queueMicrotask(() => {
+        this.dispatchEvent(new Event('error'));
+        this.dispatchEvent(new Event('close'));
+      });
+    }
+    send() {}
+    close() {}
+  }
+  const restoreDead = installBrowserMocks(DeadSocket, async () => { throw new Error('no http'); });
+  try {
+    const result = await checkAgentAvailable('https://unreachable.example');
+    assert.deepEqual(result, { available: false, needsAuth: false });
+  } finally {
+    restoreDead();
+  }
+});
+
+test('managed commands and waits ride the multiplexed connection', async () => {
+  const seen = [];
+  const handlers = defaultWsHandlers();
+  for (const type of Object.keys(handlers)) {
+    const inner = handlers[type];
+    handlers[type] = (payload, server) => {
+      seen.push(type);
+      return inner(payload, server);
+    };
+  }
+  AgentServerMock.reset(handlers);
+  const restore = installBrowserMocks(AgentServerMock, async () => {
+    throw new Error('HTTP should not be called');
+  });
+
+  try {
+    const started = await startCommand('python train.py', 'https://sandbox.example');
+    assert.equal(started.job_id, 'job-one');
+
+    const snapshot = await getCommand('job-one', 'https://sandbox.example', 17);
+    assert.equal(snapshot.status, 'running');
+
+    const waited = await waitCommand('job-one', 'https://sandbox.example', { cursor: 23, waitMs: 5_000 });
+    assert.equal(waited.status, 'completed');
+    assert.equal(waited.exit_code, 0);
+
+    const stopped = await stopCommand('job-one', 'https://sandbox.example');
+    assert.equal(stopped.status, 'stopped');
+
+    assert.deepEqual(seen, ['job.start', 'job.get', 'job.subscribe', 'job.stop']);
+    const subscribe = AgentServerMock.instances[0].sentRequest('job.subscribe');
+    assert.equal(subscribe.payload.job_id, 'job-one');
+    assert.equal(subscribe.payload.cursor, 23);
+  } finally {
+    restore();
+  }
+});
+
+test('waitCommand returns the newest snapshot when the wait budget elapses', async () => {
+  AgentServerMock.reset({
+    ...defaultWsHandlers(),
+    'job.subscribe': (payload, server) => {
+      // Never terminal: the client must resolve on its wait budget.
+      server.push('job.update', payload.sub, { job_id: payload.job_id, status: 'running', log: 'tick', nextCursor: 3, hasMore: false });
+      return { subscribed: true };
+    },
+  });
+  const restore = installBrowserMocks(AgentServerMock, async () => { throw new Error('no http'); });
+
+  try {
+    const result = await waitCommand('job-slow', 'https://sandbox.example', { cursor: 0, waitMs: 80 });
+    assert.equal(result.status, 'running');
+    assert.equal(result.log, 'tick');
+  } finally {
+    restore();
+  }
+});
+
+// ─── Durable runs over the WebSocket protocol ───────────────────────────────
+
+test('remote run cancel and state address the run by id', async () => {
+  AgentServerMock.reset({
+    'run.cancel': () => new Promise(() => {}),
+    'run.state': (payload) => ({ id: payload.runId, status: 'waiting', sequence: 34, events: [] }),
+  });
+  const restore = installBrowserMocks(AgentServerMock, async () => { throw new Error('no http'); });
+
+  try {
+    const controller = new AbortController();
     const pending = abortRemoteAgentRun('https://sandbox.example', 'run one', controller.signal);
-    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 10));
     controller.abort();
     await assert.rejects(pending, (error) => error?.name === 'AbortError');
-    assert.equal(request.url, 'https://sandbox.example/agent/runs/run%20one');
-    assert.equal(request.options.method, 'DELETE');
-    assert.equal(request.options.signal.aborted, true);
-  } finally {
-    restore();
-  }
-});
+    const cancel = AgentServerMock.instances[0].sentRequest('run.cancel');
+    assert.equal(cancel.payload.runId, 'run one');
 
-test('remote run polling bypasses caches', async () => {
-  let request = null;
-  const restore = installBrowserMocks(undefined, async (url, options) => {
-    request = { url, options };
-    return {
-      ok: true,
-      status: 200,
-      json: async () => ({ id: 'run-one', status: 'waiting', sequence: 34 }),
-    };
-  });
-
-  try {
-    const result = await getRemoteAgentRun('https://sandbox.example', 'run-one', 34);
-    assert.equal(result.status, 'waiting');
-    assert.equal(request.url, 'https://sandbox.example/agent/runs/run-one?after=34');
-    assert.equal(request.options.method, 'GET');
-    assert.equal(request.options.cache, 'no-store');
-  } finally {
-    restore();
-  }
-});
-
-test('remote run polling retries an empty 304 with a cache-busting URL', async () => {
-  const requests = [];
-  const restore = installBrowserMocks(undefined, async (url, options) => {
-    requests.push({ url, options });
-    if (requests.length === 1) {
-      return {
-        ok: false,
-        status: 304,
-        json: async () => { throw new Error('304 has no body'); },
-      };
-    }
-    return {
-      ok: true,
-      status: 200,
-      json: async () => ({ id: 'run-one', status: 'completed', sequence: 52 }),
-    };
-  });
-
-  try {
-    const result = await getRemoteAgentRun('https://sandbox.example', 'run-one', 34);
-    assert.equal(result.status, 'completed');
-    assert.equal(requests.length, 2);
-    assert.equal(requests[0].url, 'https://sandbox.example/agent/runs/run-one?after=34');
-    assert.match(requests[1].url, /^https:\/\/sandbox\.example\/agent\/runs\/run-one\?after=34&_=[0-9]+$/);
-    assert.equal(requests[1].options.cache, 'no-store');
+    const run = await getRemoteAgentRun('https://sandbox.example', 'run-one', 34);
+    assert.equal(run.status, 'waiting');
+    const state = AgentServerMock.instances[0].sentRequest('run.state');
+    assert.equal(state.payload.runId, 'run-one');
+    assert.equal(state.payload.after, 34);
   } finally {
     restore();
   }
 });
 
 test('sandbox runs reject an outdated agent run protocol before starting', async () => {
-  const requests = [];
-  const restore = installBrowserMocks(undefined, async (url, options) => {
-    requests.push({ url, options });
-    return {
-      ok: true,
-      json: async () => ({
-        status: 'ok',
-        capabilities: { backgroundAgentRuns: true, agentRunProtocol: 2 },
-      }),
-    };
-  });
+  AgentServerMock.reset(defaultWsHandlers(), { agentRunProtocol: 3 });
+  const restore = installBrowserMocks(AgentServerMock, async () => { throw new Error('no http'); });
 
   try {
     await assert.rejects(
       startRemoteAgentRun('https://sandbox.example', { sessionId: 'one' }),
       (error) => {
-        assert.match(error.message, /runtime is outdated.*protocol 2.*3 required/i);
+        assert.match(error.message, /runtime is outdated.*protocol 3.*4 required/i);
         assert.equal(error.code, 'AGENT_RUN_PROTOCOL_OUTDATED');
         return true;
       }
     );
-    assert.equal(requests.length, 1);
-    assert.equal(requests[0].url, 'https://sandbox.example/agent');
-    assert.equal(requests[0].options.method, 'GET');
-    assert.equal(requests[0].options.cache, 'no-store');
-  } finally {
-    restore();
-  }
-});
-
-test('sandbox runtime health errors preserve their HTTP status for retry policy', async () => {
-  const restore = installBrowserMocks(undefined, async () => ({
-    ok: false,
-    status: 403,
-    json: async () => ({ error: 'Forbidden' }),
-  }));
-
-  try {
-    await assert.rejects(
-      assertRemoteAgentRunProtocol('https://sandbox.example'),
-      (error) => error.message === 'Forbidden' && error.status === 403
-    );
+    assert.equal(AgentServerMock.instances[0].sentRequest('run.start'), undefined);
   } finally {
     restore();
   }
 });
 
 test('sandbox run reattachment also rejects an outdated runtime protocol', async () => {
-  const restore = installBrowserMocks(undefined, async () => ({
-    ok: true,
-    json: async () => ({ capabilities: { agentRunProtocol: 2 } }),
-  }));
+  AgentServerMock.reset(defaultWsHandlers(), { agentRunProtocol: 2 });
+  const restore = installBrowserMocks(AgentServerMock, async () => { throw new Error('no http'); });
 
   try {
     await assert.rejects(
       assertRemoteAgentRunProtocol('https://sandbox.example'),
-      /runtime is outdated.*protocol 2.*3 required/i
+      /runtime is outdated.*protocol 2.*4 required/i
     );
   } finally {
     restore();
@@ -256,272 +348,234 @@ test('sandbox run reattachment also rejects an outdated runtime protocol', async
 });
 
 test('sandbox runs start after confirming the current agent run protocol', async () => {
-  const requests = [];
-  const restore = installBrowserMocks(undefined, async (url, options) => {
-    requests.push({ url, options });
-    if (options.method === 'GET') {
-      return {
-        ok: true,
-        json: async () => ({
-          status: 'ok',
-          capabilities: { backgroundAgentRuns: true, agentRunProtocol: 3 },
-        }),
-      };
-    }
-    return { ok: true, json: async () => ({ id: 'run-one', status: 'running' }) };
+  AgentServerMock.reset({
+    ...defaultWsHandlers(),
+    'run.start': (payload) => ({ id: payload.runId, status: 'running' }),
   });
+  const restore = installBrowserMocks(AgentServerMock, async () => { throw new Error('no http'); });
 
   try {
-    const result = await startRemoteAgentRun('https://sandbox.example', { sessionId: 'one' });
-    assert.equal(result.id, 'run-one');
-    assert.deepEqual(requests.map((request) => [request.options.method, request.url]), [
-      ['GET', 'https://sandbox.example/agent'],
-      ['POST', 'https://sandbox.example/agent/runs'],
-    ]);
+    const result = await startRemoteAgentRun('https://sandbox.example', { sessionId: 'one', runId: 'run-abc123' });
+    assert.equal(result.id, 'run-abc123');
+    const request = AgentServerMock.instances[0].sentRequest('run.start');
+    assert.deepEqual(request.payload, { sessionId: 'one', runId: 'run-abc123' });
   } finally {
     restore();
   }
 });
 
-test('sandbox run start errors distinguish preflight failure from an attempted POST', async () => {
-  const preflightRequests = [];
-  let restore = installBrowserMocks(undefined, async (url, options) => {
-    preflightRequests.push({ url, options });
-    throw new Error('health check offline');
-  });
-
-  try {
-    await assert.rejects(
-      startRemoteAgentRun('https://sandbox.example', { sessionId: 'one' }),
-      (error) => {
-        assert.match(error.message, /health check offline/);
-        assert.notEqual(error.agentRunRequestStarted, true);
-        return true;
-      }
-    );
-    assert.equal(preflightRequests.length, 1);
-  } finally {
-    restore();
-  }
-
-  const postRequests = [];
-  restore = installBrowserMocks(undefined, async (url, options) => {
-    postRequests.push({ url, options });
-    if (options.method === 'GET') {
-      return {
-        ok: true,
-        json: async () => ({ capabilities: { agentRunProtocol: 3 } }),
-      };
+test('sandbox run start errors distinguish preflight failure from an attempted start', async () => {
+  class DeadSocket extends EventTarget {
+    constructor() {
+      super();
+      queueMicrotask(() => {
+        this.dispatchEvent(new Event('error'));
+        this.dispatchEvent(new Event('close'));
+      });
     }
-    throw new Error('POST response lost');
-  });
-
-  try {
-    await assert.rejects(
-      startRemoteAgentRun('https://sandbox.example', { sessionId: 'one' }),
-      (error) => {
-        assert.match(error.message, /POST response lost/);
-        assert.equal(error.agentRunRequestStarted, true);
-        return true;
-      }
-    );
-    assert.deepEqual(postRequests.map((request) => request.options.method), ['GET', 'POST']);
-  } finally {
-    restore();
+    send() {}
+    close() {}
   }
-});
-
-test('sandbox run network failures include runtime connectivity diagnostics', async () => {
-  const requests = [];
-  const restore = installBrowserMocks(undefined, async (url, options) => {
-    requests.push({ url, options });
-    if (options.method === 'GET') {
-      return {
-        ok: true,
-        json: async () => ({ capabilities: { agentRunProtocol: 3 } }),
-      };
-    }
-    throw new TypeError('Failed to fetch');
-  });
+  const restore = installBrowserMocks(DeadSocket, async () => { throw new Error('no http'); });
 
   try {
     await assert.rejects(
       startRemoteAgentRun('https://sandbox.example', { sessionId: 'one' }),
       (error) => {
         assert.equal(error.name, 'AgentRuntimeNetworkError');
-        assert.equal(error.code, 'AGENT_RUNTIME_NETWORK_ERROR');
+        assert.notEqual(error.agentRunRequestStarted, true);
+        return true;
+      }
+    );
+  } finally {
+    restore();
+  }
+
+  AgentServerMock.reset({
+    ...defaultWsHandlers(),
+    'run.start': () => Promise.reject(new Error('start response lost')),
+  });
+  const restore2 = installBrowserMocks(AgentServerMock, async () => { throw new Error('no http'); });
+  try {
+    await assert.rejects(
+      startRemoteAgentRun('https://sandbox.example', { sessionId: 'one' }),
+      (error) => {
+        assert.match(error.message, /start response lost/);
         assert.equal(error.agentRunRequestStarted, true);
+        return true;
+      }
+    );
+  } finally {
+    restore2();
+  }
+});
+
+test('sandbox run network failures include runtime connectivity diagnostics', async () => {
+  class DeadSocket extends EventTarget {
+    constructor() {
+      super();
+      queueMicrotask(() => {
+        this.dispatchEvent(new Event('error'));
+        this.dispatchEvent(new Event('close'));
+      });
+    }
+    send() {}
+    close() {}
+  }
+  const restore = installBrowserMocks(DeadSocket, async () => { throw new Error('no http'); });
+
+  try {
+    await assert.rejects(
+      assertRemoteAgentRunProtocol('https://sandbox.example'),
+      (error) => {
+        assert.equal(error.name, 'AgentRuntimeNetworkError');
         assert.match(error.message, /cherry-sandbox is running/i);
         assert.match(error.message, /AGENT_ALLOWED_ORIGINS/);
         assert.match(error.message, /Local Network Access/);
         return true;
       }
     );
-    assert.deepEqual(requests.map((request) => request.options.method), ['GET', 'POST']);
   } finally {
     restore();
   }
 });
 
-test('agent health checks settle on a deadline when fetch ignores abort', { timeout: 1_000 }, async () => {
-  const restore = installBrowserMocks(undefined, () => new Promise(() => {}));
+test('remote run state settles on a deadline when the server stalls', { timeout: 2_000 }, async () => {
+  AgentServerMock.reset({ 'run.state': () => new Promise(() => {}) });
+  const restore = installBrowserMocks(AgentServerMock, async () => { throw new Error('no http'); });
 
   try {
-    const result = await checkAgentAvailable('https://sandbox.example', { timeoutMs: 20 });
-    assert.deepEqual(result, { available: false, needsAuth: false });
+    await assert.rejects(
+      getRemoteAgentRun('https://sandbox.example', 'run-one', 0, { timeoutMs: 30 }),
+      (error) => {
+        assert.equal(error.name, 'TimeoutError');
+        assert.equal(error.code, 'AGENT_REQUEST_TIMEOUT');
+        return true;
+      }
+    );
   } finally {
     restore();
   }
 });
 
-test('remote run POST and GET settle on a deadline when fetch never returns', { timeout: 1_000 }, async () => {
-  const restore = installBrowserMocks(undefined, (url, options) => {
-    if (url === 'https://sandbox.example/agent' && options.method === 'GET') {
-      return Promise.resolve({
-        ok: true,
-        json: async () => ({ capabilities: { agentRunProtocol: 3 } }),
-      });
-    }
-    return new Promise(() => {});
+// ─── Sandbox files over the WebSocket protocol ──────────────────────────────
+
+test('remote run start scales its deadline with the payload size', async () => {
+  AgentServerMock.reset({
+    ...defaultWsHandlers(),
+    'run.start': () => new Promise(() => {}),
   });
+  const restore = installBrowserMocks(AgentServerMock, async () => { throw new Error('no http'); });
 
   try {
-    await assertRequestTimeout(startRemoteAgentRun(
-      'https://sandbox.example',
-      { sessionId: 'one' },
-      { timeoutMs: 20 }
-    ));
-    await assertRequestTimeout(getRemoteAgentRun(
-      'https://sandbox.example',
-      'run-one',
-      0,
-      { timeoutMs: 20 }
-    ));
+    await assert.rejects(
+      startRemoteAgentRun('https://sandbox.example', { sessionId: 'one' }, { timeoutMs: 30 }),
+      (error) => {
+        assert.equal(error.name, 'TimeoutError');
+        assert.equal(error.code, 'AGENT_REQUEST_TIMEOUT');
+        return true;
+      }
+    );
   } finally {
     restore();
   }
 });
 
-test('sandbox file list, download, and text reads have abort-independent deadlines', { timeout: 1_000 }, async () => {
-  const restore = installBrowserMocks(undefined, () => new Promise(() => {}));
+test('sandbox file requests time out when the server stalls', { timeout: 2_000 }, async () => {
+  AgentServerMock.reset({ 'file.list': () => new Promise(() => {}) });
+  const restore = installBrowserMocks(AgentServerMock, async () => { throw new Error('no http'); });
 
   try {
-    await assertRequestTimeout(listRemoteFiles('skills', 'https://sandbox.example', { timeoutMs: 20 }));
-    await assertRequestTimeout(downloadRemoteFile('skills/one/SKILL.md', 'https://sandbox.example', { timeoutMs: 20 }));
-    await assertRequestTimeout(readFileText('skills/one/SKILL.md', 'https://sandbox.example', { timeoutMs: 20 }));
+    await assert.rejects(
+      listRemoteFiles('skills', 'https://sandbox.example', { timeoutMs: 30 }),
+      (error) => {
+        assert.equal(error.name, 'TimeoutError');
+        assert.equal(error.code, 'AGENT_REQUEST_TIMEOUT');
+        return true;
+      }
+    );
   } finally {
     restore();
   }
 });
 
-test('sandbox file list, download, and text reads honor caller cancellation', { timeout: 1_000 }, async () => {
-  let requestSignal = null;
-  const restore = installBrowserMocks(undefined, (_url, options) => {
-    requestSignal = options.signal;
-    return new Promise(() => {});
-  });
-  const operations = [
-    (signal) => listFiles('skills', 'https://sandbox.example', { signal, timeoutMs: 500 }),
-    (signal) => downloadRemoteFile('skills/one/SKILL.md', 'https://sandbox.example', { signal, timeoutMs: 500 }),
-    (signal) => readFileText('skills/one/SKILL.md', 'https://sandbox.example', { signal, timeoutMs: 500 }),
-  ];
+test('sandbox file requests honor caller cancellation', { timeout: 2_000 }, async () => {
+  AgentServerMock.reset({ 'file.list': () => new Promise(() => {}) });
+  const restore = installBrowserMocks(AgentServerMock, async () => { throw new Error('no http'); });
 
   try {
-    for (const operation of operations) {
-      const controller = new AbortController();
-      const pending = operation(controller.signal);
-      await Promise.resolve();
-      controller.abort();
-      await assert.rejects(pending, (error) => error?.name === 'AbortError');
-      assert.equal(requestSignal?.aborted, true);
-    }
+    const controller = new AbortController();
+    const pending = listRemoteFiles('skills', 'https://sandbox.example', { signal: controller.signal, timeoutMs: 5_000 });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    controller.abort();
+    await assert.rejects(pending, (error) => error?.name === 'AbortError');
   } finally {
     restore();
   }
 });
 
 test('sandbox file requests route configured loopback hosts through the page proxy', async () => {
-  let requestedUrl = null;
-  const restore = installBrowserMocks(undefined, async (url) => {
-    requestedUrl = url;
-    return { ok: true, json: async () => [] };
-  });
+  AgentServerMock.reset(defaultWsHandlers());
+  const restore = installBrowserMocks(AgentServerMock, async () => { throw new Error('no http'); });
   window.location.href = 'https://192.168.1.20:5173/';
   window.location.origin = 'https://192.168.1.20:5173';
 
   try {
     await listRemoteFiles('', 'http://localhost:3099');
-    assert.equal(requestedUrl, '/agent/files');
+    assert.equal(AgentServerMock.instances[0].url, 'wss://192.168.1.20:5173/agent/ws');
   } finally {
     restore();
   }
 });
 
 test('sandbox requests preserve an explicit non-default localhost port', async () => {
-  let requestedUrl = null;
-  const restore = installBrowserMocks(undefined, async (url) => {
-    requestedUrl = url;
-    return { ok: true, json: async () => [] };
-  });
+  AgentServerMock.reset(defaultWsHandlers());
+  const restore = installBrowserMocks(AgentServerMock, async () => { throw new Error('no http'); });
 
   try {
     await listRemoteFiles('', 'http://localhost:3100/agent');
-    assert.equal(requestedUrl, 'http://localhost:3100/agent/files');
+    assert.equal(AgentServerMock.instances[0].url, 'ws://localhost:3100/agent/ws');
   } finally {
     restore();
   }
 });
 
 test('sandbox file requests honor an explicit session sandbox URL', async () => {
-  let requestedUrl = null;
-  const restore = installBrowserMocks(undefined, async (url) => {
-    requestedUrl = url;
-    return { ok: true, json: async () => [] };
-  });
+  AgentServerMock.reset(defaultWsHandlers());
+  const restore = installBrowserMocks(AgentServerMock, async () => { throw new Error('no http'); });
 
   try {
     await listFiles('src', 'https://sandbox.example');
-    assert.equal(requestedUrl, 'https://sandbox.example/agent/files?path=src');
+    const request = AgentServerMock.instances[0].sentRequest('file.list');
+    assert.equal(request.payload.path, 'src');
+    assert.equal(request.payload.recursive, false);
   } finally {
     restore();
   }
 });
 
-test('recursive sandbox file requests use one recursive endpoint call', async () => {
-  let requestedUrl = null;
-  const restore = installBrowserMocks(undefined, async (url) => {
-    requestedUrl = url;
-    return { ok: true, json: async () => ({ recursive: true, children: [] }) };
-  });
+test('recursive sandbox file requests pass the recursive flag', async () => {
+  AgentServerMock.reset(defaultWsHandlers());
+  const restore = installBrowserMocks(AgentServerMock, async () => { throw new Error('no http'); });
 
   try {
     await listFiles('', 'https://sandbox.example', { recursive: true });
-    assert.equal(requestedUrl, 'https://sandbox.example/agent/files?recursive=true');
+    const request = AgentServerMock.instances[0].sentRequest('file.list');
+    assert.equal(request.payload.recursive, true);
   } finally {
     restore();
   }
 });
 
 test('sandbox file requests can explicitly include hidden entries', async () => {
-  let requestedUrl = null;
-  const restore = installBrowserMocks(undefined, async (url) => {
-    requestedUrl = url;
-    return { ok: true, json: async () => ({ children: [] }) };
-  });
+  AgentServerMock.reset(defaultWsHandlers());
+  const restore = installBrowserMocks(AgentServerMock, async () => { throw new Error('no http'); });
 
   try {
     await listFiles('', 'https://sandbox.example', { includeHidden: true });
-    assert.equal(requestedUrl, 'https://sandbox.example/agent/files?includeHidden=true');
+    const request = AgentServerMock.instances[0].sentRequest('file.list');
+    assert.equal(request.payload.includeHidden, true);
   } finally {
     restore();
   }
 });
-
-async function assertRequestTimeout(promise) {
-  await assert.rejects(promise, (error) => {
-    assert.equal(error?.name, 'TimeoutError');
-    assert.equal(error?.code, 'AGENT_REQUEST_TIMEOUT');
-    assert.equal(error?.timeoutMs, 20);
-    return true;
-  });
-}

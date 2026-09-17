@@ -25,7 +25,7 @@
     "test": "npm run test:agent && npm run test:runtime && npm run test:sync",
     "test:sync": "node --test src/config/*.test.js src/components/FileManage/*.test.js src/components/ImagePreview/*.test.js src/components/MessagePanel/*.test.js src/components/SessionList/*.test.js src/components/Settings/*.test.js src/models/*.test.js src/sync/*.test.js src/vfs/*.test.js src/remoteRunPresentation.test.js src/remoteRunState.test.js src/sessionRefresh.test.js src/sessionPersistence.test.js src/sessionRuns.test.js",
     "test:agent": "node --test src/agent/*.test.js src/remoteRunState.test.js src/sessionRuns.test.js",
-    "test:runtime": "node --test server/agent-runtime.test.js server/agent-state.test.js server/command-executor.test.js server/command-jobs.test.js server/file-path-policy.test.js",
+    "test:runtime": "node --test server/agent-runtime.test.js server/agent-state.test.js server/command-executor.test.js server/command-jobs.test.js server/file-path-policy.test.js server/ws-frames.test.js server/ws-protocol.test.js server/ws-handlers.test.js server/ws-files.test.js server/ws-integration.test.js",
     "preview": "vite preview",
     "build:docker": "docker buildx build --platform linux/amd64,linux/arm64 -t backsapce/cherry-agent:$(node -p \"require('./package.json').version\") --push ."
   },

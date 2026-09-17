@@ -101,10 +101,9 @@ self.addEventListener('fetch', (event) => {
   // Skip non-GET requests and cross-origin requests (e.g. LLM API calls)
   if (request.method !== 'GET') return;
 
-  // Let LLM API / agent calls pass through without caching
+  // Let LLM API calls pass through without caching
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return;
-  if (url.pathname === '/agent' || url.pathname.startsWith('/agent/')) return;
 
   // Vite dev serves source modules and HMR clients as same-origin files.
   // Keep dev fresh with network-first, but fall back to the previous cache

@@ -205,7 +205,7 @@ Agent Node environment variables:
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `AGENT_PORT` | `3099` | HTTP port for `/agent` |
+| `AGENT_PORT` | `3099` | Port for the WebSocket agent protocol (`/agent/ws`) and the bundled frontend |
 | `AGENT_WORKING_DIR` | Server process cwd | Agent workspace root. Commands run here, and file APIs use this same directory by default. |
 | `AGENT_FILES_DIR` | `AGENT_WORKING_DIR` | Optional separate root for file APIs. Set this only when you intentionally want managed files isolated from the command cwd. |
 | `AGENT_STATE_DIR` | Sibling `.cherry-sandbox-state/<workspace-id>` | Control-plane root kept outside the executable workspace. The installer uses `~/.local/state/cherry-sandbox`; Docker uses `/var/lib/cherry-sandbox`. |
@@ -213,7 +213,7 @@ Agent Node environment variables:
 | `AGENT_RUN_IDLE_TIMEOUT_MS` | `120000` | Fail a sandbox Agent run that emits no model or tool progress for this many milliseconds (clamped to 30 seconds–30 minutes). |
 | `AGENT_JOBS_DIR` | `<state>/jobs` | Optional override for persistent metadata and bounded logs for managed background commands. Keep it outside `AGENT_WORKING_DIR`. |
 | `AGENT_TOKEN_FILE` | `<state>/tokens` | Optional override for the long-lived auth-token file. Keep it outside `AGENT_WORKING_DIR`. |
-| `AGENT_DISABLE_AUTH` | unset | Set to `true` only when the sandbox is already protected by another trusted boundary. When enabled, `/agent` returns `needsAuth: false` and command/file APIs do not require a token. |
+| `AGENT_DISABLE_AUTH` | unset | Set to `true` only when the sandbox is already protected by another trusted boundary. When enabled, the `hello` exchange reports `needsAuth: false` and command/file APIs do not require a token. |
 | `AGENT_ALLOWED_ORIGINS` | `http://localhost:5173` | Comma-separated CORS allowlist |
 | `AGENT_SHELL` | Windows: `%ComSpec%`; other platforms: Node default | Shell used to execute commands. Set to `powershell.exe` or `pwsh.exe` when you want PowerShell syntax. |
 

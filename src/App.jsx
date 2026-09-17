@@ -19,7 +19,7 @@ import {
 import config from './config/config';
 import llm from './models/llm';
 import search from './models/search';
-import { executeCommand, initAgents, enableE2b, E2B_AGENT_ID, getSandboxStatus, stopE2bSandbox, assertRemoteAgentRunProtocol, startRemoteAgentRun, getRemoteAgentRun, listRemoteAgentRuns, abortRemoteAgentRun } from './models/agent';
+import { executeCommand, initAgents, enableE2b, E2B_AGENT_ID, getSandboxStatus, stopE2bSandbox, assertRemoteAgentRunProtocol, startRemoteAgentRun, continueRemoteAgentRun, getRemoteAgentRun, subscribeRemoteAgentRun, listRemoteAgentRuns, abortRemoteAgentRun } from './models/agent';
 import { prepareAgentRuntimeContext, runAgentLoop } from './agent/loop';
 import { applyAgentEvent, createAgentEventState } from './agent/events';
 import { buildChatDebugExport, createChatDebugFilename } from './agent/debug';
@@ -1602,119 +1602,158 @@ function App() {
             ...sessionTimeFields(),
           } : session));
         };
-        let remoteRun;
-        if (opts.resumeRunId) {
-          remoteRun = { id: opts.resumeRunId, status: 'running' };
-        } else {
-          const requestedRunId = `run-${globalThis.crypto?.randomUUID?.() || generateId()}`;
-          // Keep the id locally before POST resolves so Stop/Delete/Reset can
-          // address a run that the server accepted while the response is still
-          // in flight.
-          run.remoteRun = { id: requestedRunId, url: sandboxUrl };
-          const runtimeContext = await prepareAgentRuntimeContext(sessionAgentId, {
-            runtimeMode: 'sandbox',
-            agentUrl: sandboxUrl,
-            signal: run.controller.signal,
-          });
-          assertRunActive();
+        let remoteRun = null;
+        const previousRemoteRun = sessionSnapshot?.remoteRun;
+        const lastMessage = sessionMessages[sessionMessages.length - 1];
+        const canContinue = Boolean(
+          !opts.resumeRunId
+          && previousRemoteRun?.status === 'idle'
+          && previousRemoteRun?.url === sandboxUrl
+          && previousRemoteRun?.replyId
+          && lastMessage?.role === 'user'
+          && sessionMessages[sessionMessages.length - 2]?.id === previousRemoteRun.replyId
+          && sessionMessages.length === (Number(previousRemoteRun.syncedMessageCount) || 0) + 1
+        );
+        if (!opts.resumeRunId && canContinue) {
+          // The server still owns this conversation: append the new user turn
+          // instead of re-uploading the full history. A divergence rejection
+          // (history edited on the browser side) falls back to a full start.
+          run.remoteRun = { id: previousRemoteRun.id, url: sandboxUrl };
+          const [expandedLast] = expandMessagesForSandboxRuntime([lastMessage]);
           try {
-            remoteRun = await startRemoteAgentRun(sandboxUrl, {
-              runId: requestedRunId,
-              sessionId,
+            remoteRun = await continueRemoteAgentRun(sandboxUrl, {
+              runId: previousRemoteRun.id,
               replyId,
-              messages: expandMessagesForSandboxRuntime(sessionMessages),
-              systemPrompt: SANDBOX_AGENT_SYSTEM_PROMPT,
-              agentId: sessionAgentId,
+              message: expandedLast?.content ?? String(lastMessage.content || ''),
+              userMessageCount: expandMessagesForSandboxRuntime(sessionMessages)
+                .filter((message) => message.role === 'user').length,
               modelConfig: remoteModelConfig,
               ...(remoteSearchConfig ? { searchConfig: remoteSearchConfig } : {}),
-              runtimeContext: {
-                ...runtimeContext,
-                // Memory stays browser-only; identity and enabled skills are a
-                // bounded startup snapshot for the isolated runtime.
-                memorySnapshot: { memory: null, user: null },
-              },
             }, run.controller.signal);
             assertRunActive();
-          } catch (startError) {
-            if (run.controller.signal.aborted) throw startError;
-            if (startError?.agentRunRequestStarted !== true) throw startError;
+          } catch (continueError) {
+            assertRunActive();
+            if (run.controller.signal.aborted) throw continueError;
+            const status = Number(continueError?.status);
+            const diverged = /diverged/i.test(String(continueError?.message || ''));
+            if (!diverged && ![404, 409, 410].includes(status)) throw continueError;
+            remoteRun = null;
+          }
+          if (remoteRun) {
+            remoteRunRecoverable = true;
+            updateSessionsForRun((prev) => prev.map((session) => session.id === sessionId ? {
+              ...session,
+              remoteRun: {
+                id: remoteRun.id,
+                url: sandboxUrl,
+                replyId,
+                status: remoteRun.status,
+                sequence: Number(remoteRun.sequence) || 0,
+              },
+              ...sessionTimeFields(),
+            } : session));
+          }
+        }
+        if (!remoteRun) {
+          if (opts.resumeRunId) {
+            remoteRun = { id: opts.resumeRunId, status: 'running' };
+          } else {
+            const requestedRunId = `run-${globalThis.crypto?.randomUUID?.() || generateId()}`;
+            // Keep the id locally before POST resolves so Stop/Delete/Reset can
+            // address a run that the server accepted while the response is still
+            // in flight.
+            run.remoteRun = { id: requestedRunId, url: sandboxUrl };
+            const runtimeContext = await prepareAgentRuntimeContext(sessionAgentId, {
+              runtimeMode: 'sandbox',
+              agentUrl: sandboxUrl,
+              signal: run.controller.signal,
+            });
+            assertRunActive();
             try {
-              // The POST may have committed even if its response was lost.
-              // Confirm the client-generated id before treating start as a
-              // failure, then let the normal polling path replay all events.
-              const recoveredRun = await getRemoteAgentRun(
-                sandboxUrl,
-                requestedRunId,
-                0,
-                run.controller.signal
-              );
-              assertRemoteRunSnapshot(recoveredRun, requestedRunId);
+              remoteRun = await startRemoteAgentRun(sandboxUrl, {
+                runId: requestedRunId,
+                sessionId,
+                replyId,
+                messages: expandMessagesForSandboxRuntime(sessionMessages),
+                systemPrompt: SANDBOX_AGENT_SYSTEM_PROMPT,
+                agentId: sessionAgentId,
+                modelConfig: remoteModelConfig,
+                ...(remoteSearchConfig ? { searchConfig: remoteSearchConfig } : {}),
+                runtimeContext: {
+                  ...runtimeContext,
+                  // Memory stays browser-only; identity and enabled skills are a
+                  // bounded startup snapshot for the isolated runtime.
+                  memorySnapshot: { memory: null, user: null },
+                },
+              }, run.controller.signal);
               assertRunActive();
-              remoteRun = { id: requestedRunId, status: 'running' };
-            } catch (probeError) {
-              if (run.controller.signal.aborted || !isRunCurrent()) {
-                throw new DOMException('Agent run aborted', 'AbortError');
+            } catch (startError) {
+              if (run.controller.signal.aborted) throw startError;
+              if (startError?.agentRunRequestStarted !== true) throw startError;
+              try {
+                // The POST may have committed even if its response was lost.
+                // Confirm the client-generated id before treating start as a
+                // failure, then let the normal replay path replay all events.
+                const recoveredRun = await getRemoteAgentRun(
+                  sandboxUrl,
+                  requestedRunId,
+                  0,
+                  run.controller.signal
+                );
+                assertRemoteRunSnapshot(recoveredRun, requestedRunId);
+                assertRunActive();
+                remoteRun = { id: requestedRunId, status: 'running' };
+              } catch (probeError) {
+                if (run.controller.signal.aborted || !isRunCurrent()) {
+                  throw new DOMException('Agent run aborted', 'AbortError');
+                }
+                if ([404, 410].includes(Number(probeError?.status))) {
+                  // The authoritative id probe confirmed that the POST did not
+                  // create a recoverable run. Do not persist a ghost running id.
+                  throw probeError;
+                }
+                if (!Number.isFinite(startError?.status)) {
+                  // Both responses can be lost after the POST committed. Persist
+                  // the provisional id so the normal resume loop keeps probing
+                  // instead of orphaning an unknown server-owned run.
+                  persistProvisionalRemoteRun(requestedRunId);
+                }
+                throw startError;
               }
-              if ([404, 410].includes(Number(probeError?.status))) {
-                // The authoritative id probe confirmed that the POST did not
-                // create a recoverable run. Do not persist a ghost running id.
-                throw probeError;
-              }
-              if (!Number.isFinite(startError?.status)) {
-                // Both responses can be lost after the POST committed. Persist
-                // the provisional id so the normal resume loop keeps probing
-                // instead of orphaning an unknown server-owned run.
+            }
+            assertRunActive();
+            try {
+              assertRemoteRunSnapshot(remoteRun, requestedRunId);
+            } catch (validationError) {
+              // A successful response with a missing/unknown status may still
+              // represent a committed POST. Retain the client-generated id and
+              // let a later GET establish the authoritative status. A different
+              // returned id is not recoverable under this request contract.
+              if (remoteRun?.id == null || String(remoteRun.id) === requestedRunId) {
                 persistProvisionalRemoteRun(requestedRunId);
               }
-              throw startError;
+              throw validationError;
             }
+            remoteRunRecoverable = true;
+            updateSessionsForRun((prev) => prev.map((session) => session.id === sessionId ? {
+              ...session,
+              remoteRun: {
+                id: remoteRun.id,
+                url: sandboxUrl,
+                replyId,
+                status: remoteRun.status,
+                sequence: Number(remoteRun.sequence) || 0,
+              },
+              ...sessionTimeFields(),
+            } : session));
           }
-          assertRunActive();
-          try {
-            assertRemoteRunSnapshot(remoteRun, requestedRunId);
-          } catch (validationError) {
-            // A successful response with a missing/unknown status may still
-            // represent a committed POST. Retain the client-generated id and
-            // let a later GET establish the authoritative status. A different
-            // returned id is not recoverable under this request contract.
-            if (remoteRun?.id == null || String(remoteRun.id) === requestedRunId) {
-              persistProvisionalRemoteRun(requestedRunId);
-            }
-            throw validationError;
-          }
-          remoteRunRecoverable = true;
-          updateSessionsForRun((prev) => prev.map((session) => session.id === sessionId ? {
-            ...session,
-            remoteRun: {
-              id: remoteRun.id,
-              url: sandboxUrl,
-              replyId,
-              status: remoteRun.status,
-              sequence: Number(remoteRun.sequence) || 0,
-            },
-            ...sessionTimeFields(),
-          } : session));
         }
         run.remoteRun = { id: remoteRun.id, url: sandboxUrl };
         // The assistant reply and its applied event cursor are persisted in one
-        // object. Seed the reducer from that reply and request only later events
-        // instead of replaying a long (up to 20 MB) run log from zero on every
-        // wake-up.
+        // object. Seed the reducer from that reply and replay only later events;
+        // the live subscription pushes everything after it.
         let remoteEventCursor = remoteEventReplay.cursor;
-        while (true) {
-          const polledRun = await getRemoteAgentRun(
-            sandboxUrl,
-            remoteRun.id,
-            remoteEventCursor,
-            run.controller.signal
-          );
-          assertRemoteRunSnapshot(polledRun, remoteRun.id);
-          remoteRun = polledRun;
-          assertRunActive();
-          for (const event of remoteRun.events || []) {
-            applyStreamEvent(event);
-            remoteEventCursor = Math.max(remoteEventCursor, Number(event.remoteSequence) || 0);
-          }
+        const persistRemoteSnapshot = () => {
           updateSessionsForRun((prev) => prev.map((session) => session.id === sessionId ? {
             ...session,
             remoteRun: {
@@ -1724,28 +1763,63 @@ function App() {
               status: remoteRun.status,
               sequence: Number(remoteRun.sequence) || remoteEventCursor,
               ...(remoteRun.wakeup ? { wakeup: remoteRun.wakeup } : {}),
+              ...(remoteRun.status === 'idle'
+                ? { syncedMessageCount: sessionMessages.length + 1 }
+                : {}),
             },
           } : session));
-          if (remoteRun.status !== 'running') break;
-          await new Promise((resolve, reject) => {
-            const onAbort = () => {
-              clearTimeout(timer);
-              reject(new DOMException('Polling aborted', 'AbortError'));
-            };
-            const timer = setTimeout(() => {
-              run.controller.signal.removeEventListener('abort', onAbort);
-              resolve();
-            }, 750);
-            run.controller.signal.addEventListener('abort', onAbort, { once: true });
-          });
+        };
+        // Live event stream replaces the old 750ms poll: replays everything
+        // past the persisted cursor, then pushes coalesced deltas and status
+        // transitions. Waiting runs stay subscribed — the server pushes when
+        // the wake-up fires, so no browser deadline timers are needed.
+        let loopSettled = false;
+        let resolveLoop;
+        let rejectLoop;
+        const loopDone = new Promise((resolve, reject) => { resolveLoop = resolve; rejectLoop = reject; });
+        const finishLoop = (error) => {
+          if (loopSettled) return;
+          loopSettled = true;
+          if (error) rejectLoop(error);
+          else resolveLoop();
+        };
+        const subscription = subscribeRemoteAgentRun(sandboxUrl, {
+          runId: remoteRun.id,
+          after: remoteEventCursor,
+          signal: run.controller.signal,
+          onEvents: (events) => {
+            if (run.controller.signal.aborted || !isRunCurrent()) return;
+            for (const event of events) {
+              applyStreamEvent(event);
+              remoteEventCursor = Math.max(remoteEventCursor, Number(event.remoteSequence) || 0);
+            }
+            persistRemoteSnapshot();
+          },
+          onStatus: (snapshot) => {
+            if (run.controller.signal.aborted || !isRunCurrent()) return;
+            remoteRun = { ...remoteRun, ...snapshot };
+            persistRemoteSnapshot();
+            if (!['running', 'waiting'].includes(remoteRun.status)) finishLoop();
+          },
+          onError: finishLoop,
+        });
+        try {
+          await subscription.ready;
+          assertRunActive();
+          if (!loopSettled) await loopDone;
+        } catch (loopError) {
+          finishLoop(loopError instanceof Error ? loopError : new Error(String(loopError)));
+          throw loopError instanceof Error ? loopError : new Error(String(loopError));
+        } finally {
+          subscription.unsubscribe();
         }
-        if (!['completed', 'waiting'].includes(remoteRun.status)) {
+        if (!['completed', 'waiting', 'idle'].includes(remoteRun.status)) {
           confirmedRemoteFailureStatus = remoteRun.status;
           throw new Error(remoteRun.error || `Sandbox run ${remoteRun.status}`);
         }
         result = remoteRun.result;
-        responseCompleted = remoteRun.status === 'completed';
-        runOutcome = { status: remoteRun.status };
+        responseCompleted = remoteRun.status === 'completed' || remoteRun.status === 'idle';
+        runOutcome = { status: remoteRun.status === 'idle' ? 'completed' : remoteRun.status };
         remoteRunReachedAcceptedTerminal = true;
       } else {
         let scheduledWakeup = null;
@@ -2082,7 +2156,7 @@ function App() {
       remoteResumeRetryTimersRef.current.set(runId, timerId);
     };
     const resumable = sessions.filter((session) => (
-      session.remoteRun?.status === 'running'
+      ['running', 'waiting'].includes(session.remoteRun?.status)
       && !deletedSessionIdsRef.current.has(session.id)
       && !resumedRemoteRunsRef.current.has(session.remoteRun.id)
       && !sessionRunsRef.current.has(session.id)
@@ -2132,240 +2206,6 @@ function App() {
       })();
     }
   }, [agentList, loaded, pendingSessionIds, remoteResumeVersion, runningSessionIds, sessions, streamResponse]);
-
-  // A waiting sandbox run is owned by the agent server, so it does not keep
-  // the browser UI in streaming mode. Reattach around its scheduled time.
-  useEffect(() => {
-    if (!loaded || factoryResetInProgressRef.current) return;
-    const waitingRunIds = new Set();
-
-    const scheduleResume = (session, delay) => {
-      const runId = session.remoteRun.id;
-      const sessionIncarnation = sessionIncarnationsRef.current.get(session.id) || 0;
-      const timerId = setTimeout(() => {
-        waitingRemoteTimersRef.current.delete(runId);
-        const currentSession = sessionsRef.current.find((item) => item.id === session.id);
-        if (
-          !currentSession
-          || deletedSessionIdsRef.current.has(currentSession.id)
-          || (sessionIncarnationsRef.current.get(currentSession.id) || 0) !== sessionIncarnation
-          || currentSession.remoteRun?.id !== runId
-          || currentSession.remoteRun.status !== 'waiting'
-          || factoryResetInProgressRef.current
-        ) return;
-
-        const remainingDelay = currentSession.remoteRun.wakeup?.runAtMs - Date.now();
-        if (Number.isFinite(remainingDelay) && remainingDelay > 50) {
-          scheduleResume(currentSession, remainingDelay);
-          return;
-        }
-
-        if (
-          sessionRunsRef.current.has(currentSession.id)
-          || pendingStreamStartsRef.current.has(currentSession.id)
-          || sessionStopPromisesRef.current.has(currentSession.id)
-          || probingWaitingRunsRef.current.has(runId)
-          || resumingWaitingRunsRef.current.has(runId)
-        ) {
-          scheduleResume(currentSession, 250);
-          return;
-        }
-
-        resumingWaitingRunsRef.current.add(runId);
-        void (async () => {
-          let outcome = null;
-          try {
-            const runMessages = currentSession.messages || await loadSessionMessages(currentSession.id);
-            if (
-              factoryResetInProgressRef.current
-              || deletedSessionIdsRef.current.has(currentSession.id)
-              || (sessionIncarnationsRef.current.get(currentSession.id) || 0) !== sessionIncarnation
-            ) return;
-            setSessions((prev) => prev.map((item) => (
-              item.id === currentSession.id && !Object.prototype.hasOwnProperty.call(item, 'messages')
-                ? { ...item, messages: runMessages }
-                : item
-            )));
-            outcome = await streamResponse(currentSession.id, runMessages, {
-              agentId: currentSession.agentId,
-              llmProfileId: currentSession.llmProfileId,
-              sandboxUrl: currentSession.remoteRun.url,
-              resumeRunId: runId,
-              replyId: currentSession.remoteRun.replyId,
-            });
-          } finally {
-            resumingWaitingRunsRef.current.delete(runId);
-            const latestSession = sessionsRef.current.find((item) => item.id === currentSession.id);
-            if (
-              latestSession?.remoteRun?.id === runId
-              && latestSession.remoteRun.status === 'waiting'
-              && !deletedSessionIdsRef.current.has(latestSession.id)
-              && !waitingRemoteTimersRef.current.has(runId)
-              && !factoryResetInProgressRef.current
-            ) {
-              scheduleResume(
-                latestSession,
-                outcome?.status === 'retryable-error'
-                  ? (outcome.retryDelayMs || REMOTE_RESUME_RETRY_MS)
-                  : Math.max(1000, latestSession.remoteRun.wakeup?.runAtMs - Date.now() || 0)
-              );
-            }
-          }
-        })().catch((error) => console.warn('Waiting sandbox run resume failed:', error));
-      }, Math.min(Math.max(delay, 250), 2_147_483_647));
-      waitingRemoteTimersRef.current.set(runId, timerId);
-    };
-
-    for (const session of sessions) {
-      if (deletedSessionIdsRef.current.has(session.id)) continue;
-      if (!session.remoteRun?.wakeup?.runAtMs || session.remoteRun.status !== 'waiting') continue;
-      const runId = session.remoteRun.id;
-      waitingRunIds.add(runId);
-      if (
-        waitingRemoteTimersRef.current.has(runId)
-        || resumingWaitingRunsRef.current.has(runId)
-      ) continue;
-      scheduleResume(session, Math.max(0, session.remoteRun.wakeup.runAtMs - Date.now()));
-    }
-
-    for (const [runId, timerId] of waitingRemoteTimersRef.current) {
-      if (waitingRunIds.has(runId)) continue;
-      clearTimeout(timerId);
-      waitingRemoteTimersRef.current.delete(runId);
-    }
-  }, [loaded, sessions, streamResponse]);
-
-  // Browser timers can be throttled or discarded while a tab is backgrounded.
-  // Reconcile visible waiting sessions with the server independently of the
-  // deadline timer so a server-owned wake-up cannot finish without the final
-  // events being replayed into the conversation UI.
-  useEffect(() => {
-    if (!loaded || factoryResetInProgressRef.current) return undefined;
-    const controller = new AbortController();
-    let disposed = false;
-
-    const reconcileWaitingRuns = async () => {
-      if (
-        disposed
-        || controller.signal.aborted
-        || factoryResetInProgressRef.current
-        || document.visibilityState === 'hidden'
-      ) return;
-
-      const waitingSessions = sessionsRef.current.filter((session) => (
-        session.remoteRun?.status === 'waiting'
-        && session.remoteRun.id
-        && session.remoteRun.url
-        && !deletedSessionIdsRef.current.has(session.id)
-      ));
-
-      await Promise.all(waitingSessions.map(async (session) => {
-        const runId = session.remoteRun.id;
-        if (
-          probingWaitingRunsRef.current.has(runId)
-          || resumingWaitingRunsRef.current.has(runId)
-          || sessionRunsRef.current.has(session.id)
-          || pendingStreamStartsRef.current.has(session.id)
-          || sessionStopPromisesRef.current.has(session.id)
-        ) return;
-
-        probingWaitingRunsRef.current.add(runId);
-        try {
-          const remoteRun = await getRemoteAgentRun(
-            session.remoteRun.url,
-            runId,
-            Number(session.remoteRun.sequence) || 0,
-            controller.signal
-          );
-          if (disposed || controller.signal.aborted) return;
-
-          if (remoteRun.status === 'waiting') {
-            setSessions((prev) => prev.map((item) => {
-              if (item.id !== session.id || item.remoteRun?.id !== runId) return item;
-              const sequence = Number(remoteRun.sequence) || item.remoteRun.sequence || 0;
-              const currentWakeup = item.remoteRun.wakeup;
-              const nextWakeup = remoteRun.wakeup || currentWakeup;
-              if (
-                item.remoteRun.sequence === sequence
-                && currentWakeup?.id === nextWakeup?.id
-                && currentWakeup?.runAtMs === nextWakeup?.runAtMs
-                && currentWakeup?.prompt === nextWakeup?.prompt
-              ) return item;
-              return {
-                ...item,
-                remoteRun: {
-                  ...item.remoteRun,
-                  status: 'waiting',
-                  sequence,
-                  ...(nextWakeup ? { wakeup: nextWakeup } : {}),
-                },
-              };
-            }));
-            return;
-          }
-
-          const currentSession = sessionsRef.current.find((item) => item.id === session.id);
-          if (
-            !currentSession
-            || currentSession.remoteRun?.id !== runId
-            || currentSession.remoteRun.status !== 'waiting'
-            || deletedSessionIdsRef.current.has(currentSession.id)
-            || sessionRunsRef.current.has(currentSession.id)
-            || pendingStreamStartsRef.current.has(currentSession.id)
-            || sessionStopPromisesRef.current.has(currentSession.id)
-            || resumingWaitingRunsRef.current.has(runId)
-          ) return;
-
-          const waitingTimer = waitingRemoteTimersRef.current.get(runId);
-          if (waitingTimer) clearTimeout(waitingTimer);
-          waitingRemoteTimersRef.current.delete(runId);
-          resumingWaitingRunsRef.current.add(runId);
-          try {
-            const runMessages = currentSession.messages || await loadSessionMessages(currentSession.id);
-            setSessions((prev) => prev.map((item) => (
-              item.id === currentSession.id && !Object.prototype.hasOwnProperty.call(item, 'messages')
-                ? { ...item, messages: runMessages }
-                : item
-            )));
-            await streamResponse(currentSession.id, runMessages, {
-              agentId: currentSession.agentId,
-              llmProfileId: currentSession.llmProfileId,
-              sandboxUrl: currentSession.remoteRun.url,
-              resumeRunId: runId,
-              replyId: currentSession.remoteRun.replyId,
-            });
-          } finally {
-            resumingWaitingRunsRef.current.delete(runId);
-          }
-        } catch (error) {
-          if (error?.name !== 'AbortError' && !disposed) {
-            console.warn('Waiting sandbox run reconciliation failed:', error);
-          }
-        } finally {
-          probingWaitingRunsRef.current.delete(runId);
-        }
-      }));
-    };
-
-    const intervalId = setInterval(() => {
-      void reconcileWaitingRuns();
-    }, REMOTE_WAITING_RECONCILE_MS);
-    const onFocus = () => { void reconcileWaitingRuns(); };
-    const onVisibilityChange = () => {
-      if (document.visibilityState === 'visible') void reconcileWaitingRuns();
-    };
-    window.addEventListener('focus', onFocus);
-    document.addEventListener('visibilitychange', onVisibilityChange);
-    void reconcileWaitingRuns();
-
-    return () => {
-      disposed = true;
-      controller.abort();
-      clearInterval(intervalId);
-      window.removeEventListener('focus', onFocus);
-      document.removeEventListener('visibilitychange', onVisibilityChange);
-    };
-  }, [loaded, streamResponse]);
 
   // A page can close in the narrow interval before the returned run id is
   // flushed to OPFS. Discover server-owned runs by session id as a fallback.

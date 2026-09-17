@@ -230,8 +230,7 @@ print_summary() {
     echo "    sudo systemctl enable --now cherry-agent"
     echo ""
   fi
-  echo "  Agent endpoint: http://<host>:3099/agent"
-  echo "  Health check:   http://<host>:3099/agent/health"
+  echo "  Agent endpoint: ws://<host>:3099/agent/ws (WebSocket)"
   echo ""
   echo "============================================================"
   echo ""

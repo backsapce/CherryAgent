@@ -30,7 +30,16 @@ const MAX_EVENT_BYTES = 20 * 1024 * 1024;
 const DEFAULT_RUN_RETENTION_MS = 7 * 24 * 60 * 60_000;
 const DEFAULT_RUN_PRUNE_INTERVAL_MS = 60 * 60_000;
 const MAX_RETAINED_TERMINAL_RUNS = 50;
-const TERMINAL_RUN_STATUSES = new Set(['completed', 'error', 'aborted', 'interrupted']);
+// Idle (turn-complete, continuable) runs hold the whole conversation in
+// memory and on disk, so they get a tighter LRU cap than terminal replays.
+const MAX_IDLE_RUNS = 8;
+const TERMINAL_RUN_STATUSES = new Set(['completed', 'error', 'aborted', 'interrupted', 'superseded']);
+// Streaming deltas dominate the event log (one event per model token). They
+// are coalesced into batches before they touch the ndjson log or a push so
+// the per-event JSON envelope stops multiplying the byte cost ~30x.
+const COALESCED_DELTA_TYPES = new Set(['text-delta', 'reasoning-delta']);
+const DELTA_COALESCE_MS = 100;
+const DELTA_COALESCE_CHARS = 32 * 1024;
 const MAX_RUNTIME_FILES = 500;
 const MAX_RUNTIME_FILE_BYTES = 256 * 1024;
 const MAX_RUNTIME_FILES_BYTES = 10 * 1024 * 1024;
@@ -152,15 +161,17 @@ export function createAgentRunManager({
   runRetentionMs = DEFAULT_RUN_RETENTION_MS,
   runPruneIntervalMs = DEFAULT_RUN_PRUNE_INTERVAL_MS,
   maxRetainedTerminalRuns = MAX_RETAINED_TERMINAL_RUNS,
+  maxIdleRuns = MAX_IDLE_RUNS,
 }) {
   mkdirSync(runsDir, { recursive: true, mode: 0o700 });
   const runs = new Map();
   const cancelledRunIds = new Map();
   loadPersistedRuns(runsDir, runs, { retentionMs: runRetentionMs });
 
-  // Drop terminal runs that aged out or exceed the retained count. Run files
-  // can contain the caller's model credentials, so disk cleanup matters as
-  // much as the in-memory bound.
+  // Drop terminal runs that aged out or exceed the retained count, and demote
+  // idle runs past their LRU cap (their conversations are the expensive part).
+  // Run files can contain the caller's model credentials, so disk cleanup
+  // matters as much as the in-memory bound.
   const pruneExpiredRuns = () => {
     const cutoff = Date.now() - Math.max(1, runRetentionMs);
     const terminal = [...runs.values()]
@@ -171,7 +182,24 @@ export function createAgentRunManager({
     const expired = terminal.filter((run) => Date.parse(run.updatedAt || '') < cutoff);
     for (const run of [...overflow, ...expired]) {
       runs.delete(run.id);
+      subscribers.delete(run.id);
       removeRunFiles(runsDir, run.id);
+    }
+
+    const idle = [...runs.values()]
+      .filter((run) => run.status === 'idle')
+      .sort((a, b) => String(a.updatedAt || '').localeCompare(String(b.updatedAt || '')));
+    const idleOverflow = idle.slice(0, Math.max(0, idle.length - maxIdleRuns));
+    for (const run of idleOverflow) {
+      run.status = 'superseded';
+      run.resume = null;
+      run.updatedAt = new Date().toISOString();
+      notifyStatus(run);
+      try {
+        persist(run);
+      } catch (error) {
+        console.error(`Failed to persist demoted idle agent run ${run.id}:`, error);
+      }
     }
   };
 
@@ -210,26 +238,113 @@ export function createAgentRunManager({
     }
   };
 
-  const emit = (run, event) => {
-    const remoteSequence = run.sequence + 1;
-    const stored = {
-      ...event,
-      // A durable run can contain several runAgentLoop turns separated by
-      // wake-ups. remoteSequence is the stable replay cursor; leave sequence
-      // as the per-turn event protocol value for existing protocol-3 clients.
-      remoteSequence,
-    };
-    const eventPath = join(runsDir, `${run.id}.events.ndjson`);
-    const line = `${JSON.stringify(stored)}\n`;
+  const emit = (run, turn, event) => {
+    const line = `${JSON.stringify({ v: 2, seq: run.sequence + 1, turn, ev: event })}\n`;
     const lineBytes = Buffer.byteLength(line);
     if (run.eventBytes + lineBytes > maxEventBytes) {
       throw new Error(`Agent run event log exceeded ${maxEventBytes} bytes.`);
     }
     run.sequence += 1;
-    run.events.push(stored);
+    run.events.push({ seq: run.sequence, turn, ev: event });
     run.updatedAt = new Date().toISOString();
-    appendFileSync(eventPath, line, { encoding: 'utf8', mode: 0o600 });
+    appendFileSync(join(runsDir, `${run.id}.events.ndjson`), line, { encoding: 'utf8', mode: 0o600 });
     run.eventBytes += lineBytes;
+    return run.events[run.events.length - 1];
+  };
+
+  /**
+   * Prepare stored events for delivery: v2 entries are stored bare (no
+   * run-scoped id prefixes, no remoteSequence) and get namespaced here, so
+   * the on-disk log carries each byte of scope exactly once per run instead
+   * of on every field of every event. Legacy lines are already decorated.
+   */
+  const serveEvent = (run, entry) => {
+    if (entry.decorated) return entry.ev;
+    return {
+      ...namespaceRuntimeEvent(entry.ev, `${run.id}:turn-${entry.turn}`),
+      remoteSequence: entry.seq,
+    };
+  };
+
+  const serveEventsAfter = (run, after) => {
+    const result = [];
+    for (const entry of run.events) {
+      if (entry.seq > after) result.push(serveEvent(run, entry));
+    }
+    return result;
+  };
+
+  const subscribers = new Map(); // runId → Set<listener>
+  const notifyEvents = (run, entries) => {
+    const listeners = subscribers.get(run.id);
+    if (!listeners?.size || !entries.length) return;
+    const events = entries.map((entry) => serveEvent(run, entry));
+    for (const listener of listeners) {
+      try {
+        listener({ events });
+      } catch {
+        // A broken subscriber must not break the run loop.
+      }
+    }
+  };
+  const notifyStatus = (run) => {
+    const listeners = subscribers.get(run.id);
+    if (!listeners?.size) return;
+    const snapshot = serializeRun(run);
+    for (const listener of listeners) {
+      try {
+        listener({ run: snapshot });
+      } catch {
+        // ignore
+      }
+    }
+  };
+
+  /**
+   * Batch same-segment streaming deltas on a time/size window. Any other
+   * event type flushes first so relative ordering is preserved. The timer
+   * flush routes errors into the run's abort instead of the event loop.
+   */
+  const createDeltaCoalescer = (run, turnNumber) => {
+    let pending = null;
+    let timer = null;
+    const flush = () => {
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      if (!pending) return;
+      const batch = pending;
+      pending = null;
+      const entry = emit(run, turnNumber, batch);
+      notifyEvents(run, [entry]);
+    };
+    return {
+      offer(event) {
+        if (
+          pending
+          && (pending.type !== event.type
+            || pending.segmentId !== event.segmentId
+            || pending.stepId !== event.stepId)
+        ) flush();
+        if (!pending) {
+          pending = { ...event };
+          timer = setTimeout(() => {
+            try {
+              flush();
+            } catch (error) {
+              run.controller?.abort(error);
+            }
+          }, DELTA_COALESCE_MS);
+          timer.unref?.();
+        } else {
+          pending.text = (pending.text || '') + (event.text || '');
+          pending.newSegment = pending.newSegment || event.newSegment;
+        }
+        if ((pending.text || '').length >= DELTA_COALESCE_CHARS) flush();
+      },
+      flush,
+    };
   };
 
   const dispatchTool = createRuntimeToolDispatcher({
@@ -291,18 +406,31 @@ export function createAgentRunManager({
           run.wakeup = pendingWakeup;
           run.updatedAt = new Date().toISOString();
           persist(run);
-          await waitUntilWakeup(pendingWakeup.runAtMs, run.controller.signal);
+          notifyStatus(run);
+          // A superseding continue() resolves this race early and replaces
+          // the wake-up prompt with the caller's message.
+          await Promise.race([
+            waitUntilWakeup(pendingWakeup.runAtMs, run.controller.signal),
+            new Promise((resolve) => {
+              if (run.wakeupOverride) resolve();
+              else run.wakeEarly = resolve;
+            }),
+          ]);
+          run.wakeEarly = null;
           throwIfRunCancelled(run);
 
+          const override = run.wakeupOverride;
+          run.wakeupOverride = null;
           run.status = 'running';
           run.wakeup = null;
           run.resume = null;
           run.updatedAt = new Date().toISOString();
           persist(run);
+          notifyStatus(run);
           runtimeMessages = [
             ...runtimeMessages,
             { role: 'assistant', content: scheduledTurnContinuation(result) },
-            { role: 'user', content: buildWakeupMessage(pendingWakeup) },
+            { role: 'user', content: override ?? buildWakeupMessage(pendingWakeup) },
           ];
           if (runtimeMessages.length > MAX_MESSAGES) throw new Error('Scheduled run exceeded the message limit.');
           pendingWakeup = null;
@@ -311,8 +439,8 @@ export function createAgentRunManager({
         turnNumber += 1;
         const turnToken = {};
         activeTurnToken = turnToken;
-        const eventScope = `${run.id}:turn-${turnNumber}`;
         let scheduledWakeup = null;
+        const coalescer = createDeltaCoalescer(run, turnNumber);
         const activityWatchdog = createActivityWatchdog(idleTimeoutMs, (error) => {
           run.controller?.abort(error);
         });
@@ -362,12 +490,23 @@ export function createAgentRunManager({
                   || run.controller.signal.aborted
                 ) return;
                 activityWatchdog.touch();
-                emit(run, namespaceRuntimeEvent(event, eventScope));
+                try {
+                  if (COALESCED_DELTA_TYPES.has(event.type)) {
+                    coalescer.offer(event);
+                    return;
+                  }
+                  coalescer.flush();
+                  const entry = emit(run, turnNumber, event);
+                  notifyEvents(run, [entry]);
+                } catch (error) {
+                  run.controller?.abort(error);
+                }
               },
             })),
             activityWatchdog.promise,
           ]);
         } finally {
+          coalescer.flush();
           activityWatchdog.dispose();
           if (activeTurnToken === turnToken) activeTurnToken = null;
         }
@@ -388,9 +527,18 @@ export function createAgentRunManager({
           input: persistableInput(input),
         };
       }
-      run.status = 'completed';
+      // The turn finished without scheduling anything: the run goes idle and
+      // stays continuable (the next user message appends instead of paying a
+      // full-history POST), with the resume state persisted for restarts.
       run.result = result;
-      run.resume = null;
+      run.resume = {
+        v: 1,
+        runtimeMessages,
+        turnNumber,
+        result,
+        input: persistableInput(input),
+      };
+      run.status = 'idle';
     } catch (error) {
       if (!run.forceTerminated) {
         run.status = run.cancelRequested ? 'aborted' : 'error';
@@ -401,12 +549,14 @@ export function createAgentRunManager({
       if (!run.forceTerminated) {
         run.updatedAt = new Date().toISOString();
         run.controller = null;
+        run.wakeEarly = null;
         try {
           persist(run);
         } catch (error) {
           console.error(`Failed to persist terminal agent run ${run.id}:`, error);
         }
       }
+      notifyStatus(run);
       run.resolveCompletion();
     }
   };
@@ -463,6 +613,20 @@ export function createAgentRunManager({
       error.statusCode = 409;
       throw error;
     }
+    // A fresh full-history start supersedes the session's continuable idle
+    // run: the browser sends full history precisely because it diverged.
+    for (const candidate of runs.values()) {
+      if (candidate.sessionId !== sessionId || candidate.status !== 'idle') continue;
+      candidate.status = 'superseded';
+      candidate.resume = null;
+      candidate.updatedAt = new Date().toISOString();
+      notifyStatus(candidate);
+      try {
+        persist(candidate);
+      } catch (error) {
+        console.error(`Failed to persist superseded agent run ${candidate.id}:`, error);
+      }
+    }
     let resolveCompletion;
     const completion = new Promise((resolve) => { resolveCompletion = resolve; });
     const run = {
@@ -496,12 +660,142 @@ export function createAgentRunManager({
     return serializeRun(run);
   };
 
+  /**
+   * Append one user turn to an idle run (or supersede a pending wake-up)
+   * instead of re-uploading the full conversation. The browser owns the
+   * conversation, so it passes its user-message count; a mismatch means the
+   * history was edited and the client must fall back to a full start.
+   */
+  const continueRun = (input) => {
+    const runId = String(input?.runId || '');
+    const run = runs.get(runId);
+    if (!run) {
+      const error = new Error('Agent run not found');
+      error.statusCode = 404;
+      throw error;
+    }
+    const message = input?.message;
+    if (typeof message !== 'string' || !message.trim()) {
+      const error = new Error('Missing or invalid "message" field.');
+      error.statusCode = 400;
+      throw error;
+    }
+    if (Buffer.byteLength(message) > MAX_MESSAGE_CONTENT_BYTES) {
+      const error = new Error(`message exceeds ${MAX_MESSAGE_CONTENT_BYTES} bytes.`);
+      error.statusCode = 413;
+      throw error;
+    }
+
+    if (run.status === 'waiting') {
+      if (!input?.supersede) {
+        const error = new Error('Run is waiting for a scheduled wake-up; pass supersede to replace it.');
+        error.statusCode = 409;
+        throw error;
+      }
+      if (!run.resume) {
+        const error = new Error('Waiting run has no resume state and cannot be superseded.');
+        error.statusCode = 409;
+        throw error;
+      }
+      applyContinueOverrides(run.resume.input, input);
+      run.replyId = input.replyId ? String(input.replyId) : run.replyId;
+      run.wakeupOverride = message;
+      run.updatedAt = new Date().toISOString();
+      run.wakeEarly?.();
+      return serializeRun(run);
+    }
+
+    if (run.status !== 'idle' || !run.resume) {
+      const error = new Error(`Agent run is ${run.status} and cannot continue.`);
+      error.statusCode = 409;
+      throw error;
+    }
+    const resume = run.resume;
+    const expectedUserMessages = resume.runtimeMessages.filter((candidate) => candidate.role === 'user').length + 1;
+    const declaredUserMessages = Number(input?.userMessageCount);
+    if (Number.isFinite(declaredUserMessages) && declaredUserMessages !== expectedUserMessages) {
+      const error = new Error('Conversation history diverged: start a new run with the full history.');
+      error.statusCode = 409;
+      error.code = 'HISTORY_DIVERGED';
+      throw error;
+    }
+    applyContinueOverrides(resume.input, input);
+
+    const runtimeMessages = [
+      ...resume.runtimeMessages,
+      { role: 'assistant', content: scheduledTurnContinuation(resume.result) },
+      { role: 'user', content: message },
+    ];
+    if (runtimeMessages.length > MAX_MESSAGES) {
+      const error = new Error('Continued run exceeded the message limit.');
+      error.statusCode = 409;
+      throw error;
+    }
+
+    run.replyId = input.replyId ? String(input.replyId) : run.replyId;
+    run.cancelRequested = false;
+    run.forceTerminated = false;
+    run.status = 'running';
+    run.error = null;
+    run.result = null;
+    run.wakeup = null;
+    run.updatedAt = new Date().toISOString();
+    let resolveCompletion;
+    run.completion = new Promise((resolve) => { resolveCompletion = resolve; });
+    run.resolveCompletion = resolveCompletion;
+    run.controller = new AbortController();
+    persist(run);
+    notifyStatus(run);
+    Promise.resolve().then(() => executeRunLoop(run, resume.input, {
+      runtimeMessages,
+      turnNumber: resume.turnNumber,
+      result: resume.result,
+      wakeup: null,
+    }));
+    return serializeRun(run);
+  };
+
   return {
     start,
+    continue: continueRun,
     get(id, after = 0) {
       const run = runs.get(id);
       if (!run) return null;
-      return { ...serializeRun(run), events: run.events.filter((event) => event.remoteSequence > after) };
+      return { ...serializeRun(run), events: serveEventsAfter(run, Number(after) || 0) };
+    },
+    /**
+     * Live event subscription: replays everything past `after`, then pushes
+     * new events and status snapshots. The replay snapshot and the live
+     * stream are deduplicated by remoteSequence.
+     */
+    subscribe(id, after, listener) {
+      const run = runs.get(String(id || ''));
+      if (!run) return null;
+      let listeners = subscribers.get(run.id);
+      if (!listeners) {
+        listeners = new Set();
+        subscribers.set(run.id, listeners);
+      }
+      const snapshot = serveEventsAfter(run, Number(after) || 0);
+      const lastSeq = snapshot.length
+        ? Number(snapshot[snapshot.length - 1].remoteSequence) || 0
+        : (Number(after) || 0);
+      const guarded = (payload) => {
+        if (payload.events) {
+          const fresh = payload.events.filter((event) => (Number(event.remoteSequence) || 0) > lastSeq);
+          if (!fresh.length) return;
+          listener({ events: fresh });
+          return;
+        }
+        listener(payload);
+      };
+      listeners.add(guarded);
+      if (snapshot.length) listener({ events: snapshot });
+      listener({ run: serializeRun(run) });
+      return () => {
+        listeners.delete(guarded);
+        if (!listeners.size) subscribers.delete(run.id);
+      };
     },
     list(sessionId) {
       return [...runs.values()]
@@ -1174,29 +1468,52 @@ async function readSandboxText(readFile, path) {
 }
 
 function validateRunInput(input) {
-  if (!input || typeof input !== 'object') throw new Error('Run body must be an object.');
-  if (!input.sessionId) throw new Error('sessionId is required.');
+  // Validation failures map to the HTTP-shaped 400 the previous REST route
+  // returned; the WebSocket reply layer forwards numeric codes verbatim.
+  const invalid = (message) => {
+    const error = new Error(message);
+    error.statusCode = 400;
+    throw error;
+  };
+  if (!input || typeof input !== 'object') invalid('Run body must be an object.');
+  if (!input.sessionId) invalid('sessionId is required.');
   if (input.runId !== undefined && !/^run-[A-Za-z0-9-]{6,128}$/.test(String(input.runId))) {
-    throw new Error('runId must be a valid client-generated run id.');
+    invalid('runId must be a valid client-generated run id.');
   }
-  if (!Array.isArray(input.messages) || input.messages.length > MAX_MESSAGES) throw new Error('messages must be a bounded array.');
+  if (!Array.isArray(input.messages) || input.messages.length > MAX_MESSAGES) invalid('messages must be a bounded array.');
   let totalMessageBytes = 0;
   for (const [index, message] of input.messages.entries()) {
     if (typeof message?.content !== 'string') {
-      throw new Error(`messages[${index}].content must be a string.`);
+      invalid(`messages[${index}].content must be a string.`);
     }
     const messageBytes = Buffer.byteLength(message.content);
     if (messageBytes > MAX_MESSAGE_CONTENT_BYTES) {
-      throw new Error(`messages[${index}].content exceeds ${MAX_MESSAGE_CONTENT_BYTES} bytes.`);
+      invalid(`messages[${index}].content exceeds ${MAX_MESSAGE_CONTENT_BYTES} bytes.`);
     }
     totalMessageBytes += messageBytes;
   }
   if (totalMessageBytes > MAX_MESSAGES_CONTENT_BYTES) {
-    throw new Error(`Message content exceeds ${MAX_MESSAGES_CONTENT_BYTES} bytes in total.`);
+    invalid(`Message content exceeds ${MAX_MESSAGES_CONTENT_BYTES} bytes in total.`);
   }
   const model = input.modelConfig;
-  if (!model?.provider || !model?.model || !model?.apiKey) throw new Error('A complete modelConfig is required.');
+  if (!model?.provider || !model?.model || !model?.apiKey) invalid('A complete modelConfig is required.');
   validateRuntimeFiles(input.runtimeContext?.sandboxFiles);
+}
+
+/** Apply a continuation's optional model/search overrides onto a run input. */
+function applyContinueOverrides(input, continuation) {
+  if (continuation.modelConfig !== undefined) {
+    const model = continuation.modelConfig;
+    if (!model?.provider || !model?.model || !model?.apiKey) {
+      const error = new Error('A complete modelConfig is required.');
+      error.statusCode = 400;
+      throw error;
+    }
+    input.modelConfig = model;
+  }
+  if (Object.prototype.hasOwnProperty.call(continuation, 'searchConfig')) {
+    input.searchConfig = continuation.searchConfig ?? null;
+  }
 }
 
 function validateRuntimeFiles(files = []) {
@@ -1268,13 +1585,15 @@ async function runtimeFileExists(path, { fileExists, readFile }) {
   }
 }
 
-function normalizeRuntimeContext(value = {}) {
+function normalizeRuntimeContext(value) {
+  // Durable resume state stores a missing runtimeContext as null.
+  const source = value || {};
   return {
-    workspaceDirName: value.workspaceDirName || null,
-    activeAgent: value.activeAgent ? { id: value.activeAgent.id, name: value.activeAgent.name } : null,
-    memorySnapshot: value.memorySnapshot || { memory: null, user: null },
-    skillsList: value.skillsList || '',
-    agentIdentity: value.agentIdentity || null,
+    workspaceDirName: source.workspaceDirName || null,
+    activeAgent: source.activeAgent ? { id: source.activeAgent.id, name: source.activeAgent.name } : null,
+    memorySnapshot: source.memorySnapshot || { memory: null, user: null },
+    skillsList: source.skillsList || '',
+    agentIdentity: source.agentIdentity || null,
   };
 }
 
@@ -1316,20 +1635,28 @@ function loadPersistedRuns(runsDir, runs, { retentionMs = DEFAULT_RUN_RETENTION_
     try {
       const saved = JSON.parse(readFileSync(join(runsDir, name), 'utf8'));
       if (!saved?.id) continue;
-      const isTerminal = ['completed', 'error', 'aborted', 'interrupted'].includes(saved.status);
+      const isTerminal = ['completed', 'error', 'aborted', 'interrupted', 'superseded'].includes(saved.status);
       if (isTerminal && Date.parse(saved.updatedAt || '') < cutoff) {
         removeRunFiles(runsDir, saved.id);
         continue;
       }
       const eventsPath = join(runsDir, `${saved.id}.events.ndjson`);
       const events = existsSync(eventsPath)
-        ? readFileSync(eventsPath, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line))
+        ? readFileSync(eventsPath, 'utf8').split('\n').filter(Boolean).map((line) => {
+          const stored = JSON.parse(line);
+          if (stored?.v === 2 && stored.ev) {
+            return { seq: Number(stored.seq) || 0, turn: Number(stored.turn) || 0, ev: stored.ev };
+          }
+          // Legacy protocol-3 lines are already namespaced and sequenced.
+          return { seq: Number(stored?.remoteSequence) || 0, decorated: true, ev: stored };
+        })
         : [];
       const resumable = canResumeWaitingRun(saved);
       const interruptedByRestart = ['running', 'waiting'].includes(saved.status) && !resumable;
+      const keepResume = resumable || (saved.status === 'idle' && saved.resume);
       runs.set(saved.id, {
         ...saved,
-        resume: resumable ? saved.resume : null,
+        resume: keepResume ? saved.resume : null,
         status: interruptedByRestart ? 'interrupted' : saved.status,
         error: interruptedByRestart ? 'Agent server restarted before the run completed.' : saved.error,
         // Retention counts from the restart for runs that only became terminal
