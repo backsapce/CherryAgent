@@ -197,7 +197,7 @@ test('unchanged local children do not clear remote deleted parent tombstones', (
   assert.equal(manifestFiles['workspace/agent-a/skills/demo'].deleted, true);
 });
 
-test('sync projection redacts LLM keys and agent tokens by default', () => {
+test('sync projection keeps portable credentials and strips device-local settings', () => {
   const local = {
     theme: 'dark',
     agentTokens: { 'https://sandbox.test': 'agent-secret' },
@@ -229,39 +229,21 @@ test('sync projection redacts LLM keys and agent tokens by default', () => {
 
   const projected = stripLocalOnlyConfig(local);
   assert.equal(projected.theme, 'dark');
-  assert.equal(projected.agentTokens, undefined);
+  // Portable credentials sync so re-authenticating a sandbox or rotating an
+  // API key propagates to every device.
+  assert.deepEqual(projected.agentTokens, { 'https://sandbox.test': 'agent-secret' });
+  assert.deepEqual(projected.e2b, { apiKey: 'e2b-secret', timeout: 30 });
+  assert.equal(projected.llm.apiKey, 'legacy-secret');
+  assert.equal(projected.llm.profiles.p1.apiKey, 'llm-secret');
+  assert.equal(projected.search.providers.tavily.apiKey, 'search-secret');
+  // Device-local state never leaves this device.
   assert.deepEqual(projected.agents, [{ url: 'https://sandbox.test', name: 'Shared sandbox' }]);
   assert.equal(projected.selectedAgent, undefined);
   assert.equal(projected.dismissedAgents, undefined);
   assert.equal(projected.sync, undefined);
-  assert.deepEqual(projected.e2b, { timeout: 30 });
-  assert.equal(projected.llm.apiKey, undefined);
-  assert.equal(projected.llm.profiles.p1.apiKey, undefined);
-  assert.equal(projected.llm.profiles.p1.model, 'gpt');
-  assert.equal(local.llm.profiles.p1.apiKey, 'llm-secret');
-  // Search provider keys follow the same device-local policy.
-  assert.equal(projected.search.providers.tavily.apiKey, undefined);
-  assert.equal(projected.search.provider, 'tavily');
-  assert.equal(projected.search.providers.searxng.baseUrl, 'https://searx.example.com');
-  assert.equal(local.search.providers.tavily.apiKey, 'search-secret');
 });
 
-test('sync projection includes portable credentials when the user opts in', () => {
-  const local = {
-    agentTokens: { 'https://sandbox.test': 'agent-secret' },
-    llm: {
-      profiles: {
-        p1: { id: 'p1', provider: 'openai', apiKey: 'llm-secret', model: 'gpt' },
-      },
-    },
-  };
-
-  const projected = stripLocalOnlyConfig(local, { includeSecrets: true });
-  assert.deepEqual(projected.agentTokens, { 'https://sandbox.test': 'agent-secret' });
-  assert.equal(projected.llm.profiles.p1.apiKey, 'llm-secret');
-});
-
-test('a sync round trip strips uploaded keys but never wipes local ones', () => {
+test('a sync round trip carries uploaded keys to other devices', () => {
   const local = {
     agentTokens: { local: 'local-token' },
     llm: {
@@ -275,20 +257,20 @@ test('a sync round trip strips uploaded keys but never wipes local ones', () => 
     },
   };
 
-  // What this device would upload: no keys, no tokens.
+  // What this device uploads carries the keys and tokens.
   const uploaded = stripLocalOnlyConfig(local);
-  assert.equal(uploaded.llm.profiles.p1.apiKey, undefined);
-  assert.equal(uploaded.agentTokens, undefined);
-  assert.equal(uploaded.search.providers.tavily.apiKey, undefined);
+  assert.equal(uploaded.llm.profiles.p1.apiKey, 'local-llm-secret');
+  assert.deepEqual(uploaded.agentTokens, { local: 'local-token' });
+  assert.equal(uploaded.search.providers.tavily.apiKey, 'local-search-secret');
 
-  // That payload merged back onto this device keeps the local credentials.
+  // That payload merged back onto this device keeps the credentials intact.
   const merged = preserveLocalOnlyConfig('config.yaml', uploaded, local);
   assert.equal(merged.llm.profiles.p1.apiKey, 'local-llm-secret');
   assert.deepEqual(merged.agentTokens, { local: 'local-token' });
   assert.equal(merged.search.providers.tavily.apiKey, 'local-search-secret');
 });
 
-test('remote config merge keeps local keys while preserving device-only credentials', () => {
+test('remote config merge imports remote credentials while keeping device-only settings local', () => {
   const remote = {
     theme: 'light',
     agents: [{ url: 'https://remote-sandbox.test', name: 'Remote sandbox' }],
@@ -313,52 +295,16 @@ test('remote config merge keeps local keys while preserving device-only credenti
 
   const merged = preserveLocalOnlyConfig('config.yaml', remote, local);
   assert.deepEqual(merged.sync, local.sync);
-  // Secrets are device-local by default: remote tokens never import, local
+  // Portable credentials sync both ways: remote tokens import, local
   // tokens survive the merge.
-  assert.deepEqual(merged.agentTokens, { local: 'token' });
+  assert.deepEqual(merged.agentTokens, { remote: 'remote-agent-token' });
   assert.deepEqual(merged.agents, remote.agents);
   assert.equal(merged.selectedAgent, local.selectedAgent);
-  assert.equal(merged.e2b.apiKey, 'local-e2b-secret');
+  assert.equal(merged.e2b.apiKey, 'remote-e2b-secret');
   assert.equal(merged.e2b.timeout, 60);
-  assert.equal(merged.llm.profiles.p1.apiKey, 'local-llm-secret');
-  // A remote-only profile arrives without its key; the user re-enters it.
-  assert.equal(merged.llm.profiles.p2.apiKey, undefined);
+  assert.equal(merged.llm.profiles.p1.apiKey, 'remote-llm-secret');
+  assert.equal(merged.llm.profiles.p2.apiKey, 'remote-new-secret');
   assert.equal(merged.llm.profiles.p1.model, 'remote-model');
-});
-
-test('a synced provider or endpoint change does not inherit an unrelated local API key', () => {
-  const local = {
-    llm: {
-      provider: 'openai',
-      baseUrl: 'https://api.openai.com/v1',
-      apiKey: 'legacy-local-key',
-      profiles: {
-        p1: {
-          id: 'p1',
-          provider: 'openai',
-          baseUrl: 'https://api.openai.com/v1',
-          apiKey: 'profile-local-key',
-        },
-      },
-    },
-  };
-  const redirected = {
-    llm: {
-      provider: 'custom-openai',
-      baseUrl: 'https://attacker.example/v1',
-      profiles: {
-        p1: {
-          id: 'p1',
-          provider: 'custom-openai',
-          baseUrl: 'https://attacker.example/v1',
-        },
-      },
-    },
-  };
-
-  const merged = preserveLocalOnlyConfig('config.yaml', redirected, local);
-  assert.equal(merged.llm.apiKey, undefined);
-  assert.equal(merged.llm.profiles.p1.apiKey, undefined);
 });
 
 test('backend identity isolates state by destination and normalizes Aliyun defaults', () => {

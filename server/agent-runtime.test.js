@@ -1069,6 +1069,53 @@ test('terminal runs older than the retention window are pruned from memory and d
   }
 });
 
+test('startup prune of loaded overflow runs does not touch uninitialized state', () => {
+  // Regression: the first pruneExpiredRuns() call used to run before the
+  // `subscribers`/`notifyStatus` consts were initialized, so a runs directory
+  // with more terminal runs than the retention cap (they survive loading and
+  // only hit the overflow branch) crashed the server on startup with a
+  // temporal-dead-zone ReferenceError. Expired runs do not trigger it because
+  // loadPersistedRuns drops them before the prune.
+  const runsDir = mkdtempSync(join(tmpdir(), 'cherry-runs-'));
+  try {
+    const terminalRun = (id, index) => ({
+      id,
+      sessionId: 'session-overflow',
+      status: 'completed',
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      updatedAt: new Date(Date.now() - 50_000 + index).toISOString(),
+      sequence: 0,
+      result: { content: 'done' },
+      error: null,
+    });
+    writeFileSync(join(runsDir, 'run-old-1.json'), JSON.stringify(terminalRun('run-old-1', 1)));
+    writeFileSync(join(runsDir, 'run-old-2.json'), JSON.stringify(terminalRun('run-old-2', 2)));
+    writeFileSync(join(runsDir, 'run-new.json'), JSON.stringify(terminalRun('run-new', 3)));
+    const idleRun = (id, index) => ({
+      ...terminalRun(id, index),
+      id,
+      sessionId: 'session-idle',
+      status: 'idle',
+    });
+    writeFileSync(join(runsDir, 'run-idle-old.json'), JSON.stringify(idleRun('run-idle-old', 1)));
+    writeFileSync(join(runsDir, 'run-idle-new.json'), JSON.stringify(idleRun('run-idle-new', 2)));
+
+    const manager = createManager(runsDir, {
+      maxRetainedTerminalRuns: 1,
+      maxIdleRuns: 1,
+      runPruneIntervalMs: 0,
+    });
+    assert.equal(manager.get('run-old-1'), null);
+    assert.equal(manager.get('run-old-2'), null);
+    assert.equal(existsSync(join(runsDir, 'run-old-2.json')), false);
+    assert.equal(manager.get('run-new')?.status, 'completed');
+    assert.equal(manager.get('run-idle-old')?.status, 'superseded');
+    assert.equal(manager.get('run-idle-new')?.status, 'idle');
+  } finally {
+    rmSync(runsDir, { recursive: true, force: true });
+  }
+});
+
 test('sandbox runs execute concurrently with isolated events, cancellation, and completion', async () => {
   const runsDir = mkdtempSync(join(tmpdir(), 'cherry-runs-'));
   const active = new Map();

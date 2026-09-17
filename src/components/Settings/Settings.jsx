@@ -237,7 +237,6 @@ const Settings = ({
     sessionToken: '',
     clearSessionToken: false,
     clearSecretAccessKey: false,
-    includeSecrets: false,
     forcePathStyle: false,
     bucketEndpoint: false,
     autoOnStart: false,
@@ -480,7 +479,6 @@ const Settings = ({
       sessionToken: '',
       clearSessionToken: false,
       clearSecretAccessKey: false,
-      includeSecrets: savedSync.includeSecrets === true,
       forcePathStyle: pathStyleForProviderPreset(
         providerPreset,
         savedSync.forcePathStyle
@@ -908,7 +906,6 @@ const Settings = ({
         : (syncForm.sessionToken || saved.sessionToken || ''),
       forcePathStyle: Boolean(syncForm.forcePathStyle),
       bucketEndpoint: Boolean(syncForm.bucketEndpoint),
-      includeSecrets: Boolean(syncForm.includeSecrets),
       autoOnStart: Boolean(syncForm.autoOnStart),
       autoIntervalMinutes: intervalText && Number.isFinite(interval) && interval >= 0 ? Math.floor(interval) : null,
       maxConcurrentRequests: concurrencyText && Number.isFinite(concurrency) && concurrency >= 1
@@ -2066,16 +2063,6 @@ const Settings = ({
                   <span>{t('syncSettings.clearSessionToken')}</span>
                 </label>
               )}
-
-              <label className="settings-checkbox-row">
-                <input
-                  type="checkbox"
-                  checked={syncForm.includeSecrets}
-                  onChange={(e) => setSyncForm((f) => ({ ...f, includeSecrets: e.target.checked }))}
-                />
-                <span>{t('syncSettings.includeSecrets')}</span>
-              </label>
-              <p className="settings-hint">{t('syncSettings.includeSecretsHint')}</p>
 
               <label className="settings-checkbox-row">
                 <input

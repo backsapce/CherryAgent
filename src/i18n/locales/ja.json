@@ -275,9 +275,7 @@
     "pushSuccess": "プッシュ完了: {summary}",
     "syncSuccess": "同期完了: {summary}",
     "actionFailed": "同期に失敗: {error}",
-    "clearSecretAccessKey": "保存したシークレットアクセスキーを削除",
-    "includeSecrets": "LLM API キーとエージェントトークンを同期",
-    "includeSecretsHint": "既定ではオフ：API キーとエージェントサーバーのトークンはこの端末のみに保存され、他の端末では再入力が必要です。自分が管理するプライベートバケットでのみ有効化してください。バケットを読める人は同期された全キーを取得できます。"
+    "clearSecretAccessKey": "保存したシークレットアクセスキーを削除"
   },
   "languageSettings": {
     "title": "言語",

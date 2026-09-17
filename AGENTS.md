@@ -70,7 +70,7 @@ YAML-based config persisted in OPFS. Dot-path access, subscribe/notify, serializ
 
 ### Sync (`src/sync/`)
 
-S3/OSS-backed sync with ETag CAS, sharded manifests with vector clocks, Web Locks coordination, Yjs three-way merges, conflict backups under `files/Sync Conflicts/`, and a scrub journal. Sync credentials stay device-local; LLM API keys and agent tokens are redacted from synced payloads unless `sync.includeSecrets` is enabled — restored locally after every merge with destination checks so a redirected provider never inherits a local key.
+S3/OSS-backed sync with ETag CAS, sharded manifests with vector clocks, Web Locks coordination, Yjs three-way merges, conflict backups under `files/Sync Conflicts/`, and a scrub journal. Sync credentials stay device-local; LLM API keys, agent tokens, and the E2B key sync with the config so re-authenticating a sandbox or rotating a key propagates to every device.
 
 ### i18n / PWA
 
@@ -93,4 +93,4 @@ React context i18n with dot-path keys and `{param}` interpolation (en, zh-CN, ja
 - Tool schemas are filtered by `checkAvailable()` before sending to the LLM
 - All browser↔agent-server traffic (auth, commands, jobs, files, web proxies, runs) multiplexes over one WebSocket per agent URL (`src/models/agentConnection.js` + `server/ws-protocol.js`); there is no `/agent` HTTP API anymore
 - Memory is a frozen snapshot loaded once per run; mid-session writes update disk but not the active prompt
-- Security invariants worth preserving: agent server stays loopback by default; secrets never sync by default; permission approval gates destructive commands; file-path policy rejects symlinks below the files root
+- Security invariants worth preserving: agent server stays loopback by default; sync credentials never leave the device; permission approval gates destructive commands; file-path policy rejects symlinks below the files root

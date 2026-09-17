@@ -275,9 +275,7 @@
     "pushSuccess": "Push completed: {summary}",
     "syncSuccess": "Sync completed: {summary}",
     "actionFailed": "Sync failed: {error}",
-    "clearSecretAccessKey": "Clear saved secret access key",
-    "includeSecrets": "Sync LLM API keys and agent tokens",
-    "includeSecretsHint": "Off by default: API keys and agent-server tokens stay on this device only, and other devices must re-enter them once. Enable only for a private bucket you control — anyone who can read the bucket gets every synced key."
+    "clearSecretAccessKey": "Clear saved secret access key"
   },
   "languageSettings": {
     "title": "Language",

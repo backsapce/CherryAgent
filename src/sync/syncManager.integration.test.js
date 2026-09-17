@@ -948,7 +948,7 @@ test('an unsynced local delete keeps its logical version while pull sees the old
   }
 });
 
-test('config sync redacts portable credentials by default and stores one structured representation', async () => {
+test('config sync carries portable credentials and stores one structured representation', async () => {
   useMemoryOpfs();
   const backend = new MemoryBackend();
   const restoreBackend = installBackend(backend);
@@ -972,14 +972,15 @@ test('config sync redacts portable credentials by default and stores one structu
     const remoteData = readStructuredUpdate(backend.objects.get(entry.yjsKey));
     assert.equal(remoteData.theme, 'dark');
     assert.equal(remoteData.sync, undefined);
-    // Portable credentials stay device-local unless the user opts in.
-    assert.equal(remoteData.agentTokens, undefined);
+    // Portable credentials sync so other devices pick up re-authenticated
+    // sandbox tokens and rotated API keys.
+    assert.deepEqual(remoteData.agentTokens, { sandbox: 'agent-secret' });
     assert.deepEqual(remoteData.agents, [{ url: 'https://sandbox.test', name: 'Shared sandbox' }]);
-    assert.equal(remoteData.e2b, undefined);
-    assert.equal(remoteData.llm.profiles.p1.apiKey, undefined);
+    assert.deepEqual(remoteData.e2b, { apiKey: 'e2b-secret' });
+    assert.equal(remoteData.llm.profiles.p1.apiKey, 'llm-secret');
     assert.equal(remoteData.llm.profiles.p1.model, 'gpt');
     assert.equal(backend.countPayloadPuts(), 1);
-    // The local file keeps everything the upload redacted.
+    // The local file keeps everything.
     const localText = await readPathText('config.yaml');
     assert.equal(localText.includes('sk-secret'), true);
     assert.equal(localText.includes('llm-secret'), true);

@@ -275,9 +275,7 @@
     "pushSuccess": "推送完成：{summary}",
     "syncSuccess": "同步完成：{summary}",
     "actionFailed": "同步失败：{error}",
-    "clearSecretAccessKey": "清除已保存的 Secret Access Key",
-    "includeSecrets": "同步 LLM API Key 与 agent 令牌",
-    "includeSecretsHint": "默认关闭：API Key 和 agent 服务器令牌只保留在本设备，其他设备需重新输入。仅在你完全控制的私有桶上开启——任何能读取该桶的人都会拿到全部同步的密钥。"
+    "clearSecretAccessKey": "清除已保存的 Secret Access Key"
   },
   "languageSettings": {
     "title": "语言",

@@ -51,9 +51,10 @@ const MAX_MANIFEST_OBJECT_BYTES = 16 * 1024 * 1024;
 const MAX_STRUCTURED_CANDIDATES = 32;
 const MAX_REMOTE_PAYLOAD_BYTES = 512 * 1024 * 1024;
 const MAX_PAYLOAD_DEDUPE_CACHE_BYTES = 64 * 1024 * 1024;
-// Version 4 additionally keeps LLM provider API keys and agent-server tokens
-// out of synced payloads unless the user opts in via sync.includeSecrets.
-// Older entries are treated as unredacted and get scrubbed from the bucket.
+// Version 4 marks the current structured config entry format. Entries
+// recorded before it may carry legacy payloads; those get scrubbed from the
+// bucket on sight. Portable credentials (LLM API keys, agent tokens) are part
+// of the synced config; only sync credentials stay device-local.
 const CONFIG_REDACTION_VERSION = 4;
 const LARGE_FILE_BYTES = 16 * 1024 * 1024;
 const VERY_LARGE_FILE_BYTES = 64 * 1024 * 1024;
@@ -593,38 +594,15 @@ function isConfigPath(path) {
   return path === 'config.yaml' || path === 'config.yml' || path === 'config.json';
 }
 
-/** Whether the user opted into syncing portable credentials. Default: off. */
-function readSyncIncludeSecrets() {
-  try {
-    return config.get('sync.includeSecrets') === true;
-  } catch {
-    return false;
-  }
-}
-
-function stripLocalOnlyConfig(data, { includeSecrets } = {}) {
+function stripLocalOnlyConfig(data) {
   if (!data || typeof data !== 'object' || Array.isArray(data)) return data;
-  const keepSecrets = includeSecrets ?? readSyncIncludeSecrets();
   const next = { ...data };
   delete next.sync;
   delete next.selectedAgent;
   delete next.dismissedAgents;
 
-  // LLM API keys and agent-server bearer tokens grant spend and full command
-  // authority. They stay device-local unless the user opts in; another client
-  // restores a profile without its key and re-enters it. preserveLocalOnlyConfig
-  // re-attaches this device's keys after a merge so a sync round trip never
-  // wipes them locally.
-  if (!keepSecrets) {
-    delete next.agentTokens;
-    if (next.llm !== undefined) next.llm = redactNestedApiKeys(next.llm);
-    // Search provider keys grant spend on the search account; same policy.
-    if (next.search !== undefined) next.search = redactNestedApiKeys(next.search);
-  }
-
-  // Sandbox hosts and their metadata are portable configuration. Hosts are
-  // referenced by synced agentsList[].sandboxUrl defaults; reachability and
-  // authentication remain device-local.
+  // Sandbox hosts are portable configuration, but each entry's reachability
+  // state (status/needsAuth) is ephemeral and stays device-local.
   if (Array.isArray(next.agents)) {
     next.agents = next.agents
       .filter((agent) => agent && typeof agent === 'object' && typeof agent.url === 'string')
@@ -634,91 +612,20 @@ function stripLocalOnlyConfig(data, { includeSecrets } = {}) {
       }));
   }
 
-  if (next.e2b && typeof next.e2b === 'object' && !Array.isArray(next.e2b)) {
-    next.e2b = { ...next.e2b };
-    delete next.e2b.apiKey;
-    if (Object.keys(next.e2b).length === 0) delete next.e2b;
-  }
-
   return next;
 }
 
-/** Remove every `apiKey` value at any depth of the LLM settings subtree. */
-function redactNestedApiKeys(value) {
-  if (Array.isArray(value)) return value.map(redactNestedApiKeys);
-  if (value && typeof value === 'object') {
-    const out = {};
-    for (const [key, entry] of Object.entries(value)) {
-      if (key === 'apiKey') continue;
-      out[key] = redactNestedApiKeys(entry);
-    }
-    return out;
-  }
-  return value;
-}
-
-/** Re-attach this device's credentials after a merge that stripped them. */
-function restoreLocalSecretsDeep(target, local) {
-  if (!target || !local || typeof target !== 'object' || typeof local !== 'object') return target;
-  if (Array.isArray(target) || Array.isArray(local)) return target;
-  // A key is only restored onto a record that still targets the same
-  // destination. If a synced change redirected the provider, baseUrl, or
-  // connection type, inheriting the local key would leak it to the new
-  // endpoint, so it stays off.
-  const sameDestination = (key) => (
-    !Object.prototype.hasOwnProperty.call(local, key)
-    || String(local[key]) === String(target[key])
-  );
-  if (typeof local.apiKey === 'string'
-    && sameDestination('provider')
-    && sameDestination('type')
-    && sameDestination('baseUrl')) {
-    target.apiKey = local.apiKey;
-  }
-  for (const [key, value] of Object.entries(local)) {
-    if (value && typeof value === 'object' && !Array.isArray(value)
-      && target[key] && typeof target[key] === 'object' && !Array.isArray(target[key])) {
-      restoreLocalSecretsDeep(target[key], value);
-    }
-  }
-  return target;
-}
-
+/** Re-attach this device's local-only settings after a merge. */
 function preserveLocalOnlyConfig(path, mergedData, localData = {}) {
   if (!isConfigPath(path) || !mergedData || typeof mergedData !== 'object' || Array.isArray(mergedData)) {
     return mergedData;
   }
 
-  const keepSecrets = readSyncIncludeSecrets();
-  const next = stripLocalOnlyConfig(mergedData, { includeSecrets: keepSecrets });
+  const next = stripLocalOnlyConfig(mergedData);
   if (!localData || typeof localData !== 'object' || Array.isArray(localData)) return next;
 
   for (const key of ['sync', 'selectedAgent', 'dismissedAgents']) {
     if (Object.prototype.hasOwnProperty.call(localData, key)) next[key] = localData[key];
-  }
-
-  if (!keepSecrets) {
-    if (localData.agentTokens && typeof localData.agentTokens === 'object' && !Array.isArray(localData.agentTokens)) {
-      next.agentTokens = { ...localData.agentTokens };
-    }
-    if (localData.llm && typeof localData.llm === 'object' && !Array.isArray(localData.llm)
-      && next.llm && typeof next.llm === 'object' && !Array.isArray(next.llm)) {
-      restoreLocalSecretsDeep(next.llm, localData.llm);
-    }
-    if (localData.search && typeof localData.search === 'object' && !Array.isArray(localData.search)
-      && next.search && typeof next.search === 'object' && !Array.isArray(next.search)) {
-      restoreLocalSecretsDeep(next.search, localData.search);
-    }
-  }
-
-  if (localData.e2b && typeof localData.e2b === 'object' && !Array.isArray(localData.e2b)) {
-    const remoteE2b = next.e2b && typeof next.e2b === 'object' && !Array.isArray(next.e2b)
-      ? next.e2b
-      : {};
-    next.e2b = { ...remoteE2b };
-    if (Object.prototype.hasOwnProperty.call(localData.e2b, 'apiKey')) {
-      next.e2b.apiKey = localData.e2b.apiKey;
-    }
   }
 
   return next;

@@ -207,7 +207,6 @@ export function createAgentRunManager({
     ? setInterval(pruneExpiredRuns, runPruneIntervalMs)
     : null;
   pruneTimer?.unref?.();
-  pruneExpiredRuns();
 
   const pruneCancelledRunIds = () => {
     const now = Date.now();
@@ -299,6 +298,10 @@ export function createAgentRunManager({
       }
     }
   };
+
+  // First prune runs after subscribers/notifyStatus exist: pruneExpiredRuns
+  // touches both, and calling it earlier would hit their temporal dead zone.
+  pruneExpiredRuns();
 
   /**
    * Batch same-segment streaming deltas on a time/size window. Any other
