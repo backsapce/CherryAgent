@@ -10,6 +10,11 @@ RUN npm run build
 
 FROM nginx:alpine
 
+# 10-listen-on-ipv6-by-default.sh runs `apk manifest nginx` on every start,
+# which can stall for minutes on slow storage (nginx never listens meanwhile).
+# We replace default.conf anyway, so the script has nothing to do.
+RUN rm -f /docker-entrypoint.d/10-listen-on-ipv6-by-default.sh
+
 RUN echo '\
 server {\
   listen 80;\

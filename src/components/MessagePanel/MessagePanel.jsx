@@ -27,6 +27,7 @@ import { formatWaitDuration, getWaitCommandStartedAtMs, getWaitCommandWaitSecond
 import { stripLegacyContextFileSummary } from '../../contextFiles';
 import { formatBytes, imageMimeFromPath } from '../../utils/misc.js';
 import { hasRenderableTranscript } from './transcriptVisibility';
+import { rehypeStreamWords } from './streamBlur';
 import { resolveThinkingElapsed, timestampOf } from './thinkingElapsed';
 import { formatWakeupCountdown } from '../SessionList/wakeupCountdown';
 import ImagePreview from '../ImagePreview/ImagePreview';
@@ -85,6 +86,9 @@ const MARKDOWN_REHYPE_PLUGINS = [
   rehypeSanitize,
   [rehypeHighlight, { plainText: ['text', 'txt', 'plain'] }],
 ];
+// Live streaming renders additionally wrap words for the blur-in reveal; the
+// word-splitting plugin must run after sanitize so its spans survive as-is.
+const MARKDOWN_REHYPE_STREAMING_PLUGINS = [...MARKDOWN_REHYPE_PLUGINS, rehypeStreamWords];
 const MARKDOWN_COMPONENTS = {
   pre: CodeBlock,
   img: BlockedMarkdownImage,
@@ -116,11 +120,11 @@ function cacheSet(cache, key, value) {
   }
 }
 
-function renderMarkdownElement(content) {
+function renderMarkdownElement(content, { streamBlur = false } = {}) {
   return (
     <ReactMarkdown
       remarkPlugins={MARKDOWN_REMARK_PLUGINS}
-      rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
+      rehypePlugins={streamBlur ? MARKDOWN_REHYPE_STREAMING_PLUGINS : MARKDOWN_REHYPE_PLUGINS}
       components={MARKDOWN_COMPONENTS}
     >
       {content}
@@ -420,11 +424,20 @@ function formatDuration(seconds) {
   return s > 0 ? `${m}m ${s}s` : `${m}m`;
 }
 
-const ThinkingBlock = ({ thinking, isThinking, startedAt, finishedAt, round }) => {
+const THINKING_PREVIEW_TAIL = 1000;
+
+function toSingleLinePreview(text) {
+  const flat = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!flat) return '';
+  return flat.length > THINKING_PREVIEW_TAIL ? '… ' + flat.slice(-THINKING_PREVIEW_TAIL) : flat;
+}
+
+const ThinkingBlock = ({ thinking, isThinking, startedAt, finishedAt }) => {
   const { t } = useI18n();
   const [expanded, setExpanded] = useState(false);
   const [fallbackStartedAt] = useState(() => Date.now());
   const [nowMs, setNowMs] = useState(() => Date.now());
+  const previewRef = useRef(null);
   const effectiveStartedAt = timestampOf(startedAt) ?? fallbackStartedAt;
 
   useEffect(() => {
@@ -432,6 +445,15 @@ const ThinkingBlock = ({ thinking, isThinking, startedAt, finishedAt, round }) =
     const timer = setInterval(() => setNowMs(Date.now()), 200);
     return () => clearInterval(timer);
   }, [isThinking, startedAt]);
+
+  const previewText = useMemo(() => (isThinking ? toSingleLinePreview(thinking) : ''), [isThinking, thinking]);
+
+  useLayoutEffect(() => {
+    const el = previewRef.current;
+    if (!el) return;
+    el.scrollLeft = el.scrollWidth;
+    el.classList.toggle('overflowing', el.scrollWidth > el.clientWidth + 1);
+  }, [previewText]);
 
   if (!thinking && !isThinking) return null;
 
@@ -442,28 +464,36 @@ const ThinkingBlock = ({ thinking, isThinking, startedAt, finishedAt, round }) =
     nowMs,
   }) ?? 0;
   const labelText = isThinking
-    ? round ? t('message.thinkingRound', { round }) : t('message.thinking')
+    ? t('message.thinking')
     : thinking
-      ? round
-        ? t('message.thoughtRoundFor', { round, seconds: formatDuration(shownElapsed) })
-        : t('message.thoughtFor', { seconds: formatDuration(shownElapsed) })
+      ? t('message.thoughtFor', { seconds: formatDuration(shownElapsed) })
       : null;
 
   return (
     <div className="thinking-block">
-      <button className="thinking-toggle" onClick={() => setExpanded((v) => !v)}>
-        <ChevronRight className={`thinking-chevron ${expanded ? 'expanded' : ''}`} width={14} height={14} />
-        <span className="thinking-label">
-          {labelText}
-          {isThinking && (
-            <>
-              {' '}
-              <span className="thinking-elapsed">{formatDuration(shownElapsed)}</span>
-              <span className="thinking-dots"><span>.</span><span>.</span><span>.</span></span>
-            </>
-          )}
-        </span>
-      </button>
+      <div className="thinking-row">
+        <button className="thinking-toggle" onClick={() => setExpanded((v) => !v)}>
+          <ChevronRight className={`thinking-chevron ${expanded ? 'expanded' : ''}`} width={14} height={14} />
+          <span className="thinking-label">
+            {labelText}
+            {isThinking && (
+              <>
+                {' '}
+                <span className="thinking-elapsed">{formatDuration(shownElapsed)}</span>
+                <span className="thinking-dots"><span>.</span><span>.</span><span>.</span></span>
+              </>
+            )}
+          </span>
+        </button>
+        {previewText && (
+          <div
+            className="thinking-preview"
+            ref={previewRef}
+            aria-hidden="true"
+            onClick={() => setExpanded((v) => !v)}
+          >{previewText}</div>
+        )}
+      </div>
       {expanded && (
         <div className="thinking-content">{thinking}</div>
       )}
@@ -899,19 +929,13 @@ const ImageGenerationStatus = () => {
 };
 
 const AssistantTranscript = ({ transcript, toolCalls, streaming, onStopStreaming, agentId, sandboxUrl }) => {
-  // One running counter instead of a re-slice per segment (O(n) vs O(n²)
-  // while streaming reasoning-heavy transcripts).
-  const reasoningRounds = new Map();
-  let reasoningCounter = 0;
-  for (const segment of transcript) {
-    if (segment.type === 'reasoning') {
-      reasoningCounter += 1;
-      reasoningRounds.set(segment.id, reasoningCounter);
-    }
-  }
   const renderSegment = (segment) => {
+    // Only the still-growing segment animates its fresh words in; finished
+    // segments render the plain plugin set.
+    const rehypePlugins = streaming && segment.status !== 'finished'
+      ? MARKDOWN_REHYPE_STREAMING_PLUGINS
+      : MARKDOWN_REHYPE_PLUGINS;
     if (segment.type === 'reasoning') {
-      const reasoningRound = reasoningRounds.get(segment.id) || 0;
       const parsedReasoning = splitTaggedReasoningContent(segment.content);
       return (
         <div className="transcript-reasoning-segment" key={segment.id}>
@@ -920,13 +944,12 @@ const AssistantTranscript = ({ transcript, toolCalls, streaming, onStopStreaming
             isThinking={streaming && segment.status !== 'finished' && !parsedReasoning.closed}
             startedAt={segment.startedAt}
             finishedAt={segment.finishedAt}
-            round={reasoningRound}
           />
           {parsedReasoning.text && (
             <div className="message-text transcript-text">
               <ReactMarkdown
                 remarkPlugins={MARKDOWN_REMARK_PLUGINS}
-                rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
+                rehypePlugins={rehypePlugins}
                 components={MARKDOWN_COMPONENTS}
               >
                 {parsedReasoning.text}
@@ -950,7 +973,7 @@ const AssistantTranscript = ({ transcript, toolCalls, streaming, onStopStreaming
             <div className="message-text transcript-text">
               <ReactMarkdown
                 remarkPlugins={MARKDOWN_REMARK_PLUGINS}
-                rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
+                rehypePlugins={rehypePlugins}
                 components={MARKDOWN_COMPONENTS}
               >
                 {segment.content}
@@ -965,7 +988,7 @@ const AssistantTranscript = ({ transcript, toolCalls, streaming, onStopStreaming
         <div className="message-text transcript-text" key={segment.id}>
           <ReactMarkdown
             remarkPlugins={MARKDOWN_REMARK_PLUGINS}
-            rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
+            rehypePlugins={rehypePlugins}
             components={MARKDOWN_COMPONENTS}
           >
             {segment.content}
@@ -2155,7 +2178,7 @@ const MessagePanel = forwardRef(({
                   ) : (
                     !hasTranscript && <>
                       {isLiveStreamingMessage
-                        ? renderMarkdownElement(displayContent)
+                        ? renderMarkdownElement(displayContent, { streamBlur: true })
                         : cachedMarkdown(displayContent)}
                       {msg.role === 'assistant' && displayContent.startsWith('Error:') && !streaming && onRetry && (
                         <button className="retry-btn" onClick={() => onRetry()} title={t('message.retry')}>Retry</button>
