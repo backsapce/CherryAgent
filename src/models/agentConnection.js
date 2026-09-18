@@ -22,6 +22,10 @@ const HANDSHAKE_TIMEOUT_MS = 15_000;
 const PING_INTERVAL_MS = 20_000;
 const PING_TIMEOUT_MS = 10_000;
 const PING_FAILURES_BEFORE_RESET = 2;
+// While a large request frame (e.g. a run.start carrying image attachments) is
+// still queued in the browser's send buffer, ping replies cannot overtake it.
+// Pings that time out in that state describe a busy wire, not a dead server.
+const PING_SEND_BUFFER_BUSY_BYTES = 64 * 1024;
 const RECONNECT_BASE_DELAY_MS = 500;
 const RECONNECT_MAX_DELAY_MS = 8_000;
 const SEND_BUFFER_HIGH_BYTES = 4 * 1024 * 1024;
@@ -260,14 +264,17 @@ export class AgentWsConnection {
       this.#handleMessage(event.data, generation, settleReady);
     });
 
-    socket.addEventListener('close', () => {
+    socket.addEventListener('close', (event) => {
       if (this.generation !== generation) return;
       this.socket = null;
       this.#stopPing();
       if (this.#rejectReady) {
         settleReady(this.#rejectReady, connectionLostError('Could not reach the agent server'));
       }
-      this.#failPending(connectionLostError('Agent server connection closed'));
+      // Surface why the server closed (e.g. 1009 "WebSocket frame too large")
+      // instead of a bare "connection closed" that hides the real cause.
+      const detail = Number(event?.code) ? ` (${event.code}${event.reason ? `: ${event.reason}` : ''})` : '';
+      this.#failPending(connectionLostError(`Agent server connection closed${detail}`));
       this.#scheduleReconnect(generation);
     });
 
@@ -321,8 +328,18 @@ export class AgentWsConnection {
       this.pending.delete(message.id);
       clearTimeout(entry.timer);
       entry.onAbortSignal?.removeEventListener('abort', entry.onAbort);
-      if (message.ok) entry.resolve(message.data ?? {});
-      else entry.reject(requestError(message.error || 'Agent request failed', message.code));
+      if (message.ok) {
+        // A successful connect exchange authenticates the live socket; without
+        // this flip every later request would still be gated as needsAuth.
+        if (entry.type === 'connect' && this.state === 'needsAuth') {
+          this.welcome = { ...(this.welcome || {}), authenticated: true, needsAuth: false };
+          this.#setState('connected');
+          this.#startPing();
+        }
+        entry.resolve(message.data ?? {});
+      } else {
+        entry.reject(requestError(message.error || 'Agent request failed', message.code));
+      }
       return;
     }
 
@@ -437,6 +454,9 @@ export class AgentWsConnection {
         .then(() => { this.pingFailures = 0; })
         .catch(() => {
           if (this.state !== 'connected') return;
+          // A large queued frame blocks ping replies (single ordered stream);
+          // while the send buffer is draining the socket is busy, not dead.
+          if ((this.socket?.bufferedAmount || 0) > PING_SEND_BUFFER_BUSY_BYTES) return;
           this.pingFailures += 1;
           if (this.pingFailures >= PING_FAILURES_BEFORE_RESET) {
             // The socket is dead even though no close event arrived (common
@@ -466,6 +486,16 @@ export class AgentWsConnection {
     if (signal?.aborted) {
       throw signal.reason instanceof Error ? signal.reason : new DOMException('Request aborted', 'AbortError');
     }
+    // The server only accepts hello/connect before authentication, and caps
+    // unauthenticated frames at ~1MB: a run payload with image attachments
+    // sent here would get the whole socket killed with 1009 instead of a
+    // usable error. Fail fast with an auth error the UI can act on.
+    if (this.state === 'needsAuth' && type !== 'connect') {
+      throw requestError(
+        'Agent server requires authentication. Pair the server (agent token) in Settings and try again.',
+        401
+      );
+    }
     const id = nextRequestId();
     return new Promise((resolve, reject) => {
       const onAbort = () => {
@@ -480,6 +510,7 @@ export class AgentWsConnection {
       }, timeoutMs);
       signal?.addEventListener('abort', onAbort, { once: true });
       const entry = {
+        type,
         resolve,
         reject,
         timer,
@@ -557,6 +588,12 @@ export class AgentWsConnection {
    */
   async sendStream(streamId, blob, { chunkBytes = 256 * 1024, signal } = {}) {
     await this.ready();
+    if (this.state === 'needsAuth') {
+      throw requestError(
+        'Agent server requires authentication. Pair the server (agent token) in Settings and try again.',
+        401
+      );
+    }
     const socket = this.socket;
     if (!socket || socket.readyState !== this.WebSocketImpl.OPEN) {
       throw connectionLostError('Agent connection is not open');

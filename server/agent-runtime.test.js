@@ -1656,7 +1656,7 @@ test('continue appends one user turn and returns the run to idle', async () => {
     const idle = await waitForRunStatus(manager, started.id, 'idle');
     assert.equal(idle.replyId, 'reply-1');
 
-    const continued = manager.continue({
+    const continued = await manager.continue({
       runId: started.id,
       replyId: 'reply-2',
       message: 'follow up',
@@ -1681,6 +1681,92 @@ test('continue appends one user turn and returns the run to idle', async () => {
   }
 });
 
+const TINY_PNG_DATA_URL = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+
+function lastUserText(part) {
+  return Array.isArray(part.content)
+    ? part.content.find((chunk) => chunk.type === 'text')?.text
+    : part.content;
+}
+
+test('continue with images materializes attachments and keeps the model-visible image parts', async () => {
+  const runsDir = mkdtempSync(join(tmpdir(), 'cherry-continue-img-'));
+  try {
+    const { model, prompts } = simpleModel();
+    const written = [];
+    const manager = createManager(runsDir, {
+      createModel: () => model,
+      fileExists: async () => false,
+      writeFile: async (path, _content) => { written.push(path); },
+    });
+    const started = manager.start({
+      runId: 'run-continue-img',
+      sessionId: 'session-continue-img',
+      messages: [{ role: 'user', content: 'first' }],
+      modelConfig: { provider: 'openai', model: 'test', apiKey: 'test' },
+    });
+    await waitForRunStatus(manager, started.id, 'idle');
+
+    const continued = await manager.continue({
+      runId: started.id,
+      replyId: 'reply-img',
+      messageId: 'user-img',
+      message: 'look at this',
+      images: [{ name: 'dot.png', dataUrl: TINY_PNG_DATA_URL }],
+      userMessageCount: 2,
+    });
+    await waitForRunStatus(manager, started.id, 'idle');
+    assert.equal(continued.replyId, 'reply-img');
+
+    assert.deepEqual(written, ['attachments/run-continue-img/user-img/1-dot.png']);
+    const lastPart = prompts[1].at(-1);
+    assert.equal(lastPart.role, 'user');
+    assert.match(lastUserText(lastPart), /attachments\/run-continue-img\/user-img\/1-dot\.png/);
+    // The AI SDK surfaces image parts as binary file parts in the mock prompt.
+    const serialized = JSON.stringify(lastPart.content);
+    assert.ok(serialized.includes('image/png') && serialized.includes('iVBORw0'), 'image part reaches the model');
+  } finally {
+    rmSync(runsDir, { recursive: true, force: true });
+  }
+});
+
+test('continue validates attachment shape before touching the run', async () => {
+  const runsDir = mkdtempSync(join(tmpdir(), 'cherry-continue-img-bad-'));
+  try {
+    const { model } = simpleModel();
+    const manager = createManager(runsDir, { createModel: () => model });
+    const started = manager.start({
+      runId: 'run-continue-img-bad',
+      sessionId: 'session-continue-img-bad',
+      messages: [{ role: 'user', content: 'first' }],
+      modelConfig: { provider: 'openai', model: 'test', apiKey: 'test' },
+    });
+    await waitForRunStatus(manager, started.id, 'idle');
+
+    await assert.rejects(
+      () => manager.continue({ runId: started.id, message: 'x', images: 'nope' }),
+      (error) => error.statusCode === 400
+    );
+    await assert.rejects(
+      () => manager.continue({ runId: started.id, message: 'x', images: [{ name: 'a' }] }),
+      (error) => error.statusCode === 400
+    );
+    await assert.rejects(
+      () => manager.continue({
+        runId: started.id,
+        message: 'x',
+        images: Array.from({ length: 33 }, () => ({ dataUrl: TINY_PNG_DATA_URL })),
+      }),
+      (error) => error.statusCode === 413
+    );
+    // Rejections leave the run continuable.
+    await manager.continue({ runId: started.id, message: 'fine', userMessageCount: 2 });
+    await waitForRunStatus(manager, started.id, 'idle');
+  } finally {
+    rmSync(runsDir, { recursive: true, force: true });
+  }
+});
+
 test('continue rejects a diverged history and refuses non-idle runs', async () => {
   const runsDir = mkdtempSync(join(tmpdir(), 'cherry-diverge-'));
   try {
@@ -1694,12 +1780,12 @@ test('continue rejects a diverged history and refuses non-idle runs', async () =
     });
     await waitForRunStatus(manager, started.id, 'idle');
 
-    assert.throws(
+    await assert.rejects(
       () => manager.continue({ runId: started.id, message: 'next', userMessageCount: 5 }),
       (error) => error.code === 'HISTORY_DIVERGED' && error.statusCode === 409
     );
 
-    assert.throws(
+    await assert.rejects(
       () => manager.continue({ runId: 'run-missing', message: 'next' }),
       (error) => error.statusCode === 404
     );
@@ -1713,7 +1799,7 @@ test('continue rejects a diverged history and refuses non-idle runs', async () =
     });
     assert.equal(manager.get(started.id).status, 'superseded');
     await waitForRunStatus(manager, fresh.id, 'idle');
-    assert.throws(
+    await assert.rejects(
       () => manager.continue({ runId: started.id, message: 'late' }),
       (error) => error.statusCode === 409
     );
@@ -1899,14 +1985,14 @@ test('a superseding continue replaces a pending wake-up with the caller message'
     assert.equal(waiting.wakeup.prompt, 'check the background job');
 
     // Without supersede the continue is refused.
-    assert.throws(
+    await assert.rejects(
       () => manager.continue({ runId: started.id, message: 'new input' }),
       (error) => error.statusCode === 409
     );
 
-    // The supersede is accepted synchronously; the loop performs the
-    // waiting→running transition on its wake-up race microtask.
-    manager.continue({
+    // The supersede materializes the continuation, then flips the run out of
+    // its wake-up race; the loop performs the waiting→running transition.
+    await manager.continue({
       runId: started.id,
       message: 'user changed their mind',
       supersede: true,
@@ -1922,6 +2008,81 @@ test('a superseding continue replaces a pending wake-up with the caller message'
         : part.content));
     assert.ok(userTexts.includes('user changed their mind'));
     assert.ok(!userTexts.some((text) => String(text || '').includes('check the background job')));
+  } finally {
+    wakeupGate.resolve();
+    rmSync(runsDir, { recursive: true, force: true });
+  }
+});
+
+test('a superseding continue with images attaches them to the replacement turn', async () => {
+  const runsDir = mkdtempSync(join(tmpdir(), 'cherry-supersede-img-'));
+  const wakeupGate = deferred();
+  try {
+    const prompts = [];
+    const usage = {
+      inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
+      outputTokens: { total: 1, text: 1, reasoning: 0 },
+    };
+    let callCount = 0;
+    const model = new MockLanguageModelV3({
+      doStream: async ({ prompt }) => {
+        callCount += 1;
+        prompts.push(prompt);
+        const chunks = callCount === 1
+          ? [
+              { type: 'stream-start', warnings: [] },
+              {
+                type: 'tool-call',
+                toolCallId: 'call-wakeup-img',
+                toolName: 'schedule_wakeup',
+                input: JSON.stringify({ delay: 30, unit: 'minutes', prompt: 'check later' }),
+              },
+              { type: 'finish', finishReason: { unified: 'tool-calls' }, usage },
+            ]
+          : [
+              { type: 'stream-start', warnings: [] },
+              { type: 'text-start', id: 'answer' },
+              { type: 'text-delta', id: 'answer', delta: 'ok' },
+              { type: 'text-end', id: 'answer' },
+              { type: 'finish', finishReason: { unified: 'stop' }, usage },
+            ];
+        return {
+          stream: simulateReadableStream({ chunks, initialDelayInMs: null, chunkDelayInMs: null }),
+        };
+      },
+    });
+    const written = [];
+    const manager = createManager(runsDir, {
+      createModel: () => model,
+      waitUntilWakeup: () => wakeupGate.promise,
+      fileExists: async () => false,
+      writeFile: async (path) => { written.push(path); },
+    });
+    const started = manager.start({
+      runId: 'run-supersede-img',
+      sessionId: 'session-supersede-img',
+      messages: [{ role: 'user', content: 'schedule something' }],
+      modelConfig: { provider: 'openai', model: 'test', apiKey: 'test' },
+    });
+    await waitForRunStatus(manager, started.id, 'waiting');
+
+    await manager.continue({
+      runId: started.id,
+      messageId: 'user-replacement',
+      message: 'actually look at this instead',
+      images: [{ name: 'shot.png', dataUrl: TINY_PNG_DATA_URL }],
+      supersede: true,
+    });
+    await waitForRunStatus(manager, started.id, 'idle');
+    assert.equal(callCount, 2);
+
+    assert.deepEqual(written, ['attachments/run-supersede-img/user-replacement/1-shot.png']);
+    const lastPart = prompts[1].at(-1);
+    assert.equal(lastPart.role, 'user');
+    assert.match(lastUserText(lastPart), /actually look at this instead/);
+    assert.match(lastUserText(lastPart), /attachments\/run-supersede-img\/user-replacement\/1-shot\.png/);
+    const serialized = JSON.stringify(lastPart.content);
+    assert.ok(serialized.includes('image/png') && serialized.includes('iVBORw0'), 'image part reaches the model');
   } finally {
     wakeupGate.resolve();
     rmSync(runsDir, { recursive: true, force: true });

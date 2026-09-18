@@ -280,13 +280,19 @@ export async function startRemoteAgentRun(url, input, signalOrOptions) {
   try {
     return await connFor(url).request('run.start', input, { signal: controls.signal, timeoutMs });
   } catch (error) {
-    // The protocol preflight passed, so the request was issued over an open
-    // connection: the POST may have committed even if its reply was lost.
-    try {
-      error.agentRunRequestStarted = true;
-    } catch {
-      // A frozen platform error is still safe to surface; omitting the marker
-      // only disables provisional recovery for that request.
+    // A definitive 4xx reply proves the server processed and rejected the
+    // request, so no run was created and the recovery probe would only mask
+    // the real error (surfacing as a misleading "Agent run not found").
+    // Ambiguous failures (timeout, connection loss, 5xx) may have committed.
+    const status = Number(error?.status);
+    const definitiveRejection = Number.isFinite(status) && status >= 400 && status < 500;
+    if (!definitiveRejection) {
+      try {
+        error.agentRunRequestStarted = true;
+      } catch {
+        // A frozen platform error is still safe to surface; omitting the marker
+        // only disables provisional recovery for that request.
+      }
     }
     throw error;
   }

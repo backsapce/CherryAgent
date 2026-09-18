@@ -1,9 +1,10 @@
 /**
  * Minimal RFC 6455 frame codec shared by the agent server's WebSocket
- * protocol layer. Server→client frames are unmasked; client→client masking
+ * protocol layer. Server→client frames are unmasked; client→server masking
  * is decoded in the parser. Supports text, binary, ping/pong, and close
- * frames; fragmentation is not used by this protocol (control payloads are
- * small and binary transfers are chunked into independent frames).
+ * frames. Browsers fragment large client messages (RFC 6455 §5.4) and may
+ * interleave control frames between the fragments, so reassembly is
+ * mandatory: pass a shared `assembly` state object across calls.
  */
 
 export const WS_OPCODE = Object.freeze({
@@ -78,15 +79,21 @@ export function closeWs(socket, code = 1000, reason = '') {
 /**
  * Parse complete frames out of an accumulating buffer. Client frames must be
  * masked (RFC requirement); the mask is removed on the returned payloads.
- * Throws on frames larger than maxFrameBytes so the caller can fail the
- * connection instead of buffering without bound.
+ * Fragmented messages (FIN=0 + continuation frames) are reassembled into a
+ * single emitted frame; control frames interleaved between fragments are
+ * emitted immediately, as the RFC allows. Throws on frames (or reassembled
+ * messages) larger than maxFrameBytes so the caller can fail the connection
+ * instead of buffering without bound.
  *
  * @param {Buffer} buffer
- * @param {{maxFrameBytes?: number}} [options]
+ * @param {{maxFrameBytes?: number, assembly?: {pending?: object|null}}} [options]
+ *   `assembly` carries in-progress fragmented messages across calls; the
+ *   caller owns one object per connection (undefined = single-call use).
  * @returns {{frames: Array<{opcode: number, payload: Buffer}>, rest: Buffer}}
  */
 export function parseWsFrames(buffer, options = {}) {
   const maxFrameBytes = options.maxFrameBytes ?? Number.POSITIVE_INFINITY;
+  const assembly = options.assembly || {};
   const frames = [];
   let offset = 0;
 
@@ -94,6 +101,7 @@ export function parseWsFrames(buffer, options = {}) {
     const first = buffer[offset];
     const second = buffer[offset + 1];
     const opcode = first & 0x0f;
+    const fin = (first & 0x80) !== 0;
     const masked = (second & 0x80) !== 0;
     let length = second & 0x7f;
     let headerLength = 2;
@@ -122,7 +130,31 @@ export function parseWsFrames(buffer, options = {}) {
       payload = Buffer.from(payload.map((byte, index) => byte ^ mask[index % 4]));
     }
 
-    frames.push({ opcode, payload });
+    // Control frames are never fragmented themselves, but they may arrive
+    // between the fragments of a data message: pass them through at once.
+    if (opcode >= 0x8) {
+      frames.push({ opcode, payload });
+      offset = frameEnd;
+      continue;
+    }
+
+    if (opcode === WS_OPCODE.CONTINUATION) {
+      if (!assembly.pending) throw new Error('WebSocket continuation frame without a fragmented message in progress');
+      assembly.pending.chunks.push(payload);
+      assembly.pending.total += payload.length;
+      if (assembly.pending.total > maxFrameBytes) throw new Error('WebSocket frame too large');
+      if (fin) {
+        frames.push({ opcode: assembly.pending.opcode, payload: Buffer.concat(assembly.pending.chunks) });
+        assembly.pending = null;
+      }
+    } else {
+      if (assembly.pending) throw new Error('WebSocket new data frame during a fragmented message');
+      if (fin) {
+        frames.push({ opcode, payload });
+      } else {
+        assembly.pending = { opcode, chunks: [payload], total: payload.length };
+      }
+    }
     offset = frameEnd;
   }
 

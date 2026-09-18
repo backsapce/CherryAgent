@@ -1625,6 +1625,11 @@ function App() {
               runId: previousRemoteRun.id,
               replyId,
               message: expandedLast?.content ?? String(lastMessage.content || ''),
+              // Images must ride the continuation too, or the server appends a
+              // text-only user turn and the model never sees the attachment.
+              ...(expandedLast?.images?.length ? { images: expandedLast.images } : {}),
+              // Stable attachment paths across retries and restarts.
+              ...(lastMessage?.id ? { messageId: lastMessage.id } : {}),
               userMessageCount: expandMessagesForSandboxRuntime(sessionMessages)
                 .filter((message) => message.role === 'user').length,
               modelConfig: remoteModelConfig,
@@ -1710,7 +1715,9 @@ function App() {
                 if ([404, 410].includes(Number(probeError?.status))) {
                   // The authoritative id probe confirmed that the POST did not
                   // create a recoverable run. Do not persist a ghost running id.
-                  throw probeError;
+                  // Surface why the start failed, not the probe's generic
+                  // "Agent run not found".
+                  throw startError;
                 }
                 if (!Number.isFinite(startError?.status)) {
                   // Both responses can be lost after the POST committed. Persist

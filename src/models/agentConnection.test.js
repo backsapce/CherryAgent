@@ -55,9 +55,12 @@ class MockWebSocket extends EventTarget {
     this.dispatchEvent(new MessageEvent('message', { data: frame.buffer }));
   }
 
-  emitClose() {
+  emitClose(code, reason) {
     this.readyState = MockWebSocket.CLOSED;
-    this.dispatchEvent(new Event('close'));
+    const event = new Event('close');
+    if (code !== undefined) event.code = code;
+    if (reason !== undefined) event.reason = reason;
+    this.dispatchEvent(event);
   }
 
   sentJson() {
@@ -157,6 +160,81 @@ test('welcome with needsAuth leaves the connection usable but unauthenticated', 
   }
 });
 
+test('requests on a needsAuth connection fail fast with 401 instead of being sent', async () => {
+  installBrowserMocks();
+  try {
+    const { AgentWsConnection } = await import('../models/agentConnection.js');
+    const conn = new AgentWsConnection('http://localhost:3099/agent', {
+      getToken: () => null,
+      WebSocketImpl: MockWebSocket,
+    });
+    const ready = conn.ready();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const socket = MockWebSocket.instances[0];
+    socket.serverOpen();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const hello = socket.sentJson()[0];
+    socket.serverMessage({ id: hello.id, ok: true, data: { authenticated: false, needsAuth: true } });
+    await ready;
+
+    // A run.start carrying image attachments is megabytes of JSON. Sent over
+    // an unauthenticated socket the server would kill the whole connection
+    // with 1009 (pre-auth frame cap), surfacing as a misleading
+    // "Agent server connection closed". It must reject locally instead.
+    const bigPayload = { runId: 'run-1', images: [{ dataUrl: 'x'.repeat(5 * 1024 * 1024) }] };
+    const rejected = conn.request('run.start', bigPayload, { timeoutMs: 2_000 });
+    const error = await rejected.then(() => null, (err) => err);
+    assert.equal(error.code, 401);
+    assert.equal(error.status, 401);
+    assert.match(error.message, /requires authentication/);
+    // Only the hello ever hit the wire.
+    assert.equal(socket.sentJson().length, 1);
+    assert.equal(socket.sentJson()[0].type, 'hello');
+    assert.equal(conn.state, 'needsAuth');
+    conn.close();
+  } finally {
+    restoreBrowserMocks();
+  }
+});
+
+test('a successful connect reply authenticates the live connection', async () => {
+  installBrowserMocks();
+  try {
+    const { AgentWsConnection } = await import('../models/agentConnection.js');
+    const conn = new AgentWsConnection('http://localhost:3099/agent', {
+      getToken: () => null,
+      WebSocketImpl: MockWebSocket,
+    });
+    const ready = conn.ready();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const socket = MockWebSocket.instances[0];
+    socket.serverOpen();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const hello = socket.sentJson()[0];
+    socket.serverMessage({ id: hello.id, ok: true, data: { authenticated: false, needsAuth: true } });
+    await ready;
+    assert.equal(conn.state, 'needsAuth');
+
+    const connect = conn.request('connect', { token: 'temp-token' }, { timeoutMs: 2_000 });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const connectRequest = socket.sentRequest('connect');
+    socket.serverMessage({ id: connectRequest.id, ok: true, data: { token: 'long-lived' } });
+    assert.deepEqual(await connect, { token: 'long-lived' });
+    assert.equal(conn.state, 'connected');
+
+    // Post-connect requests flow over the same socket without a reconnect.
+    const ping = conn.request('ping', {}, { timeoutMs: 2_000 });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const pingRequest = socket.sentRequest('ping');
+    assert.ok(pingRequest, 'ping request reached the socket after connect');
+    socket.serverMessage({ id: pingRequest.id, ok: true, data: {} });
+    await ping;
+    conn.close();
+  } finally {
+    restoreBrowserMocks();
+  }
+});
+
 test('error replies map to coded errors and 5xx is retryable', async () => {
   installBrowserMocks();
   try {
@@ -217,6 +295,23 @@ test('connection loss fails pending requests and subscriptions', async () => {
     assert.equal(subErrors.length, 1);
     assert.equal(subErrors[0].code, 'AGENT_CONNECTION_LOST');
     assert.equal(conn.state, 'closed');
+    conn.close();
+  } finally {
+    restoreBrowserMocks();
+  }
+});
+
+test('close code and reason surface in connection-lost errors', async () => {
+  installBrowserMocks();
+  try {
+    const conn = await authenticatedConn();
+    const socket = MockWebSocket.instances[0];
+    const rejected = conn.request('run.start', { runId: 'run-1' }, { timeoutMs: 5_000 });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    socket.emitClose(1009, 'WebSocket frame too large');
+    const error = await rejected.then(() => null, (err) => err);
+    assert.equal(error.code, 'AGENT_CONNECTION_LOST');
+    assert.match(error.message, /Agent server connection closed \(1009: WebSocket frame too large\)/);
     conn.close();
   } finally {
     restoreBrowserMocks();

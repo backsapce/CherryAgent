@@ -47,6 +47,10 @@ const MAX_SANDBOX_IMAGE_BYTES = 6 * 1024 * 1024;
 const MAX_SANDBOX_IMAGES_BYTES = 64 * 1024 * 1024;
 const MAX_MESSAGE_CONTENT_BYTES = 2 * 1024 * 1024;
 const MAX_MESSAGES_CONTENT_BYTES = 12 * 1024 * 1024;
+// Continuation attachments: bounded count plus a wire-size cap that stays under
+// the authed WS frame limit and the decoded 64MB materialization budget.
+const MAX_CONTINUE_IMAGES = 32;
+const MAX_CONTINUE_IMAGES_CHARS = 64 * 1024 * 1024;
 const CANCELLED_RUN_ID_TTL_MS = 10 * 60_000;
 // Keep the server grace period below the browser's 5 second cancellation
 // deadline. If an upstream provider ignores AbortSignal, the durable run must
@@ -422,8 +426,10 @@ export function createAgentRunManager({
           run.wakeEarly = null;
           throwIfRunCancelled(run);
 
-          const override = run.wakeupOverride;
+          const override = run.wakeupOverrideMessage
+            ?? (run.wakeupOverride != null ? { role: 'user', content: run.wakeupOverride } : null);
           run.wakeupOverride = null;
+          run.wakeupOverrideMessage = null;
           run.status = 'running';
           run.wakeup = null;
           run.resume = null;
@@ -433,7 +439,7 @@ export function createAgentRunManager({
           runtimeMessages = [
             ...runtimeMessages,
             { role: 'assistant', content: scheduledTurnContinuation(result) },
-            { role: 'user', content: override ?? buildWakeupMessage(pendingWakeup) },
+            override ?? { role: 'user', content: buildWakeupMessage(pendingWakeup) },
           ];
           if (runtimeMessages.length > MAX_MESSAGES) throw new Error('Scheduled run exceeded the message limit.');
           pendingWakeup = null;
@@ -668,8 +674,11 @@ export function createAgentRunManager({
    * instead of re-uploading the full conversation. The browser owns the
    * conversation, so it passes its user-message count; a mismatch means the
    * history was edited and the client must fall back to a full start.
+   * Multimodal attachments ride the continuation: they are materialized into
+   * the same attachments/ scope a full start uses, so the model both sees the
+   * image and can pass its sandbox path to command-line tools.
    */
-  const continueRun = (input) => {
+  const continueRun = async (input) => {
     const runId = String(input?.runId || '');
     const run = runs.get(runId);
     if (!run) {
@@ -688,6 +697,15 @@ export function createAgentRunManager({
       error.statusCode = 413;
       throw error;
     }
+    const images = sanitizeContinueImages(input?.images);
+    const messageId = safeAttachmentSegment(
+      input?.messageId || input?.replyId,
+      'continued-message'
+    );
+    const materializeContinuedMessage = () => materializeMessageImages(
+      [{ id: messageId, role: 'user', content: message, ...(images ? { images } : {}) }],
+      { fileExists, writeFile, attachmentScope: run.id }
+    ).then((processed) => processed[0]);
 
     if (run.status === 'waiting') {
       if (!input?.supersede) {
@@ -700,9 +718,14 @@ export function createAgentRunManager({
         error.statusCode = 409;
         throw error;
       }
+      // Materialize before flipping the wake-early switch: the loop consumes
+      // wakeupOverrideMessage as soon as the race resolves, so the attachment
+      // files must already be in place.
+      const overrideMessage = await materializeContinuedMessage();
       applyContinueOverrides(run.resume.input, input);
       run.replyId = input.replyId ? String(input.replyId) : run.replyId;
       run.wakeupOverride = message;
+      run.wakeupOverrideMessage = overrideMessage;
       run.updatedAt = new Date().toISOString();
       run.wakeEarly?.();
       return serializeRun(run);
@@ -724,10 +747,11 @@ export function createAgentRunManager({
     }
     applyContinueOverrides(resume.input, input);
 
+    const continuedMessage = await materializeContinuedMessage();
     const runtimeMessages = [
       ...resume.runtimeMessages,
       { role: 'assistant', content: scheduledTurnContinuation(resume.result) },
-      { role: 'user', content: message },
+      continuedMessage,
     ];
     if (runtimeMessages.length > MAX_MESSAGES) {
       const error = new Error('Continued run exceeded the message limit.');
@@ -1517,6 +1541,39 @@ function applyContinueOverrides(input, continuation) {
   if (Object.prototype.hasOwnProperty.call(continuation, 'searchConfig')) {
     input.searchConfig = continuation.searchConfig ?? null;
   }
+}
+
+/**
+ * Shape-check continuation attachments before they join the durable run.
+ * Data-URL bytes are decoded and size-capped later by materializeMessageImages,
+ * the same as images on a full run.start.
+ */
+function sanitizeContinueImages(images) {
+  if (images === undefined || images === null) return null;
+  const invalid = (message, statusCode = 400) => {
+    const error = new Error(message);
+    error.statusCode = statusCode;
+    throw error;
+  };
+  if (!Array.isArray(images) || images.length === 0) invalid('images must be a non-empty array.');
+  if (images.length > MAX_CONTINUE_IMAGES) {
+    invalid(`images must contain at most ${MAX_CONTINUE_IMAGES} attachments.`, 413);
+  }
+  const sanitized = [];
+  let totalChars = 0;
+  for (const [index, image] of images.entries()) {
+    const dataUrl = typeof image?.dataUrl === 'string' ? image.dataUrl : '';
+    if (!dataUrl) invalid(`images[${index}].dataUrl must be a non-empty string.`);
+    totalChars += dataUrl.length;
+    if (totalChars > MAX_CONTINUE_IMAGES_CHARS) {
+      invalid(`images exceed ${MAX_CONTINUE_IMAGES_CHARS} characters in total.`, 413);
+    }
+    sanitized.push({
+      ...(image.name != null ? { name: String(image.name) } : {}),
+      dataUrl,
+    });
+  }
+  return sanitized;
 }
 
 function validateRuntimeFiles(files = []) {

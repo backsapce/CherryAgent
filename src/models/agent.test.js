@@ -410,6 +410,33 @@ test('sandbox run start errors distinguish preflight failure from an attempted s
   }
 });
 
+test('a definitive 4xx run.start rejection is not marked as an attempted start', async () => {
+  // The server processed and refused the request (e.g. validation or an
+  // active-run conflict), so the recovery probe would only mask the real
+  // error behind a misleading "Agent run not found".
+  const rejection = new Error('Session one already has an active agent run.');
+  rejection.code = 409;
+  AgentServerMock.reset({
+    ...defaultWsHandlers(),
+    'run.start': () => Promise.reject(rejection),
+  });
+  const restore = installBrowserMocks(AgentServerMock, async () => { throw new Error('no http'); });
+
+  try {
+    await assert.rejects(
+      startRemoteAgentRun('https://sandbox.example', { sessionId: 'one' }),
+      (error) => {
+        assert.match(error.message, /active agent run/);
+        assert.equal(error.status, 409);
+        assert.notEqual(error.agentRunRequestStarted, true);
+        return true;
+      }
+    );
+  } finally {
+    restore();
+  }
+});
+
 test('sandbox run network failures include runtime connectivity diagnostics', async () => {
   class DeadSocket extends EventTarget {
     constructor() {

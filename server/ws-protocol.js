@@ -244,6 +244,9 @@ export function createAgentWsServer(options = {}) {
       inflightRequests: 0,
       uploadStreams: new Map(),
       pendingBuffer: Buffer.alloc(0),
+      // Reassembly state for fragmented client messages (RFC 6455 §5.4):
+      // browsers split large sends into FIN=0 + continuation frames.
+      frameAssembly: { pending: null },
       firstMessageSeen: false,
       lastActivityAt: Date.now(),
       unauthTimer: null,
@@ -368,9 +371,9 @@ export function createAgentWsServer(options = {}) {
       }
       let parsed;
       try {
-        parsed = parseWsFrames(conn.pendingBuffer, { maxFrameBytes: frameCap });
+        parsed = parseWsFrames(conn.pendingBuffer, { maxFrameBytes: frameCap, assembly: conn.frameAssembly });
       } catch (error) {
-        conn.close(1009, error.message);
+        conn.close(1008, error.message);
         return;
       }
       conn.pendingBuffer = parsed.rest;
