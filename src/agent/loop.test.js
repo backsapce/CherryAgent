@@ -113,6 +113,41 @@ test('a successful wake-up ends the current model loop immediately', async () =>
   assert.equal(result.toolCalls.at(-1)?.status, 'completed');
 });
 
+test('usage report carries stream timing alongside token counts', async () => {
+  const model = new MockLanguageModelV3({
+    doStream: async () => ({
+      stream: simulateReadableStream({
+        chunks: [
+          { type: 'stream-start', warnings: [] },
+          { type: 'text-start', id: 'timing' },
+          { type: 'text-delta', id: 'timing', delta: 'hello' },
+          { type: 'text-end', id: 'timing' },
+          { type: 'finish', finishReason: { unified: 'stop', raw: undefined }, usage: TEST_USAGE },
+        ],
+        initialDelayInMs: null,
+        chunkDelayInMs: null,
+      }),
+    }),
+  });
+
+  const result = await runAgentLoop({
+    ...createConcurrentRunOptions('timing'),
+    languageModel: model,
+  });
+
+  assert.equal(result.content, 'hello');
+  assert.ok(result.usage, 'usage report exists');
+  assert.equal(result.usage.prompt_tokens, 1);
+  assert.equal(result.usage.completion_tokens, 1);
+  const timing = result.usage.timing;
+  assert.ok(timing, 'timing attached to usage');
+  assert.equal(typeof timing.first_token_ms, 'number');
+  assert.ok(timing.first_token_ms >= 0);
+  assert.ok(timing.prefill_ms >= 0);
+  assert.ok(timing.decode_ms >= 0);
+  assert.ok(timing.duration_ms >= timing.prefill_ms + timing.decode_ms - 5, 'duration covers prefill + decode');
+});
+
 test('a successful wake-up does not wait for the provider stream to finish', async () => {
   let scheduled = null;
   let providerAbortSignal = null;

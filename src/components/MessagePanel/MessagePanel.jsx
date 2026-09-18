@@ -15,7 +15,7 @@ import { loadDroppedImage } from './droppedImage';
 import { imageDownloadName } from './imageDownload';
 import { splitTaggedReasoningContent } from '../../agent/reasoningTags';
 import { searchSkills } from '../../agent/skills';
-import { ChevronRight, Settings as SettingsIcon, Folder, File, FileEdit, Copy, MessageSquare, Plus, X, Send, Stop, Plug, Cloud, User, ImageGenerate, Refresh } from '../Icons/Icons';
+import { ChevronRight, Settings as SettingsIcon, Folder, File, FileEdit, Copy, MessageSquare, Plus, X, Send, Stop, Plug, Cloud, User, ImageGenerate, Refresh, Activity } from '../Icons/Icons';
 import { getSkillCommandRange } from './skillCommand';
 import {
   clampRestoredScrollTop,
@@ -29,6 +29,7 @@ import { formatBytes, imageMimeFromPath } from '../../utils/misc.js';
 import { hasRenderableTranscript } from './transcriptVisibility';
 import { rehypeStreamWords } from './streamBlur';
 import { resolveThinkingElapsed, timestampOf } from './thinkingElapsed';
+import { deriveUsageStats, formatStatNumber, formatStatMs } from './usageStats';
 import { formatWakeupCountdown } from '../SessionList/wakeupCountdown';
 import ImagePreview from '../ImagePreview/ImagePreview';
 import {
@@ -425,6 +426,69 @@ function formatDuration(seconds) {
 }
 
 const THINKING_PREVIEW_TAIL = 1000;
+
+const MessageUsageStats = ({ usage }) => {
+  const { t } = useI18n();
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const handlePointerDown = (event) => {
+      if (rootRef.current && !rootRef.current.contains(event.target)) setOpen(false);
+    };
+    const handleKeyDown = (event) => {
+      if (event.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('pointerdown', handlePointerDown, true);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown, true);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [open]);
+
+  const stats = deriveUsageStats(usage);
+  const rows = [
+    [t('message.usageInput'), formatStatNumber(stats.inputTokens)],
+    [t('message.usageOutput'), formatStatNumber(stats.outputTokens)],
+    [t('message.usageTotal'), formatStatNumber(stats.totalTokens)],
+    [t('message.usageSpeed'), stats.speed ? `${stats.speed.toFixed(1)} tok/s` : '—'],
+    [t('message.usagePrefill'), formatStatMs(stats.timing?.first_token_ms)],
+    [t('message.usageDuration'), formatStatMs(stats.timing?.duration_ms)],
+  ];
+
+  return (
+    <div className="message-stats" ref={rootRef}>
+      <button
+        type="button"
+        className={`message-action-btn message-stats-btn${open ? ' active' : ''}`}
+        onClick={() => setOpen((value) => !value)}
+        title={t('message.usageStats')}
+        aria-label={t('message.usageStats')}
+        aria-expanded={open}
+      >
+        <Activity width={14} height={14} />
+      </button>
+      {open && (
+        <div className="message-stats-popover" role="dialog" aria-label={t('message.usageStats')}>
+          <div className="message-stats-title">{t('message.usageStats')}</div>
+          {rows.map(([label, value]) => (
+            <div className="message-stats-row" key={label}>
+              <span className="message-stats-label">{label}</span>
+              <span className="message-stats-value">{value}</span>
+            </div>
+          ))}
+          {stats.modelCallCount > 1 && (
+            <div className="message-stats-note">
+              {t('message.usageModelCalls', { count: stats.modelCallCount })}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
 
 function toSingleLinePreview(text) {
   const flat = String(text || '').replace(/\s+/g, ' ').trim();
@@ -2199,6 +2263,9 @@ const MessagePanel = forwardRef(({
                       >
                         <FileEdit width={14} height={14} />
                       </button>
+                    )}
+                    {msg.role === 'assistant' && msg.usage && (
+                      <MessageUsageStats usage={msg.usage} />
                     )}
                     <button
                       type="button"

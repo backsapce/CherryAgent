@@ -378,4 +378,11 @@ export const Check = ({ width = 18, height = 18, className = '' }) => (
   </IconBase>
 );
 
+// Activity / Stats Icon (model usage)
+export const Activity = ({ width = 18, height = 18, className = '' }) => (
+  <IconBase width={width} height={height} viewBox="0 0 24 24" className={className}>
+    <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+  </IconBase>
+);
+
 // Empty State Icons

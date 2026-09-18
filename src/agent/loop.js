@@ -214,6 +214,24 @@ export async function runAgentLoop(opts) {
     let latestUsage = initial.usage;
     let totalUsage = initial.totalUsage;
     let modelCallCount = initial.modelCallCount ?? initial.steps.length;
+    let totalTiming = initial.timing || null;
+
+    // Recovery/finalizer streams are separate model calls; their waiting and
+    // decode windows sum into the turn timing, while the turn's prefill keeps
+    // the first stream's time-to-first-token.
+    const addTiming = (extra) => {
+      if (!extra) return;
+      if (!totalTiming) {
+        totalTiming = { ...extra };
+        return;
+      }
+      totalTiming = {
+        first_token_ms: totalTiming.first_token_ms ?? extra.first_token_ms ?? null,
+        prefill_ms: (totalTiming.prefill_ms || 0) + (extra.prefill_ms || 0),
+        decode_ms: (totalTiming.decode_ms || 0) + (extra.decode_ms || 0),
+        duration_ms: (totalTiming.duration_ms || 0) + (extra.duration_ms || 0),
+      };
+    };
 
     // A syntactically successful but empty completion is common with broken
     // OpenAI-compatible gateways. Retry it once; otherwise the UI used to
@@ -241,6 +259,7 @@ export async function runAgentLoop(opts) {
       latestUsage = recovery.usage || latestUsage;
       totalUsage = addUsage(totalUsage, recovery.totalUsage);
       modelCallCount += recovery.modelCallCount ?? recovery.steps.length;
+      addTiming(recovery.timing);
     }
 
     // `stepCountIs` ends on a tool-call step. Give the model one tool-free turn
@@ -268,6 +287,7 @@ export async function runAgentLoop(opts) {
       latestUsage = finalizer.usage || latestUsage;
       totalUsage = addUsage(totalUsage, finalizer.totalUsage);
       modelCallCount += finalizer.modelCallCount ?? finalizer.steps.length;
+      addTiming(finalizer.timing);
     }
 
     throwIfAborted(signal);
@@ -279,7 +299,13 @@ export async function runAgentLoop(opts) {
       error.code = 'EMPTY_MODEL_RESPONSE';
       throw error;
     }
-    const usage = buildUsageReport(latestUsage, addUsage(totalUsage, subAgentUsage), contextWindow, modelCallCount);
+    const usage = buildUsageReport(
+      latestUsage,
+      addUsage(totalUsage, subAgentUsage),
+      contextWindow,
+      modelCallCount,
+      totalTiming
+    );
     emit({
       type: 'run-finish',
       usage,
@@ -589,12 +615,26 @@ async function consumeAgentStream({
     ? result.fullStream
     : modelStreamWithTimeout(result.fullStream, modelTimeout, signal);
 
+  const streamStartedAt = Date.now();
+  let stepStartedAt = streamStartedAt;
+  let stepFirstTokenAt = null;
+  const timing = { first_token_ms: null, prefill_ms: 0, decode_ms: 0 };
+  const markStepFirstToken = () => {
+    if (stepFirstTokenAt != null) return;
+    stepFirstTokenAt = Date.now();
+    if (timing.first_token_ms == null) {
+      timing.first_token_ms = stepFirstTokenAt - streamStartedAt;
+    }
+  };
+
   for await (const part of fullStream) {
     throwIfAborted(signal);
     switch (part.type) {
       case 'start-step':
         currentStepHasText = false;
         currentStepHasReasoning = false;
+        stepStartedAt = Date.now();
+        stepFirstTokenAt = null;
         if (lifecycle) {
           lifecycle.stepIndex += 1;
           lifecycle.currentStepId = `step-${lifecycle.stepIndex}`;
@@ -609,6 +649,7 @@ async function consumeAgentStream({
         emit({ type: 'text-start', segmentId: part.id, stepId: lifecycle?.currentStepId });
         break;
       case 'text-delta':
+        markStepFirstToken();
         emit({
           type: 'text-delta',
           text: part.text,
@@ -625,6 +666,7 @@ async function consumeAgentStream({
         emit({ type: 'reasoning-start', segmentId: part.id, stepId: lifecycle?.currentStepId });
         break;
       case 'reasoning-delta':
+        markStepFirstToken();
         emit({
           type: 'reasoning-delta',
           text: part.text,
@@ -641,6 +683,7 @@ async function consumeAgentStream({
         emit({ type: 'tool-input-start', toolCallId: part.id, toolName: part.toolName, stepId: lifecycle?.currentStepId });
         break;
       case 'tool-input-delta':
+        markStepFirstToken();
         emit({ type: 'tool-input-delta', toolCallId: part.id, delta: part.delta, stepId: lifecycle?.currentStepId });
         break;
       case 'tool-input-end':
@@ -672,6 +715,10 @@ async function consumeAgentStream({
         });
         break;
       case 'finish-step':
+        if (stepFirstTokenAt != null) {
+          timing.prefill_ms += stepFirstTokenAt - stepStartedAt;
+          timing.decode_ms += Date.now() - stepFirstTokenAt;
+        }
         emit({
           type: 'step-finish',
           stepId: lifecycle?.currentStepId,
@@ -708,6 +755,7 @@ async function consumeAgentStream({
     steps,
     usage: normalizeAiUsage(usage),
     totalUsage: normalizeAiUsage(totalUsage),
+    timing: { ...timing, duration_ms: Date.now() - streamStartedAt },
     responseMessages: steps.flatMap((step) => step.response.messages),
     modelCallCount: steps.length,
   };
@@ -1117,10 +1165,11 @@ function addUsage(left, right) {
   };
 }
 
-function buildUsageReport(latestUsage, totalUsage, contextWindow, modelCallCount) {
+function buildUsageReport(latestUsage, totalUsage, contextWindow, modelCallCount, timing = null) {
   const latest = latestUsage || totalUsage;
   if (!hasUsageTokens(latest)) return null;
   const total = totalUsage || latest;
+  const hasTiming = timing && (timing.first_token_ms != null || timing.prefill_ms > 0 || timing.decode_ms > 0);
   return {
     ...latest,
     content_len: contextWindow,
@@ -1128,6 +1177,7 @@ function buildUsageReport(latestUsage, totalUsage, contextWindow, modelCallCount
     turn_completion_tokens: total.completion_tokens,
     turn_total_tokens: total.total_tokens,
     model_call_count: modelCallCount || 1,
+    ...(hasTiming ? { timing } : {}),
   };
 }
 
