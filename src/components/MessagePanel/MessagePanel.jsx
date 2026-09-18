@@ -15,7 +15,7 @@ import { loadDroppedImage } from './droppedImage';
 import { imageDownloadName } from './imageDownload';
 import { splitTaggedReasoningContent } from '../../agent/reasoningTags';
 import { searchSkills } from '../../agent/skills';
-import { ChevronRight, Settings as SettingsIcon, Folder, File, FileEdit, Copy, MessageSquare, Plus, X, Send, Stop, Plug, Cloud, User, ImageGenerate, Refresh, Activity } from '../Icons/Icons';
+import { ChevronRight, Settings as SettingsIcon, Folder, File, FileEdit, Copy, GitFork, MessageSquare, Plus, X, Send, Stop, Plug, Cloud, User, ImageGenerate, Refresh, Activity } from '../Icons/Icons';
 import { getSkillCommandRange } from './skillCommand';
 import {
   clampRestoredScrollTop,
@@ -1104,6 +1104,7 @@ const MessagePanel = forwardRef(({
   queuedMessages = [],
   onRemoveQueuedMessage,
   onEditMessage,
+  onForkMessage,
   onRetry,
   streaming,
   inputDisabled = false,
@@ -2266,6 +2267,18 @@ const MessagePanel = forwardRef(({
                     )}
                     {msg.role === 'assistant' && msg.usage && (
                       <MessageUsageStats usage={msg.usage} />
+                    )}
+                    {onForkMessage && (
+                      <button
+                        type="button"
+                        className="message-action-btn message-fork-btn"
+                        onClick={() => onForkMessage(msg.id)}
+                        disabled={streaming}
+                        title={t('message.fork')}
+                        aria-label={t('message.fork')}
+                      >
+                        <GitFork width={14} height={14} />
+                      </button>
                     )}
                     <button
                       type="button"

@@ -36,6 +36,7 @@
     "edit": "Edit",
     "copy": "Copy",
     "copied": "Copied",
+    "fork": "Fork from here",
     "usageStats": "Model usage",
     "usageInput": "Input tokens",
     "usageOutput": "Output tokens",

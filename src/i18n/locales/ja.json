@@ -36,6 +36,7 @@
     "edit": "編集",
     "copy": "コピー",
     "copied": "コピーしました",
+    "fork": "ここから新しい会話に分岐",
     "usageStats": "モデル使用量",
     "usageInput": "入力トークン",
     "usageOutput": "出力トークン",

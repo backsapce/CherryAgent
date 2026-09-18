@@ -2645,6 +2645,64 @@ function App() {
     scheduleStreamResponse(sessionId, trimmedMessages);
   }, [activeSessionId, activeSessionStreaming, activeSessionAgentLoading, sessions, scheduleStreamResponse]);
 
+  // Copy the conversation up to and including the picked message into a new
+  // session and switch to it. Message ids are preserved so anchored summary
+  // states carried by the copied messages stay valid; run-scoped session
+  // fields (wakeups, remoteRun) deliberately do not carry over.
+  const handleForkMessage = useCallback(async (messageId) => {
+    if (activeSessionAgentLoading || factoryResetInProgressRef.current || activeSessionStreaming || !activeSessionId) return;
+    const sessionId = activeSessionId;
+    const session = sessions.find((c) => c.id === sessionId);
+    if (!session) return;
+
+    const sourceMessages = session.messages || await loadSessionMessages(sessionId);
+    const messageIndex = sourceMessages.findIndex((message) => message.id === messageId);
+    if (messageIndex === -1 || deletedSessionIdsRef.current.has(sessionId)) return;
+
+    const forkedMessages = structuredClone(sourceMessages.slice(0, messageIndex + 1));
+    let lastMessage = '';
+    for (let index = forkedMessages.length - 1; index >= 0 && !lastMessage; index -= 1) {
+      const message = forkedMessages[index];
+      lastMessage = message.role === 'user'
+        ? messagePreviewText(message.content, message.images, message.contextFiles)
+        : String(message.content || '');
+    }
+
+    const newSession = {
+      id: generateId(),
+      title: session.title,
+      lastMessage: lastMessage.slice(0, 60),
+      ...sessionTimeFields(),
+      messages: forkedMessages,
+      ...(session.llmProfileId && { llmProfileId: session.llmProfileId }),
+      ...(session.agentId && { agentId: session.agentId }),
+    };
+    // Invalidate any metadata-only session load that belonged to the previous
+    // selection before switching to the forked conversation.
+    sessionLoadRequestRef.current += 1;
+    let preserveLoadedMessages = sessionRunsRef.current.values().length > 0
+      || pendingStreamStartsRef.current.size > 0
+      || sessionStopPromisesRef.current.size > 0
+      || messageQueue.length > 0;
+    if (!preserveLoadedMessages) await flushPendingSessionSave();
+    preserveLoadedMessages ||= sessionRunsRef.current.values().length > 0
+      || pendingStreamStartsRef.current.size > 0
+      || sessionStopPromisesRef.current.size > 0
+      || messageQueue.length > 0;
+    setSessions((prev) => sortSessions([
+      newSession,
+      ...prev.map((item) => (preserveLoadedMessages ? item : sessionMetadataOnly(item))),
+    ]));
+    setActiveSessionId(newSession.id);
+
+    if (session.agentId) {
+      setSessionAgents((prev) => ({ ...prev, [newSession.id]: session.agentId }));
+    }
+    if (session.llmProfileId) {
+      setSessionLlmProfiles((prev) => ({ ...prev, [newSession.id]: session.llmProfileId }));
+    }
+  }, [activeSessionId, activeSessionStreaming, activeSessionAgentLoading, sessions, flushPendingSessionSave, messageQueue]);
+
   const handleSelectLLM = useCallback(async (profileId) => {
     const nextProfileId = profileId || null;
     try {
@@ -2899,6 +2957,7 @@ function App() {
         queuedMessages={messageQueue.filter((item) => item.sessionId === activeSessionId)}
         onRemoveQueuedMessage={handleRemoveQueuedMessage}
         onEditMessage={handleEditMessage}
+        onForkMessage={handleForkMessage}
         onRetry={() => {
           if (activeSessionAgentLoading || factoryResetInProgressRef.current || activeSessionStreaming) return;
           const sessionId = activeSessionId;
