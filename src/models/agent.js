@@ -32,6 +32,14 @@ const DOWNLOAD_STREAM_TIMEOUT_MS = 5 * 60_000;
 // Upper bound for a single wait_command bounded wait; matches the 7-day maximum
 // of schedule_wakeup so any wait the model may declare can be served in one call.
 const MAX_COMMAND_WAIT_MS = 7 * 24 * 60 * 60_000;
+const TERMINAL_JOB_STATUSES = ['completed', 'failed', 'stopped', 'interrupted'];
+// Pause between subscribe attempts after a connection reset; the connection
+// layer's own reconnect backoff dominates, this only bounds the retry loop.
+const JOB_WAIT_RESUBSCRIBE_DELAY_MS = 500;
+// Ceiling for the fresh job.get that settles a wait whose budget ran out.
+const JOB_WAIT_FINAL_READ_MS = 5_000;
+// Safety cap for draining capped reads after a terminal snapshot.
+const JOB_LOG_DRAIN_MAX_READS = 64;
 
 let streamSequence = 0;
 /** Monotonic binary-stream ids shared by uploads and downloads. */
@@ -371,8 +379,10 @@ export function getCommand(jobId, url, cursor = 0, signal) {
 
 /**
  * Wait for a background command: subscribes to job pushes and resolves with
- * the newest snapshot once the job reaches a terminal state without pending
- * logs, or when waitMs elapses (mirroring the old long-poll contract).
+ * the merged snapshot once the job reaches a terminal state, or when waitMs
+ * elapses. A dropped connection never ends the wait early — the subscription
+ * is re-established until the budget is spent, and budget exhaustion settles
+ * on a fresh job.get rather than a stale pushed snapshot.
  */
 export async function waitCommand(jobId, url, { cursor = 0, waitMs = 30_000, signal } = {}) {
   assertManagedCommandRuntime(url);
@@ -381,51 +391,137 @@ export async function waitCommand(jobId, url, { cursor = 0, waitMs = 30_000, sig
   if (boundedWaitMs === 0) {
     return conn.request('job.get', { job_id: jobId, cursor }, { signal });
   }
-
+  const deadline = Date.now() + boundedWaitMs;
   let latest = null;
-  let failure = null;
-  let resolveDone;
-  const done = new Promise((resolve) => { resolveDone = resolve; });
+
+  while (!signal?.aborted) {
+    const resumeCursor = Number.isFinite(latest?.nextCursor) ? latest.nextCursor : cursor;
+    const attempt = await waitForJobPushes(conn, jobId, resumeCursor, deadline, signal);
+    if (attempt.snapshot) latest = mergeJobSnapshots(latest, attempt.snapshot);
+    if (attempt.aborted) throw jobWaitAbortError(signal);
+    if (attempt.error) throw attempt.error;
+    if (attempt.terminal) return drainJobLogs(conn, latest, signal);
+    if (Date.now() >= deadline) break;
+    await delayMs(Math.min(JOB_WAIT_RESUBSCRIBE_DELAY_MS, deadline - Date.now()));
+  }
+  if (signal?.aborted) throw jobWaitAbortError(signal);
+
+  // Budget spent without a terminal push; the last pushed snapshot may be
+  // stale (especially when the connection dropped), so append one fresh read.
+  try {
+    const fresh = await Promise.race([
+      conn.request('job.get', {
+        job_id: jobId,
+        cursor: Number.isFinite(latest?.nextCursor) ? latest.nextCursor : cursor,
+      }, { signal }),
+      delayMs(JOB_WAIT_FINAL_READ_MS).then(() => null),
+    ]);
+    if (fresh) return mergeJobSnapshots(latest, fresh);
+  } catch {
+    // Keep the last merged snapshot when the connection cannot serve one more read.
+  }
+  return latest;
+}
+
+/**
+ * One subscribe attempt. Resolves with whatever is known when the job goes
+ * terminal, a hard error arrives, the deadline passes, or the subscription
+ * breaks (reset/abort) — connection failures are the caller's cue to retry.
+ */
+async function waitForJobPushes(conn, jobId, cursor, deadline, signal) {
+  let merged = null;
+  let hardError = null;
+  let terminal = false;
+  let settle;
+  const done = new Promise((resolve) => { settle = resolve; });
+
   const subscription = conn.subscribe({
     request: 'job.subscribe',
     payload: { job_id: jobId, cursor: Math.max(0, Number(cursor) || 0) },
     signal,
     onData: (type, data) => {
       if (type === 'job.update') {
-        latest = data;
-        if (['completed', 'failed', 'stopped', 'interrupted'].includes(data.status) && !data.hasMore) {
-          resolveDone();
+        merged = mergeJobSnapshots(merged, data);
+        if (!terminal && TERMINAL_JOB_STATUSES.includes(merged.status)) {
+          terminal = true;
+          settle();
         }
       } else if (type === 'job.error') {
-        failure = new Error(data.error || 'Job wait failed');
-        resolveDone();
+        hardError = new Error(data.error || 'Job wait failed');
+        settle();
       }
     },
-    onError: (error) => {
-      failure = error;
-      resolveDone();
-    },
+    onError: () => settle(),
   });
 
-  let timeoutId = null;
+  let budgetTimer = null;
+  const waitBudget = new Promise((resolve) => {
+    budgetTimer = setTimeout(resolve, Math.max(0, deadline - Date.now()));
+  });
+  const readySettled = subscription.ready.then(
+    () => done,
+    (error) => {
+      // Server-side rejections (unknown job, bad payload) are definitive;
+      // timeouts and connection loss retry within the remaining budget.
+      if (isDefinitiveRequestError(error)) hardError = hardError || error;
+      settle();
+    }
+  );
   const abortWait = signal
-    ? new Promise((_, reject) => {
-      signal.addEventListener('abort', () => {
-        reject(signal.reason instanceof Error ? signal.reason : new DOMException('Job wait aborted', 'AbortError'));
-      }, { once: true });
+    ? new Promise((resolve) => {
+      signal.addEventListener('abort', () => resolve(), { once: true });
     })
     : null;
-  const waitBudget = new Promise((resolve) => { timeoutId = setTimeout(resolve, boundedWaitMs); });
-  const racers = [subscription.ready.then(() => done), waitBudget];
+
+  const racers = [readySettled, waitBudget];
   if (abortWait) racers.push(abortWait);
   try {
     await Promise.race(racers);
   } finally {
-    if (timeoutId) clearTimeout(timeoutId);
+    if (budgetTimer) clearTimeout(budgetTimer);
     subscription.unsubscribe();
   }
-  if (!latest && failure) throw failure;
-  return latest;
+  return { snapshot: merged, terminal, error: hardError, aborted: Boolean(signal?.aborted) };
+}
+
+/**
+ * Consecutive pushes and follow-up reads each cover only the log bytes after
+ * the previous one; concatenating rebuilds the window from the original cursor.
+ */
+function mergeJobSnapshots(earlier, next) {
+  if (!earlier) return next;
+  return {
+    ...next,
+    log: (earlier.log || '') + (next.log || ''),
+    logCursor: Number.isFinite(earlier.logCursor) ? earlier.logCursor : next.logCursor,
+    log_truncated: Boolean(earlier.log_truncated || next.log_truncated),
+  };
+}
+
+/** A terminal snapshot can stop mid-log (read cap); fetch the rest of it. */
+async function drainJobLogs(conn, snapshot, signal) {
+  let current = snapshot;
+  for (let reads = 0; current.hasMore && reads < JOB_LOG_DRAIN_MAX_READS; reads += 1) {
+    const next = await conn.request('job.get', { job_id: current.job_id, cursor: current.nextCursor }, { signal });
+    current = mergeJobSnapshots(current, next);
+  }
+  return current;
+}
+
+/** Server answered with a non-retryable error code (unknown job, bad payload). */
+function isDefinitiveRequestError(error) {
+  const code = Number(error?.code);
+  return Number.isFinite(code) && code > 0 && code < 500;
+}
+
+function jobWaitAbortError(signal) {
+  return signal?.reason instanceof Error
+    ? signal.reason
+    : new DOMException('Job wait aborted', 'AbortError');
+}
+
+function delayMs(ms) {
+  return new Promise((resolve) => { setTimeout(resolve, Math.max(0, ms)); });
 }
 
 /** Stop a managed command and its entire process tree. */

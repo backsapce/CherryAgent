@@ -253,6 +253,8 @@ test('managed commands and waits ride the multiplexed connection', async () => {
     const waited = await waitCommand('job-one', 'https://sandbox.example', { cursor: 23, waitMs: 5_000 });
     assert.equal(waited.status, 'completed');
     assert.equal(waited.exit_code, 0);
+    // Pushes deliver incremental log slices; the result must carry them all.
+    assert.equal(waited.log, 'startingdone');
 
     const stopped = await stopCommand('job-one', 'https://sandbox.example');
     assert.equal(stopped.status, 'stopped');
@@ -281,6 +283,129 @@ test('waitCommand returns the newest snapshot when the wait budget elapses', asy
     const result = await waitCommand('job-slow', 'https://sandbox.example', { cursor: 0, waitMs: 80 });
     assert.equal(result.status, 'running');
     assert.equal(result.log, 'tick');
+  } finally {
+    restore();
+  }
+});
+
+test('waitCommand appends one fresh read when the budget elapses', async () => {
+  AgentServerMock.reset({
+    ...defaultWsHandlers(),
+    'job.subscribe': (payload, server) => {
+      // Never terminal, and the push goes stale right after delivery.
+      server.push('job.update', payload.sub, { job_id: payload.job_id, status: 'running', log: 'stale ', logCursor: 0, nextCursor: 6, logSize: 6, hasMore: false });
+      return { subscribed: true };
+    },
+    'job.get': (payload) => ({
+      job_id: payload.job_id,
+      status: 'running',
+      log: 'fresh',
+      logCursor: payload.cursor,
+      nextCursor: payload.cursor + 5,
+      logSize: payload.cursor + 5,
+      hasMore: false,
+    }),
+  });
+  const restore = installBrowserMocks(AgentServerMock, async () => { throw new Error('no http'); });
+
+  try {
+    const result = await waitCommand('job-slow', 'https://sandbox.example', { cursor: 0, waitMs: 80 });
+    assert.equal(result.status, 'running');
+    assert.equal(result.log, 'stale fresh');
+    // The fresh read continues after the pushed slice instead of repeating it.
+    const finalRead = AgentServerMock.instances[0].sentRequest('job.get');
+    assert.equal(finalRead.payload.cursor, 6);
+  } finally {
+    restore();
+  }
+});
+
+test('waitCommand resubscribes after a connection reset instead of returning a stale snapshot', async () => {
+  AgentServerMock.reset({
+    ...defaultWsHandlers(),
+    'job.subscribe': (payload, server) => {
+      if (AgentServerMock.instances.indexOf(server) === 0) {
+        server.push('job.update', payload.sub, { job_id: payload.job_id, status: 'running', log: 'first ', logCursor: 0, nextCursor: 6, logSize: 6, hasMore: false });
+        // Drop the socket mid-wait; the client must reconnect and keep waiting.
+        setTimeout(() => server.close(), 10);
+      } else {
+        server.push('job.update', payload.sub, { job_id: payload.job_id, status: 'completed', exit_code: 0, log: 'second', logCursor: 6, nextCursor: 12, logSize: 12, hasMore: false });
+      }
+      return { subscribed: true };
+    },
+  });
+  const restore = installBrowserMocks(AgentServerMock, async () => { throw new Error('no http'); });
+
+  try {
+    const result = await waitCommand('job-drop', 'https://sandbox.example', { cursor: 0, waitMs: 5_000 });
+    assert.equal(result.status, 'completed');
+    assert.equal(result.exit_code, 0);
+    // The post-reset subscription resumes after the bytes already received.
+    assert.equal(result.log, 'first second');
+    assert.ok(AgentServerMock.instances.length >= 2, 'client should have reconnected');
+    const resubscribe = AgentServerMock.instances[1].sentRequest('job.subscribe');
+    assert.equal(resubscribe.payload.job_id, 'job-drop');
+    assert.equal(resubscribe.payload.cursor, 6);
+  } finally {
+    restore();
+  }
+});
+
+test('waitCommand drains capped logs after a terminal push', async () => {
+  AgentServerMock.reset({
+    ...defaultWsHandlers(),
+    'job.subscribe': (payload, server) => {
+      server.push('job.update', payload.sub, {
+        job_id: payload.job_id,
+        status: 'completed',
+        exit_code: 0,
+        log: 'first half ',
+        logCursor: 0,
+        nextCursor: 11,
+        logSize: 22,
+        hasMore: true,
+      });
+      return { subscribed: true };
+    },
+    'job.get': (payload) => ({
+      job_id: payload.job_id,
+      status: 'completed',
+      exit_code: 0,
+      log: 'second half',
+      logCursor: payload.cursor,
+      nextCursor: 22,
+      logSize: 22,
+      hasMore: false,
+    }),
+  });
+  const restore = installBrowserMocks(AgentServerMock, async () => { throw new Error('no http'); });
+
+  try {
+    const result = await waitCommand('job-capped', 'https://sandbox.example', { cursor: 0, waitMs: 2_000 });
+    assert.equal(result.status, 'completed');
+    assert.equal(result.log, 'first half second half');
+    assert.equal(result.hasMore, false);
+    const drain = AgentServerMock.instances[0].sentRequest('job.get');
+    assert.equal(drain.payload.cursor, 11);
+  } finally {
+    restore();
+  }
+});
+
+test('waitCommand fails fast when the server rejects the subscription', async () => {
+  AgentServerMock.reset({
+    ...defaultWsHandlers(),
+    'job.subscribe': () => {
+      throw Object.assign(new Error('Background command not found'), { code: 404 });
+    },
+  });
+  const restore = installBrowserMocks(AgentServerMock, async () => { throw new Error('no http'); });
+
+  try {
+    await assert.rejects(
+      waitCommand('job-gone', 'https://sandbox.example', { cursor: 0, waitMs: 5_000 }),
+      /Background command not found/
+    );
   } finally {
     restore();
   }

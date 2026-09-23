@@ -967,7 +967,7 @@
 }
 
 .tool-kind-icon {
-  color: #10a37f;
+  color: var(--color-accent-strong);
 }
 
 .tool-label {
@@ -1170,11 +1170,11 @@
 }
 
 .image-generation-tool {
-  border-color: color-mix(in srgb, #10a37f 28%, var(--color-border));
+  border-color: color-mix(in srgb, var(--color-accent-strong) 28%, var(--color-border));
 }
 
 .image-generation-tool .tool-header {
-  background: color-mix(in srgb, #10a37f 8%, var(--color-surface-alt));
+  background: color-mix(in srgb, var(--color-accent-strong) 8%, var(--color-surface-alt));
 }
 
 .image-generation-status {
@@ -1185,9 +1185,9 @@
   max-width: 100%;
   margin: 0 0 8px;
   padding: 7px 12px;
-  border: 1px solid color-mix(in srgb, #10a37f 28%, var(--color-border));
+  border: 1px solid color-mix(in srgb, var(--color-accent-strong) 28%, var(--color-border));
   border-radius: 999px;
-  background: color-mix(in srgb, #10a37f 9%, var(--color-surface));
+  background: color-mix(in srgb, var(--color-accent-strong) 9%, var(--color-surface));
   color: var(--color-text-content);
   font-size: 13px;
   line-height: 1.2;
@@ -1195,7 +1195,7 @@
 
 .image-generation-icon {
   display: inline-flex;
-  color: #10a37f;
+  color: var(--color-accent-strong);
   flex-shrink: 0;
 }
 

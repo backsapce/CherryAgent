@@ -39,14 +39,14 @@
   /* Borders */
   --color-border:          #223041;
   --color-border-subtle:   #2b3a4d;
-  --color-border-focus:    #4fb3c4;
+  --color-border-focus:    #9c93d6;
 
-  /* Buttons / accents — primary is ink-white (inverted), teal stays the brand accent */
+  /* Buttons / accents — primary is ink-white (inverted), muted violet stays the brand accent */
   --color-primary:         #e9edf4;
   --color-primary-hover:   #ffffff;
-  --color-accent:          #1d3442;
-  --color-accent-hover:    #26495a;
-  --color-accent-strong:   #4fb3c4;
+  --color-accent:          #463d5e;
+  --color-accent-hover:    #554a70;
+  --color-accent-strong:   #a79fdf;
   --color-primary-fg:      #10151d;
 
   /* Primary button treatment: soft vertical gradient + neutral layered shadow */
@@ -66,26 +66,26 @@
   /* Avatars */
   --color-avatar-user-bg:  #3d4a5d;
   --color-avatar-user-fg:  #e7edf5;
-  --color-avatar-ai-bg:    #3d9db3;
-  --color-avatar-ai-fg:    #f2fbfd;
+  --color-avatar-ai-bg:    #7b71c2;
+  --color-avatar-ai-fg:    #f2f1fb;
 
   /* Settings nav */
   --color-nav-active:      #1c2b3b;
   --color-nav-hover:       #16212d;
 
   /* Thinking block */
-  --color-thinking-bg:     #12252d;
-  --color-thinking-text:   #a9c7d0;
-  --color-thinking-content-bg: #0f171f;
-  --color-thinking-content-text: #a6b3c1;
+  --color-thinking-bg:     #1d1930;
+  --color-thinking-text:   #b5aee0;
+  --color-thinking-content-bg: #151323;
+  --color-thinking-content-text: #aca8c2;
 
   /* Misc */
   --color-error:           #ff6b6b;
   --color-error-hover:     #ff4d4d;
-  --color-success:         #35d39d;
+  --color-success:         #9dc2a5;
   --color-warning:         #f6b84b;
   --color-hint:            #657386;
-  --color-loading:         #6fb5c4;
+  --color-loading:         #9c93d6;
   --color-overlay:         rgba(0, 0, 0, 0.7);
   --color-shadow:          rgba(0, 0, 0, 0.42);
   --color-shadow-soft:     rgba(4, 10, 18, 0.28);
@@ -121,19 +121,19 @@
   --color-surface-modal:   #ffffff;
   --color-surface-raised:  #ffffff;
   --color-sidebar:         #f9fbfd;
-  --color-sidebar-active:  #e8f2f7;
+  --color-sidebar-active:  #e9e8f7;
 
   /* Borders */
   --color-border:          #dbe3ec;
   --color-border-subtle:   #cfd9e5;
-  --color-border-focus:    #2496a8;
+  --color-border-focus:    #6d63c0;
 
-  /* Buttons / accents — primary is ink (near-black), teal stays the brand accent */
+  /* Buttons / accents — primary is ink (near-black), muted violet stays the brand accent */
   --color-primary:         #1a1f28;
   --color-primary-hover:   #000000;
-  --color-accent:          #e3f2f5;
-  --color-accent-hover:    #cce7ec;
-  --color-accent-strong:   #1493a6;
+  --color-accent:          #eceafb;
+  --color-accent-hover:    #e0dcf7;
+  --color-accent-strong:   #6d63c0;
   --color-primary-fg:      #f5f7fa;
 
   /* Primary button treatment */
@@ -153,26 +153,26 @@
   /* Avatars */
   --color-avatar-user-bg:  #6b7688;
   --color-avatar-user-fg:  #ffffff;
-  --color-avatar-ai-bg:    #0e7f92;
+  --color-avatar-ai-bg:    #5b51b0;
   --color-avatar-ai-fg:    #ffffff;
 
   /* Settings nav */
-  --color-nav-active:      #e3f2f5;
-  --color-nav-hover:       #eef4f8;
+  --color-nav-active:      #eceafb;
+  --color-nav-hover:       #f1f0f9;
 
   /* Thinking block */
-  --color-thinking-bg:     #e9f6f8;
-  --color-thinking-text:   #4e7882;
-  --color-thinking-content-bg: #f7fbfc;
-  --color-thinking-content-text: #5c6978;
+  --color-thinking-bg:     #f0eefb;
+  --color-thinking-text:   #6a628e;
+  --color-thinking-content-bg: #f7f6fc;
+  --color-thinking-content-text: #5d5b70;
 
   /* Misc */
   --color-error:           #ff3b30;
   --color-error-hover:     #d63027;
-  --color-success:         #0f9f6e;
+  --color-success:         #568065;
   --color-warning:         #d98917;
   --color-hint:            #9aa6b5;
-  --color-loading:         #1493a6;
+  --color-loading:         #6d63c0;
   --color-overlay:         rgba(0, 0, 0, 0.3);
   --color-shadow:          rgba(15, 23, 42, 0.14);
   --color-shadow-soft:     rgba(15, 23, 42, 0.08);

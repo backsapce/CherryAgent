@@ -200,8 +200,8 @@
   bottom: 24px;
   left: 50%;
   transform: translateX(-50%);
-  background-color: #22c55e;
-  color: white;
+  background-color: var(--color-success);
+  color: var(--color-primary-fg);
   padding: 12px 24px;
   border-radius: 8px;
   font-size: 14px;
