@@ -697,6 +697,9 @@ const ToolImageReference = ({ reference, agentId, sandboxUrl }) => {
   useEffect(() => {
     let disposed = false;
     let objectUrl = '';
+    // Downloads queue behind every other image on the page; aborting on
+    // unmount frees the queue slot instead of finishing invisibly.
+    const abortController = new AbortController();
     setImageUrl('');
     setDownloadName('');
     setError('');
@@ -711,7 +714,7 @@ const ToolImageReference = ({ reference, agentId, sandboxUrl }) => {
           if (!sandboxUrl) throw new Error('Sandbox runtime is disconnected.');
           blob = sandboxUrl === E2B_AGENT_ID
             ? await downloadE2bFile(reference.path)
-            : await downloadRemoteFile(reference.path, sandboxUrl);
+            : await downloadRemoteFile(reference.path, sandboxUrl, { signal: abortController.signal });
         } else {
           throw new Error(`Unsupported image source: ${reference.source}`);
         }
@@ -734,6 +737,7 @@ const ToolImageReference = ({ reference, agentId, sandboxUrl }) => {
     void load();
     return () => {
       disposed = true;
+      abortController.abort();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
   }, [agentId, reference.mime_type, reference.name, reference.path, reference.source, sandboxUrl]);

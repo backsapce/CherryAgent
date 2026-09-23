@@ -10,6 +10,7 @@
 
 import config from '../config/config.js';
 import { assertSecureAgentUrl, getAgentConnection } from './agentConnection.js';
+import { createDownloadLimiter } from './downloadLimiter.js';
 import { initE2b, getSandboxStatus, executeInSandbox, stopSandbox, enableE2b, listE2bFiles, createE2bFile, createE2bDir, deleteE2bFile, moveE2bFile, uploadE2bFile, downloadE2bFile, readE2bFileText, writeE2bFileText } from './e2b.js';
 
 export { assertSecureAgentUrl };
@@ -29,6 +30,11 @@ const AGENT_RUN_POST_BYTES_PER_SECOND = 1024 * 1024;
 // timeout, the byte transfer itself by these generous ceilings.
 const UPLOAD_END_TIMEOUT_MS = 120_000;
 const DOWNLOAD_STREAM_TIMEOUT_MS = 5 * 60_000;
+// File downloads share one FIFO limiter: a transcript full of image
+// references fires one download per component on mount, and that burst trips
+// the server's per-connection in-flight guard (429 "Too many concurrent
+// requests."). Excess downloads queue instead of all hitting the wire.
+const fileDownloadLimiter = createDownloadLimiter();
 // Upper bound for a single wait_command bounded wait; matches the 7-day maximum
 // of schedule_wakeup so any wait the model may declare can be served in one call.
 const MAX_COMMAND_WAIT_MS = 7 * 24 * 60 * 60_000;
@@ -602,30 +608,37 @@ export async function uploadRemoteFile(path, file, url) {
  * @returns {Promise<Blob>}
  */
 export async function downloadRemoteFile(path, url, options = {}) {
-  const conn = connFor(url);
-  const streamId = nextStreamId();
-  const received = conn.receiveStream(streamId);
-  // Callers can abandon a download (catalog deadlines, aborts) before the
-  // stream settles; keep a no-op consumer so a late rejection never becomes
-  // an unhandled rejection while the real race still sees the original.
-  received.catch(() => {});
-  let streamTimer = null;
+  // JSDoc allows a bare AbortSignal; normalize before the limiter sees it.
+  const signal = options instanceof AbortSignal ? options : options?.signal;
+  await fileDownloadLimiter.acquire(signal);
   try {
-    await conn.request('file.download', { path, streamId }, options);
-    const chunks = await Promise.race([
-      received,
-      new Promise((_, reject) => {
-        streamTimer = setTimeout(() => {
-          reject(timeoutError(`Agent file download timed out: ${path}`));
-        }, DOWNLOAD_STREAM_TIMEOUT_MS);
-      }),
-    ]);
-    return new Blob(chunks, { type: 'application/octet-stream' });
-  } catch (error) {
-    conn.cancelStream(streamId, `Download failed: ${path}`);
-    throw error;
+    const conn = connFor(url);
+    const streamId = nextStreamId();
+    const received = conn.receiveStream(streamId);
+    // Callers can abandon a download (catalog deadlines, aborts) before the
+    // stream settles; keep a no-op consumer so a late rejection never becomes
+    // an unhandled rejection while the real race still sees the original.
+    received.catch(() => {});
+    let streamTimer = null;
+    try {
+      await conn.request('file.download', { path, streamId }, options);
+      const chunks = await Promise.race([
+        received,
+        new Promise((_, reject) => {
+          streamTimer = setTimeout(() => {
+            reject(timeoutError(`Agent file download timed out: ${path}`));
+          }, DOWNLOAD_STREAM_TIMEOUT_MS);
+        }),
+      ]);
+      return new Blob(chunks, { type: 'application/octet-stream' });
+    } catch (error) {
+      conn.cancelStream(streamId, `Download failed: ${path}`);
+      throw error;
+    } finally {
+      if (streamTimer) clearTimeout(streamTimer);
+    }
   } finally {
-    if (streamTimer) clearTimeout(streamTimer);
+    fileDownloadLimiter.release();
   }
 }
 
