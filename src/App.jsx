@@ -985,6 +985,7 @@ function App() {
 
     const newSession = {
       id: generateId(),
+      createdAtMs: Date.now(),
       title: 'New Session',
       lastMessage: '',
       ...sessionTimeFields(),
@@ -2383,6 +2384,7 @@ function App() {
         const llmProfileId = currentLlmProfileId || getAgentDefaultLlmId(agentId) || llm.getActiveProfileId();
         const newSession = {
           id: generateId(),
+          createdAtMs: Date.now(),
           title: previewText.slice(0, 30) + (previewText.length > 30 ? '...' : ''),
           lastMessage: previewText,
           ...sessionTimeFields(),
@@ -2670,6 +2672,7 @@ function App() {
 
     const newSession = {
       id: generateId(),
+      createdAtMs: Date.now(),
       title: session.title,
       lastMessage: lastMessage.slice(0, 60),
       ...sessionTimeFields(),

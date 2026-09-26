@@ -4,6 +4,7 @@ import {
   reconcileSessionRecoveryJournal,
   reconcileStoredSessions,
   snapshotSessions,
+  sortSessions,
 } from './sessionRefresh.js';
 
 function session(id, updatedAtMs, content = id) {
@@ -278,4 +279,28 @@ test('a genuinely newer journal for a newly created session is still recovered',
 
   assert.deepEqual(result.sessions, [newerJournal]);
   assert.equal(result.needsPersist, true);
+});
+
+
+test('history sorting switches between update and creation time without mutating sessions', () => {
+  const older = { id: 'older', createdAtMs: 100, updatedAtMs: 400 };
+  const newer = { id: 'newer', createdAtMs: 200, updatedAtMs: 300 };
+  const input = [older, newer];
+  assert.deepEqual(sortSessions(input), [older, newer]);
+  assert.deepEqual(sortSessions(input, 'createdAt'), [newer, older]);
+  assert.deepEqual(input, [older, newer]);
+});
+
+test('creation sorting recovers legacy timestamps from session ids, ignoring later messages', () => {
+  const early = Date.UTC(2026, 0, 1);
+  const late = Date.UTC(2026, 0, 2);
+  const older = {
+    id: `${early.toString(36)}abcdef`,
+    updatedAtMs: late + 200,
+    messages: [{ id: `${(late + 100).toString(36)}abcdef` }],
+  };
+  const newer = { id: `${late.toString(36)}abcdef`, updatedAtMs: late };
+  const unknown = { id: 'legacy' };
+  assert.deepEqual(sortSessions([older, unknown, newer], 'createdAt'), [newer, older, unknown]);
+  assert.deepEqual(sortSessions([], 'createdAt'), []);
 });

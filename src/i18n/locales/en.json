@@ -6,6 +6,10 @@
     "image": "[Image]"
   },
   "session": {
+    "menu": "Session menu",
+    "sort": "Sort",
+    "sortUpdatedAt": "Updated time",
+    "sortCreatedAt": "Created time",
     "newSession": "New Session",
     "deleteSession": "Delete session",
     "exportDebug": "Export chat debug",

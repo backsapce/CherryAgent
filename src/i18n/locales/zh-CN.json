@@ -6,6 +6,10 @@
     "image": "[图片]"
   },
   "session": {
+    "menu": "会话菜单",
+    "sort": "排序",
+    "sortUpdatedAt": "按更新时间",
+    "sortCreatedAt": "按创建时间",
     "newSession": "新会话",
     "deleteSession": "删除会话",
     "exportDebug": "导出聊天调试",

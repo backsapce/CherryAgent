@@ -1755,6 +1755,29 @@ const MessagePanel = forwardRef(({
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
+  const handleComposerPaste = (e) => {
+    if (streaming || inputDisabled) return;
+
+    const clipboard = e.clipboardData;
+    let images = Array.from(clipboard?.files || []).filter(
+      (file) => file.type.startsWith('image/') || imageMimeFromFileName(file.name)
+    );
+    // Some browsers expose clipboard images only through DataTransfer items.
+    if (images.length === 0) {
+      images = Array.from(clipboard?.items || [])
+        .filter((item) => item.kind === 'file' && item.type.startsWith('image/'))
+        .map((item) => item.getAsFile())
+        .filter(Boolean);
+    }
+    if (images.length === 0) return;
+
+    // An image copied from a webpage may also carry its URL or HTML.
+    e.preventDefault();
+    void addImageFiles(images).catch((err) => {
+      console.warn('Failed to attach pasted image:', err);
+    });
+  };
+
   const canDropComposerImage = (dataTransfer) => {
     const types = Array.from(dataTransfer?.types || []);
     return types.includes('Files') || types.includes(FILE_MANAGER_DRAG_TYPE);
@@ -2468,6 +2491,7 @@ const MessagePanel = forwardRef(({
             onFocus={handleInputFocus}
             onPointerUp={handleInputPointerUp}
             onKeyDown={handleKeyDown}
+            onPaste={handleComposerPaste}
             aria-expanded={skillOpen || mentionOpen}
             aria-controls={skillOpen ? 'skill-command-listbox' : undefined}
             aria-activedescendant={skillOpen && skillOptions.length > 0 ? `skill-command-option-${safeSkillActiveIndex}` : undefined}

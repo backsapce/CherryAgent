@@ -6,6 +6,10 @@
     "image": "[画像]"
   },
   "session": {
+    "menu": "セッションメニュー",
+    "sort": "並び替え",
+    "sortUpdatedAt": "更新日時順",
+    "sortCreatedAt": "作成日時順",
     "newSession": "新しいセッション",
     "deleteSession": "セッションを削除",
     "exportDebug": "チャットデバッグをエクスポート",

@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useEffect, useRef, useMemo, useSyncExternalStore } from 'react';
 import { useI18n } from '../../i18n/context';
 import { Plus, X, Menu, ChevronLeft, ChevronRight, Bug, Clock } from '../Icons/Icons';
 import {
@@ -6,7 +6,12 @@ import {
   getNextScheduledWakeup,
   hasScheduledWakeup,
 } from './wakeupCountdown';
+import config from '../../config/config';
+import { sortSessions } from '../../sessionRefresh';
+import SessionSortMenu from './SessionSortMenu';
 import './SessionList.css';
+
+const getSessionSort = () => config.get('general.sessionSortBy') === 'createdAt' ? 'createdAt' : 'updatedAt';
 
 // Breakpoint for mobile/tablet
 const MOBILE_BREAKPOINT = 768;
@@ -84,6 +89,8 @@ const SessionList = ({
   runningSessionIds = new Set(),
 }) => {
   const { t } = useI18n();
+  const sortBy = useSyncExternalStore(config.subscribe, getSessionSort);
+  const sortedSessions = useMemo(() => sortSessions(sessions, sortBy), [sessions, sortBy]);
   const [width, setWidth] = useState(280);
   const [isResizing, setIsResizing] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -198,12 +205,15 @@ const SessionList = ({
         <div className="session-list-inner">
           <div className="session-list-header">
             <h2>{t('app.name')}</h2>
-            <button className="new-session-btn" onClick={handleNewSession} title={t('session.newSession')}>
-              <Plus width={20} height={20} />
-            </button>
+            <div className="session-header-actions">
+              <button className="new-session-btn" onClick={handleNewSession} title={t('session.newSession')}>
+                <Plus width={20} height={20} />
+              </button>
+              <SessionSortMenu sortBy={sortBy} />
+            </div>
           </div>
           <div className="session-list-items">
-            {sessions.map((session) => (
+            {sortedSessions.map((session) => (
               <div
                 key={session.id}
                 className={`session-item ${session.id === activeSessionId ? 'active' : ''}`}

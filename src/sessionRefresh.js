@@ -245,8 +245,13 @@ function sessionsById(sessions) {
   return byId;
 }
 
-export function sortSessions(sessions) {
-  return [...(sessions || [])].sort((a, b) => sessionTimestamp(b) - sessionTimestamp(a));
+export function sortSessions(sessions, sortBy = 'updatedAt') {
+  const timestamp = sortBy === 'createdAt'
+    ? (session) => Number.isFinite(session?.createdAtMs)
+      ? session.createdAtMs
+      : timestampFromGeneratedId(session?.id)
+    : sessionTimestamp;
+  return [...(sessions || [])].sort((a, b) => timestamp(b) - timestamp(a));
 }
 
 /**

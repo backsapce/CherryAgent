@@ -466,3 +466,87 @@
 .session-list-resize-handle.resizing {
   opacity: 0.5;
 }
+
+.session-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.session-menu-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: var(--color-text-secondary);
+  background: transparent;
+  cursor: pointer;
+}
+
+.session-menu-trigger:hover,
+.session-menu-trigger[aria-expanded="true"] {
+  background: var(--color-surface-alt);
+  color: var(--color-text);
+}
+
+.session-sort-menu,
+.session-sort-submenu {
+  box-sizing: border-box;
+  width: 148px;
+  padding: 4px;
+  border: 1px solid var(--color-border);
+  border-radius: 9px;
+  background: var(--color-surface-raised);
+  box-shadow: 0 8px 24px var(--color-shadow-soft);
+}
+
+.session-sort-menu {
+  position: fixed;
+  z-index: 1100;
+}
+
+.session-sort-submenu {
+  position: absolute;
+  top: -1px;
+  left: 100%;
+  width: 164px;
+}
+
+.session-sort-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--color-text);
+  font: inherit;
+  font-size: 13px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.session-sort-item:hover,
+.session-sort-item:focus-visible {
+  background: var(--color-surface-alt);
+}
+
+.session-menu-trigger:focus-visible,
+.session-sort-item:focus-visible {
+  outline: 2px solid var(--color-border-focus);
+  outline-offset: -2px;
+}
+
+.session-sort-check {
+  display: flex;
+  width: 14px;
+  color: var(--color-accent-strong);
+}
