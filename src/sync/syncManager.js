@@ -78,6 +78,11 @@ let autoSyncSuspendDepth = 0;
 let autoRunInProgress = false;
 let activeAutoCompletion = null;
 let stateWriteQueue = Promise.resolve();
+// Progress updates arrive per file, so notify at a coarse cadence instead of
+// once per completion; React re-renders on every notification.
+let progressNotifyIntervalMs = 100;
+let progressNotifyTimerId = null;
+let activeProgress = null;
 const statusListeners = new Set();
 const backendNamespaceCache = new Map();
 const structuredBaseLegacyNamespaces = new Map();
@@ -99,6 +104,7 @@ export function getSyncStatus() {
   return {
     syncing: Boolean(activeRun || autoRunInProgress),
     queued: pendingAutoSync,
+    progress: activeProgress ? { ...activeProgress } : null,
   };
 }
 
@@ -107,6 +113,41 @@ function notifySyncStatus() {
   for (const listener of statusListeners) {
     try { listener(status); } catch (err) { console.warn('Sync status listener failed:', err); }
   }
+}
+
+/**
+ * Report run progress. `phase` is one of connect/scan/pull/push/commit; a null
+ * `total` (or `totalBytes`) marks the phase indeterminate. The notification is
+ * trailing-edge throttled and always reads the freshest state when it fires.
+ */
+function setSyncProgress(progress) {
+  activeProgress = progress ? { ...progress } : null;
+  if (!activeProgress) {
+    notifySyncStatus();
+    return;
+  }
+  if (progressNotifyTimerId != null) return;
+  progressNotifyTimerId = setTimeout(() => {
+    progressNotifyTimerId = null;
+    notifySyncStatus();
+  }, progressNotifyIntervalMs);
+}
+
+function clearSyncProgress() {
+  if (progressNotifyTimerId != null) {
+    clearTimeout(progressNotifyTimerId);
+    progressNotifyTimerId = null;
+  }
+  if (!activeProgress) return;
+  activeProgress = null;
+  notifySyncStatus();
+}
+
+function setProgressNotifyIntervalForTests(ms) {
+  progressNotifyIntervalMs = Math.max(0, Number(ms) || 0);
+  return () => {
+    progressNotifyIntervalMs = 100;
+  };
 }
 
 export function subscribeSyncStatus(listener) {
@@ -1218,20 +1259,27 @@ function canReuseLocalHash(entry, previous) {
   );
 }
 
-async function localFileMap(state = { files: {} }, syncConfig = {}) {
+async function localFileMap(state = { files: {} }, syncConfig = {}, onProgress = null) {
   const entries = await listOpfsFiles({ hash: false, includeBlob: true });
   const oversized = entries.find((entry) => Number(entry.size) > MAX_REMOTE_PAYLOAD_BYTES);
   if (oversized) {
     throw new Error(`Sync file exceeds the 512 MiB safety limit: ${oversized.path}`);
   }
+  const totalBytes = entries.reduce((sum, entry) => sum + (Number(entry.size) || 0), 0);
+  let done = 0;
+  let doneBytes = 0;
   const hydrated = await mapWithConcurrency(entries, async (entry) => {
     const previous = state.files?.[entry.path];
-    return {
+    const result = {
       ...entry,
       hash: canReuseLocalHash(entry, previous)
         ? (previous.cachedHash || previous.hash)
         : await hashBlob(entry.blob),
     };
+    done += 1;
+    doneBytes += Number(entry.size) || 0;
+    onProgress?.(done, entries.length, doneBytes, totalBytes);
+    return result;
   }, maxConcurrentRequestsForEntries(syncConfig, entries));
   return new Map(hydrated.map((entry) => [entry.path, entry]));
 }
@@ -3465,10 +3513,16 @@ function preferLocalPathNamespaces(manifestFiles, stateFiles, local) {
 
 async function pullInternal(syncConfig, runtime = {}) {
   const backend = runtime.backend || syncBackendFactory(syncConfig);
+  setSyncProgress({ phase: 'connect', done: 0, total: null });
   const state = runtime.state || await loadState(syncConfig);
   const remote = runtime.remote || await loadRemoteManifest(backend, syncConfig, state);
   const manifest = remote.manifest;
-  const local = runtime.local || await localFileMap(state, syncConfig);
+  setSyncProgress({ phase: 'scan', done: 0, total: null });
+  const local = runtime.local || await localFileMap(
+    state,
+    syncConfig,
+    (done, total, doneBytes, totalBytes) => setSyncProgress({ phase: 'scan', done, total, doneBytes, totalBytes })
+  );
   const payloadReadCache = runtime.payloadReadCache || new Map();
   runtime.payloadReadCache = payloadReadCache;
   const rawConflictPaths = runtime.rawConflictPaths || new Set();
@@ -3774,9 +3828,25 @@ async function pullInternal(syncConfig, runtime = {}) {
     transferTasks.push(transfer);
   }
 
+  const totalPullBytes = transferTasks.reduce((sum, transfer) => sum + (Number(transfer.size) || 0), 0);
+  let pulledCount = 0;
+  let pulledBytes = 0;
+  setSyncProgress({ phase: 'pull', done: 0, total: transferTasks.length, doneBytes: 0, totalBytes: totalPullBytes });
   const transferResults = await mapWithConcurrency(
     transferTasks,
-    (transfer) => transfer(),
+    async (transfer) => {
+      const result = await transfer();
+      pulledCount += 1;
+      pulledBytes += Number(transfer.size) || 0;
+      setSyncProgress({
+        phase: 'pull',
+        done: pulledCount,
+        total: transferTasks.length,
+        doneBytes: pulledBytes,
+        totalBytes: totalPullBytes,
+      });
+      return result;
+    },
     maxConcurrentRequestsForEntries(syncConfig, transferTasks)
   );
   for (const { path, entry, result, localEntry } of transferResults) {
@@ -3819,10 +3889,16 @@ async function pullInternal(syncConfig, runtime = {}) {
 
 async function pushInternal(syncConfig, runtime = {}) {
   const backend = runtime.backend || syncBackendFactory(syncConfig);
+  setSyncProgress({ phase: 'connect', done: 0, total: null });
   const state = runtime.state || await loadState(syncConfig);
   const remote = runtime.remote || await loadRemoteManifest(backend, syncConfig, state);
   const manifest = remote.manifest;
-  const local = runtime.local || await localFileMap(state, syncConfig);
+  setSyncProgress({ phase: 'scan', done: 0, total: null });
+  const local = runtime.local || await localFileMap(
+    state,
+    syncConfig,
+    (done, total, doneBytes, totalBytes) => setSyncProgress({ phase: 'scan', done, total, doneBytes, totalBytes })
+  );
   if (
     !state.authorityMarkerVerified
     && (remote.mode === 'sharded' ? remote.hasCausalAuthority : remote.exists)
@@ -3985,7 +4061,12 @@ async function pushInternal(syncConfig, runtime = {}) {
   const deletedAgentIds = collectDeletedAgentIds(state.files);
 
   const localEntries = [...local];
-  await mapWithConcurrency(localEntries, async ([path, entry]) => {
+  const localEntrySizes = localEntries.map(([path, entry]) => ({ size: localTransferSize(path, entry) }));
+  const totalPushBytes = localEntrySizes.reduce((sum, item) => sum + (Number(item.size) || 0), 0);
+  let pushedCount = 0;
+  let pushedBytes = 0;
+  setSyncProgress({ phase: 'push', done: 0, total: localEntries.length, doneBytes: 0, totalBytes: totalPushBytes });
+  const processLocalEntry = async ([path, entry]) => {
     if (Number(entry.size) > MAX_REMOTE_PAYLOAD_BYTES) {
       throw new Error(`Sync file exceeds the 512 MiB safety limit: ${path}`);
     }
@@ -4372,10 +4453,26 @@ async function pushInternal(syncConfig, runtime = {}) {
       deleted: false,
       remoteDeleted: false,
     };
-  }, maxConcurrentRequestsForEntries(
-    syncConfig,
-    localEntries.map(([path, entry]) => ({ size: localTransferSize(path, entry) }))
-  ));
+  };
+  await mapWithConcurrency(localEntries, async (entry, index) => {
+    try {
+      return await processLocalEntry(entry);
+    } finally {
+      pushedCount += 1;
+      pushedBytes += Number(localEntrySizes[index]?.size) || 0;
+      setSyncProgress({
+        phase: 'push',
+        done: pushedCount,
+        total: localEntries.length,
+        doneBytes: pushedBytes,
+        totalBytes: totalPushBytes,
+      });
+    }
+  }, maxConcurrentRequestsForEntries(syncConfig, localEntrySizes));
+
+  // Manifest CAS, authority probes, and shard cleanup all ride the network
+  // after the payload work; expose them as one trailing phase.
+  setSyncProgress({ phase: 'commit', done: 0, total: null });
 
   // A restored child can clear a remote parent tombstone while sibling local
   // tombstones still depend on it. Re-publish those now-uncovered siblings.
@@ -4480,6 +4577,7 @@ async function runExclusive(fn) {
   const tracked = operation.finally(() => {
     if (activeRun !== tracked) return;
     activeRun = null;
+    clearSyncProgress();
     notifySyncStatus();
     schedulePendingAutoSyncRun();
   });
@@ -4793,10 +4891,11 @@ export const __syncInternals = {
   remoteEntryChanged,
   restoredPathCandidates,
   restoreLocalChangedPathsOverDeletedAncestors,
-  stripLocalOnlyConfig,
-  stateAfterAppliedRemote,
-  structuredBasePath,
+  setProgressNotifyIntervalForTests,
   setSyncBackendFactoryForTests,
+  stateAfterAppliedRemote,
+  stripLocalOnlyConfig,
+  structuredBasePath,
   syncBackendIdentity,
   validateRemoteManifest,
   yjsPath,

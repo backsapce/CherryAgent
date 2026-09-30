@@ -10,14 +10,17 @@ import {
 import config from '../../config/config';
 import {
   cancelPendingAutoSync,
+  getSyncStatus,
   pullSync,
   pushSync,
+  subscribeSyncStatus,
   suspendAutoSync,
   syncNow,
   syncResultChangedLocal,
   testSyncConnection,
   waitForSyncIdle,
 } from '../../sync/syncManager';
+import { syncProgressDetail, syncProgressPercent } from '../../sync/progress';
 import {
   normalizeProviderPreset,
   pathStyleForProviderPreset,
@@ -246,6 +249,7 @@ const Settings = ({
   });
   const [syncBusy, setSyncBusy] = useState(null);
   const [syncMessage, setSyncMessage] = useState(null);
+  const [syncStatus, setSyncStatus] = useState(() => getSyncStatus());
   const [storagePersistence, setStoragePersistence] = useState(null);
   const [storagePersistenceBusy, setStoragePersistenceBusy] = useState(false);
 
@@ -494,6 +498,8 @@ const Settings = ({
     setSyncMessage(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [show]);
+
+  useEffect(() => subscribeSyncStatus(setSyncStatus), []);
 
   useEffect(() => {
     if (!show || settingsTab !== 'sync') return undefined;
@@ -2166,6 +2172,25 @@ const Settings = ({
                   {syncBusy === 'sync' ? t('syncSettings.working') : t('syncSettings.syncNow')}
                 </button>
               </div>
+
+              {(syncBusy || syncStatus.syncing || syncStatus.queued) && (
+                <div className="sync-progress" role="status" aria-label={t('syncSettings.working')}>
+                  <div
+                    className="sync-progress-track"
+                    data-indeterminate={syncProgressPercent(syncStatus.progress) == null ? 'true' : undefined}
+                  >
+                    <div
+                      className="sync-progress-fill"
+                      style={{ width: `${syncProgressPercent(syncStatus.progress) ?? 100}%` }}
+                    />
+                  </div>
+                  <span className="sync-progress-text">
+                    {syncStatus.queued && !syncStatus.syncing
+                      ? t('syncSettings.progressQueued')
+                      : (syncProgressDetail(syncStatus.progress, t) || t('syncSettings.working'))}
+                  </span>
+                </div>
+              )}
 
               <div className="settings-actions">
                 <button className="settings-cancel" onClick={onClose}>{t('settings.cancel')}</button>

@@ -16,6 +16,7 @@ import {
   __syncInternals,
   pullSync,
   pushSync,
+  subscribeSyncStatus,
   syncNow,
   testSyncConnection,
 } from './syncManager.js';
@@ -509,6 +510,77 @@ test('a manual push queues behind an active pull instead of aliasing its result'
     assert.ok(backend.json(manifestKey).files['files/queued.md']);
   } finally {
     releaseManifestRead?.();
+    restoreBackend();
+  }
+});
+
+test('a sync run reports file-scoped progress and clears it when idle', async () => {
+  // Every backend op yields one macrotask so the 0 ms progress-notify timers
+  // get an observation window inside each phase instead of being starved by
+  // the memory OPFS's pure-microtask promise chains.
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 1));
+  class YieldingBackend extends MemoryBackend {
+    async getJsonWithMetadata(...args) { await tick(); return super.getJsonWithMetadata(...args); }
+    async putJson(...args) { await tick(); return super.putJson(...args); }
+    async getBytes(...args) { await tick(); return super.getBytes(...args); }
+    async putBytes(...args) { await tick(); return super.putBytes(...args); }
+    async list(...args) { await tick(); return super.list(...args); }
+    async delete(...args) { await tick(); return super.delete(...args); }
+  }
+  useMemoryOpfs();
+  const backend = new YieldingBackend();
+  const restoreBackend = installBackend(backend);
+  const restoreInterval = __syncInternals.setProgressNotifyIntervalForTests(0);
+  // Serial transfers guarantee the per-item progress increments land inside an
+  // observable window instead of being coalesced away by parallel completion.
+  const serialSyncConfig = { ...SYNC_CONFIG, maxConcurrentRequests: 1 };
+  try {
+    await writePathText('files/a.md', 'a', { internal: true });
+    await writePathText('files/b.md', 'b', { internal: true });
+    await writePathText('files/c.md', 'c', { internal: true });
+
+    const notifications = [];
+    const unsubscribe = subscribeSyncStatus((status) => notifications.push(status));
+    try {
+      await syncNow(serialSyncConfig);
+      // Simulate a second device with an empty local tree: the next run has
+      // real download work, so the pull phase carries a file count.
+      useMemoryOpfs();
+      await syncNow(serialSyncConfig);
+    } finally {
+      unsubscribe();
+    }
+
+    const phases = notifications
+      .map((status) => status.progress?.phase)
+      .filter(Boolean);
+    assert.ok(phases.includes('scan'), 'scan phase reported');
+    assert.ok(phases.includes('pull'), 'pull phase reported');
+    assert.ok(phases.includes('push'), 'push phase reported');
+    assert.ok(phases.includes('commit'), 'commit phase reported');
+
+    const progressOf = (phase) => notifications
+      .map((status) => status.progress)
+      .filter((progress) => progress?.phase === phase);
+
+    // Intermediate values inside a phase are coalesced by the notify throttle,
+    // so phase presence, per-phase totals, and the idle reset are the stable
+    // contract this test pins down.
+    const scanProgress = progressOf('scan');
+    assert.ok(scanProgress.length >= 1);
+
+    const pullProgress = progressOf('pull');
+    assert.equal(Math.max(...pullProgress.map((progress) => progress.total)), 3);
+
+    const pushProgress = progressOf('push');
+    assert.equal(Math.max(...pushProgress.map((progress) => progress.total)), 3);
+
+    const last = notifications.at(-1);
+    assert.equal(last.syncing, false);
+    assert.equal(last.queued, false);
+    assert.equal(last.progress, null);
+  } finally {
+    restoreInterval();
     restoreBackend();
   }
 });

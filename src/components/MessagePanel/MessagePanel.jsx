@@ -9,6 +9,7 @@ import {
   SHOW_HIDDEN_FILES_CONFIG_PATH,
 } from '../../config/fileVisibility';
 import { getSyncStatus, subscribeSyncStatus } from '../../sync/syncManager';
+import { syncProgressDetail, syncProgressLabel } from '../../sync/progress';
 import { FILE_MANAGER_DRAG_TYPE, readFileManagerDragItem } from '../FileManage/fileDrag';
 import { imageMimeFromFileName } from '../FileManage/imagePreviewUtils';
 import { loadDroppedImage } from './droppedImage';
@@ -1355,6 +1356,10 @@ const MessagePanel = forwardRef(({
   const selectedLlmModelLabel = selectedLlmProfile?.model || selectedLlmProfile?.name || '';
   const showCenteredInput = !activeSessionId || messages.length === 0;
   const showSyncIndicator = syncStatus.syncing || syncStatus.queued;
+  const syncIndicatorLabel = syncStatus.queued && !syncStatus.syncing
+    ? t('syncSettings.progressQueued')
+    : (syncProgressLabel(syncStatus.progress, t) || t('syncSettings.working'));
+  const syncIndicatorDetail = syncProgressDetail(syncStatus.progress, t) || t('syncSettings.working');
   const activeSandbox = useMemo(
     () => (agents || []).find((agent) => agent.url === selectedAgentUrl && agent.status === 'connected') || null,
     [agents, selectedAgentUrl]
@@ -2202,8 +2207,9 @@ const MessagePanel = forwardRef(({
       {/* Header bar with settings and file manager */}
       <div className="message-panel-header">
         {showSyncIndicator && (
-          <div className="sync-status-indicator" role="status" aria-label={t('syncSettings.working')} title={t('syncSettings.working')}>
-            <Refresh width={18} height={18} aria-hidden="true" />
+          <div className="sync-status-indicator" role="status" aria-label={syncIndicatorDetail} title={syncIndicatorDetail}>
+            <Refresh width={14} height={14} aria-hidden="true" />
+            <span className="sync-status-label">{syncIndicatorLabel}</span>
           </div>
         )}
 
