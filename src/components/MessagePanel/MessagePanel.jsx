@@ -1,5 +1,5 @@
 import ReasoningSelect from '../Settings/ReasoningSelect';
-import { forwardRef, lazy, Suspense, useImperativeHandle, useState, useRef, useEffect, useLayoutEffect, useMemo } from 'react';
+import { memo, forwardRef, lazy, Suspense, useImperativeHandle, useState, useRef, useEffect, useLayoutEffect, useMemo } from 'react';
 import { useI18n } from '../../i18n/context';
 import { getAgentDir, getFileBlob, normalizeWorkspaceRelativePath, readAgentFileBlob } from '../../vfs/opfs';
 import { downloadE2bFile, downloadFile, downloadRemoteFile, E2B_AGENT_ID, listFiles, readFileText } from '../../models/agent';
@@ -42,12 +42,19 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
 import rehypeSanitize from 'rehype-sanitize';
-import { Terminal } from '@xterm/xterm';
-import { FitAddon } from '@xterm/addon-fit';
-import '@xterm/xterm/css/xterm.css';
 import './MessagePanel.css';
 
 const Settings = lazy(() => import('../Settings/Settings'));
+const LazyToolTerminal = lazy(() => import('./ToolTerminal'));
+
+function ToolTerminal({ output }) {
+  return (
+    <Suspense fallback={<pre>{output}</pre>}>
+      <LazyToolTerminal output={output} />
+    </Suspense>
+  );
+}
+
 
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024; // 4 MB target (well under 10 MB API limit)
 const MAX_DIMENSION = 2048;
@@ -89,7 +96,7 @@ const MARKDOWN_REHYPE_PLUGINS = [
 ];
 // Live streaming renders additionally wrap words for the blur-in reveal; the
 // word-splitting plugin must run after sanitize so its spans survive as-is.
-const MARKDOWN_REHYPE_STREAMING_PLUGINS = [...MARKDOWN_REHYPE_PLUGINS, rehypeStreamWords];
+const MARKDOWN_REHYPE_STREAMING_PLUGINS = [rehypeSanitize, rehypeStreamWords];
 const MARKDOWN_COMPONENTS = {
   pre: CodeBlock,
   img: BlockedMarkdownImage,
@@ -122,6 +129,27 @@ function cacheSet(cache, key, value) {
 }
 
 function renderMarkdownElement(content, { streamBlur = false } = {}) {
+  if (streamBlur) return <StreamingMarkdown content={content} />;
+  return renderMarkdown(content);
+}
+
+const StreamingMarkdown = memo(function StreamingMarkdown({ content }) {
+  const [displayed, setDisplayed] = useState(content);
+  const latest = useRef(content);
+  const timer = useRef(null);
+  useLayoutEffect(() => { latest.current = content; }, [content]);
+  useEffect(() => {
+    if (timer.current !== null || content === displayed) return;
+    timer.current = setTimeout(() => {
+      timer.current = null;
+      setDisplayed(latest.current);
+    }, 120);
+  }, [content, displayed]);
+  useEffect(() => () => clearTimeout(timer.current), []);
+  return useMemo(() => renderMarkdown(displayed, true), [displayed]);
+});
+
+function renderMarkdown(content, streamBlur = false) {
   return (
     <ReactMarkdown
       remarkPlugins={MARKDOWN_REMARK_PLUGINS}
@@ -565,91 +593,6 @@ const ThinkingBlock = ({ thinking, isThinking, startedAt, finishedAt }) => {
   );
 };
 
-const normalizeTerminalOutput = (value) => String(value || '').replace(/\r?\n/g, '\r\n');
-
-function fitAndScrollTerminal(terminal, fitAddon) {
-  if (!terminal?.element || !fitAddon) return;
-  try {
-    fitAddon.fit();
-    if (terminal.cols > 0 && terminal.rows > 0) {
-      terminal.scrollToBottom();
-    }
-  } catch {
-    // xterm can briefly lack renderer dimensions while mounting or resizing.
-  }
-}
-
-const ToolTerminal = ({ output }) => {
-  const containerRef = useRef(null);
-  const terminalRef = useRef(null);
-  const fitAddonRef = useRef(null);
-  const previousOutputRef = useRef('');
-
-  useEffect(() => {
-    if (!containerRef.current) return;
-
-    const style = getComputedStyle(containerRef.current);
-    const terminal = new Terminal({
-      convertEol: true,
-      cursorBlink: false,
-      cursorInactiveStyle: 'none',
-      disableStdin: true,
-      fontFamily: "'SF Mono', 'Fira Code', ui-monospace, monospace",
-      fontSize: 12,
-      lineHeight: 1.45,
-      scrollback: 5000,
-      theme: {
-        background: style.getPropertyValue('--color-bg').trim() || '#0f172a',
-        foreground: style.getPropertyValue('--color-text-content').trim() || '#e5e7eb',
-        cursor: style.getPropertyValue('--color-text-content').trim() || '#e5e7eb',
-        selectionBackground: style.getPropertyValue('--color-accent').trim() || '#a79fdf',
-      },
-    });
-    const fitAddon = new FitAddon();
-    terminal.loadAddon(fitAddon);
-    terminal.open(containerRef.current);
-    fitAddon.fit();
-
-    terminalRef.current = terminal;
-    fitAddonRef.current = fitAddon;
-    previousOutputRef.current = '';
-
-    const resizeObserver = new ResizeObserver(() => {
-      requestAnimationFrame(() => {
-        fitAndScrollTerminal(terminalRef.current, fitAddonRef.current);
-      });
-    });
-    resizeObserver.observe(containerRef.current);
-
-    return () => {
-      resizeObserver.disconnect();
-      terminal.dispose();
-      terminalRef.current = null;
-      fitAddonRef.current = null;
-      previousOutputRef.current = '';
-    };
-  }, []);
-
-  useEffect(() => {
-    const terminal = terminalRef.current;
-    if (!terminal) return;
-    const nextOutput = String(output || '');
-    const previousOutput = previousOutputRef.current;
-    if (nextOutput.startsWith(previousOutput)) {
-      terminal.write(normalizeTerminalOutput(nextOutput.slice(previousOutput.length)));
-    } else {
-      terminal.reset();
-      terminal.write(normalizeTerminalOutput(nextOutput));
-    }
-    previousOutputRef.current = nextOutput;
-    requestAnimationFrame(() => {
-      fitAndScrollTerminal(terminal, fitAddonRef.current);
-    });
-  }, [output]);
-
-  return <div className="tool-terminal" ref={containerRef} />;
-};
-
 const OldExecuteTerminalOutput = ({ result }) => {
   let output = '';
   if (result?.stdout) output += result.stdout;
@@ -938,11 +881,6 @@ const ToolBlock = ({ toolCall, onStopStreaming, agentId, sandboxUrl }) => {
           </button>
         )}
       </div>
-      {imageReference && (
-        <div className="tool-image-artifact">
-          <ToolImageReference reference={imageReference} agentId={agentId} sandboxUrl={sandboxUrl} />
-        </div>
-      )}
       {effectiveExpanded && (detailOutput || (renderTerminal && ['pending', 'running'].includes(status))) && (
         <div className={`tool-output ${renderTerminal ? 'terminal-output' : ''}`}>
           {renderTerminal ? <ToolTerminal output={executeTerminalOutput(toolCall)} /> : <pre>{detailOutput}</pre>}
@@ -997,12 +935,14 @@ const ImageGenerationStatus = () => {
 };
 
 const AssistantTranscript = ({ transcript, toolCalls, streaming, onStopStreaming, agentId, sandboxUrl }) => {
+  const toolsById = useMemo(() => new Map((toolCalls || []).map((tool) => [tool.id, tool])), [toolCalls]);
+
   const renderSegment = (segment) => {
     // Only the still-growing segment animates its fresh words in; finished
     // segments render the plain plugin set.
-    const rehypePlugins = streaming && segment.status !== 'finished'
-      ? MARKDOWN_REHYPE_STREAMING_PLUGINS
-      : MARKDOWN_REHYPE_PLUGINS;
+    const renderContent = (content) => streaming && segment.status !== 'finished'
+      ? renderMarkdownElement(content, { streamBlur: true })
+      : cachedMarkdown(content);
     if (segment.type === 'reasoning') {
       const parsedReasoning = splitTaggedReasoningContent(segment.content);
       return (
@@ -1015,20 +955,14 @@ const AssistantTranscript = ({ transcript, toolCalls, streaming, onStopStreaming
           />
           {parsedReasoning.text && (
             <div className="message-text transcript-text">
-              <ReactMarkdown
-                remarkPlugins={MARKDOWN_REMARK_PLUGINS}
-                rehypePlugins={rehypePlugins}
-                components={MARKDOWN_COMPONENTS}
-              >
-                {parsedReasoning.text}
-              </ReactMarkdown>
+              {renderContent(parsedReasoning.text)}
             </div>
           )}
         </div>
       );
     }
     if (segment.type === 'tool') {
-      const toolCall = toolCalls?.find((item) => item.id === segment.toolCallId);
+      const toolCall = toolsById.get(segment.toolCallId);
       return toolCall ? (
         <div className="transcript-tool-segment" key={segment.id}>
           <ToolBlock
@@ -1039,13 +973,7 @@ const AssistantTranscript = ({ transcript, toolCalls, streaming, onStopStreaming
           />
           {segment.content && (
             <div className="message-text transcript-text">
-              <ReactMarkdown
-                remarkPlugins={MARKDOWN_REMARK_PLUGINS}
-                rehypePlugins={rehypePlugins}
-                components={MARKDOWN_COMPONENTS}
-              >
-                {segment.content}
-              </ReactMarkdown>
+              {renderContent(segment.content)}
             </div>
           )}
         </div>
@@ -1054,13 +982,7 @@ const AssistantTranscript = ({ transcript, toolCalls, streaming, onStopStreaming
     if (segment.type === 'text' && segment.content) {
       return (
         <div className="message-text transcript-text" key={segment.id}>
-          <ReactMarkdown
-            remarkPlugins={MARKDOWN_REMARK_PLUGINS}
-            rehypePlugins={rehypePlugins}
-            components={MARKDOWN_COMPONENTS}
-          >
-            {segment.content}
-          </ReactMarkdown>
+          {renderContent(segment.content)}
         </div>
       );
     }
@@ -1079,7 +1001,7 @@ const AssistantTranscript = ({ transcript, toolCalls, streaming, onStopStreaming
   };
   for (const segment of transcript) {
     if (segment.type === 'tool' && !segment.content) {
-      const toolCall = toolCalls?.find((item) => item.id === segment.toolCallId);
+      const toolCall = toolsById.get(segment.toolCallId);
       const reference = toolCall ? parseImageReference(toolCall) : null;
       if (reference) {
         imageEntries.push({ toolCall, reference });
@@ -1101,6 +1023,200 @@ const AssistantTranscript = ({ transcript, toolCalls, streaming, onStopStreaming
     </div>
   );
 };
+
+const MessageRow = memo(function MessageRow({
+  msg,
+  previousMessage,
+  isLastMessage,
+  streaming,
+  avatar,
+  userInitial,
+  assistantInitial,
+  userName,
+  assistantName,
+  agentId,
+  selectedAgentUrl,
+  editingMessageId,
+  editingText,
+  copiedMessageId,
+  handleEditTextChange,
+  handleEditKeyDown,
+  cancelEditMessage,
+  submitEditMessage,
+  startEditMessage,
+  handleCopyMessage,
+  onForkMessage,
+  onRetry,
+  onStopStreaming,
+}) {
+  const { t } = useI18n();
+  const isLiveStreamingMessage = streaming && isLastMessage;
+  const isLatestAssistant = msg.role === 'assistant' && isLastMessage;
+  const showImageGenerationStatus = isLatestAssistant
+    && streaming
+    && !msg.content
+    && !msg.thinking
+    && (
+      msg.toolCalls?.some((tc) => isImageGenerationToolName(tc.name))
+      || isImageGenerationPrompt(previousMessage?.role === 'user' ? previousMessage.content : '')
+    );
+  const hasTranscript = msg.role === 'assistant' && hasRenderableTranscript(
+    msg.transcript,
+    msg.toolCalls,
+    isLiveStreamingMessage
+  );
+  const displayContent = isLiveStreamingMessage || msg.contextFiles?.length
+    ? stripLegacyContextFileSummary(msg.content, msg.contextFiles)
+    : cachedStripLegacyContent(msg.content);
+
+  return (
+  <div key={msg.id} data-message-id={msg.id} className={`message ${msg.role}`}>
+    <div className="message-avatar">
+      {msg.role === 'assistant' && avatar ? (
+        <img src={avatar} alt="" />
+      ) : (
+        msg.role === 'user' ? userInitial : assistantInitial
+      )}
+    </div>
+    <div className="message-content">
+      <div className="message-role">
+        <span>{msg.role === 'user' ? userName : assistantName}</span>
+      </div>
+      {msg.role === 'assistant' && !hasTranscript && !showImageGenerationStatus && (msg.thinking || (streaming && msg.content === '')) && (
+        <ThinkingBlock
+          thinking={msg.thinking}
+          isThinking={isLiveStreamingMessage}
+          startedAt={msg.runStartedAt}
+          finishedAt={msg.runFinishedAt}
+        />
+      )}
+      {showImageGenerationStatus && <ImageGenerationStatus />}
+      {msg.contextFiles?.length > 0 && (
+        <div className="message-file-attachments">
+          {msg.contextFiles.map((file) => (
+            <FileAttachmentCard key={contextFileKey(file)} file={file} />
+          ))}
+        </div>
+      )}
+      {msg.images && msg.images.length > 0 && (
+        <div className="message-images">
+          {msg.images.map((img, i) => (
+            <button key={i} className="message-image-trigger" type="button" data-history-image-trigger title={t('filemanage.preview')}>
+              <img src={img.dataUrl} alt={img.name || t('message.uploaded')} className="message-image" data-history-image data-download-name={img.name || ''} />
+            </button>
+          ))}
+        </div>
+      )}
+      {hasTranscript && (
+        <AssistantTranscript
+          transcript={msg.transcript}
+          toolCalls={msg.toolCalls}
+          streaming={isLiveStreamingMessage}
+          onStopStreaming={onStopStreaming}
+          agentId={agentId}
+          sandboxUrl={selectedAgentUrl}
+        />
+      )}
+      {msg.role === 'assistant' && !hasTranscript && msg.toolCalls?.length > 0 && (
+        <ToolCallList
+          toolCalls={msg.toolCalls}
+          onStopStreaming={onStopStreaming}
+          agentId={agentId}
+          sandboxUrl={selectedAgentUrl}
+        />
+      )}
+      <div className="message-text">
+        {editingMessageId === msg.id ? (
+          <div className="message-edit-form">
+            <textarea
+              className="message-edit-input"
+              value={editingText}
+              onChange={handleEditTextChange}
+              onKeyDown={handleEditKeyDown}
+              autoFocus
+              rows={Math.min(editingText.split('\n').length || 1, 6)}
+            />
+            <div className="message-edit-actions">
+              <button type="button" className="message-edit-cancel" onClick={cancelEditMessage}>
+                {t('message.cancel')}
+              </button>
+              <button
+                type="button"
+                className="message-edit-submit"
+                onClick={submitEditMessage}
+                disabled={!editingText.trim() || streaming}
+              >
+                {t('message.submitEdit')}
+              </button>
+            </div>
+          </div>
+        ) : (
+          !hasTranscript && <>
+            {isLiveStreamingMessage
+              ? renderMarkdownElement(displayContent, { streamBlur: true })
+              : cachedMarkdown(displayContent)}
+            {msg.role === 'assistant' && displayContent.startsWith('Error:') && !streaming && onRetry && (
+              <button className="retry-btn" onClick={() => onRetry()} title={t('message.retry')}>Retry</button>
+            )}
+          </>
+        )}
+      </div>
+      {displayContent && editingMessageId !== msg.id && (
+        <div className="message-actions">
+          {msg.role === 'user' && (
+            <button
+              type="button"
+              className="message-action-btn message-edit-btn"
+              onClick={() => startEditMessage(msg)}
+              disabled={streaming}
+              title={t('message.edit')}
+              aria-label={t('message.edit')}
+            >
+              <FileEdit width={14} height={14} />
+            </button>
+          )}
+          {msg.role === 'assistant' && msg.usage && (
+            <MessageUsageStats usage={msg.usage} />
+          )}
+          {onForkMessage && (
+            <button
+              type="button"
+              className="message-action-btn message-fork-btn"
+              onClick={() => onForkMessage(msg.id)}
+              disabled={streaming}
+              title={t('message.fork')}
+              aria-label={t('message.fork')}
+            >
+              <GitFork width={14} height={14} />
+            </button>
+          )}
+          <button
+            type="button"
+            className={`message-action-btn message-copy-btn${copiedMessageId === msg.id ? ' copied' : ''}`}
+            onClick={() => handleCopyMessage(msg)}
+            disabled={!displayContent}
+            title={copiedMessageId === msg.id ? t('message.copied') : t('message.copy')}
+            aria-label={copiedMessageId === msg.id ? t('message.copied') : t('message.copy')}
+          >
+            <Copy width={14} height={14} />
+          </button>
+        </div>
+      )}
+    </div>
+  </div>
+  );
+
+});
+
+const ROW_ACTION_NAMES = ['handleEditTextChange', 'handleEditKeyDown', 'cancelEditMessage', 'submitEditMessage', 'startEditMessage', 'handleCopyMessage', 'onForkMessage', 'onRetry', 'onStopStreaming'];
+
+function useRowActions(actions) {
+  const current = useRef(actions);
+  useLayoutEffect(() => { current.current = actions; });
+  return useMemo(() => Object.fromEntries(ROW_ACTION_NAMES.map((name) => [
+    name, (...args) => current.current[name]?.(...args),
+  ])), []);
+}
 
 const MessagePanel = forwardRef(({
   messages,
@@ -2042,6 +2158,8 @@ const MessagePanel = forwardRef(({
   const currentHistoryImage = activeHistoryImagePreview?.images[activeHistoryImagePreview.index];
 
 
+  const rowActions = useRowActions({ handleEditTextChange, handleEditKeyDown, cancelEditMessage, submitEditMessage, startEditMessage, handleCopyMessage, onForkMessage, onRetry, onStopStreaming });
+
   return (
     <div className={`message-panel${showCenteredInput ? ' empty-input-state' : ''}`}>
       {showSettings && (
@@ -2165,164 +2283,34 @@ const MessagePanel = forwardRef(({
           {hasHiddenMessages && (
             <div className="message-history-marker" aria-hidden="true" />
           )}
-          {visibleMessages.map((msg, index) => {
-            const previousMessage = visibleMessages[index - 1];
-            const isLiveStreamingMessage = streaming && msg === messages[messages.length - 1];
-            const isLatestAssistant = msg.role === 'assistant' && msg === messages[messages.length - 1];
-            const showImageGenerationStatus = isLatestAssistant
-              && streaming
-              && !msg.content
-              && !msg.thinking
-              && (
-                msg.toolCalls?.some((tc) => isImageGenerationToolName(tc.name))
-                || isImageGenerationPrompt(previousMessage?.role === 'user' ? previousMessage.content : '')
-              );
-            const hasTranscript = msg.role === 'assistant' && hasRenderableTranscript(
-              msg.transcript,
-              msg.toolCalls,
-              isLiveStreamingMessage
-            );
-            const displayContent = isLiveStreamingMessage || msg.contextFiles?.length
-              ? stripLegacyContextFileSummary(msg.content, msg.contextFiles)
-              : cachedStripLegacyContent(msg.content);
-
-            return (
-            <div key={msg.id} data-message-id={msg.id} className={`message ${msg.role}`}>
-              <div className="message-avatar">
-                {msg.role === 'assistant' && avatar ? (
-                  <img src={avatar} alt="" />
-                ) : (
-                  msg.role === 'user' ? userInitial : assistantInitial
-                )}
-              </div>
-              <div className="message-content">
-                <div className="message-role">
-                  <span>{msg.role === 'user' ? userName : assistantName}</span>
-                </div>
-                {msg.role === 'assistant' && !hasTranscript && !showImageGenerationStatus && (msg.thinking || (streaming && msg.content === '')) && (
-                  <ThinkingBlock
-                    thinking={msg.thinking}
-                    isThinking={isLiveStreamingMessage}
-                    startedAt={msg.runStartedAt}
-                    finishedAt={msg.runFinishedAt}
-                  />
-                )}
-                {showImageGenerationStatus && <ImageGenerationStatus />}
-                {msg.contextFiles?.length > 0 && (
-                  <div className="message-file-attachments">
-                    {msg.contextFiles.map((file) => (
-                      <FileAttachmentCard key={contextFileKey(file)} file={file} />
-                    ))}
-                  </div>
-                )}
-                {msg.images && msg.images.length > 0 && (
-                  <div className="message-images">
-                    {msg.images.map((img, i) => (
-                      <button key={i} className="message-image-trigger" type="button" data-history-image-trigger title={t('filemanage.preview')}>
-                        <img src={img.dataUrl} alt={img.name || t('message.uploaded')} className="message-image" data-history-image data-download-name={img.name || ''} />
-                      </button>
-                    ))}
-                  </div>
-                )}
-                {hasTranscript && (
-                  <AssistantTranscript
-                    transcript={msg.transcript}
-                    toolCalls={msg.toolCalls}
-                    streaming={isLiveStreamingMessage}
-                    onStopStreaming={onStopStreaming}
-                    agentId={agentId}
-                    sandboxUrl={selectedAgentUrl}
-                  />
-                )}
-                {msg.role === 'assistant' && !hasTranscript && msg.toolCalls?.length > 0 && (
-                  <ToolCallList
-                    toolCalls={msg.toolCalls}
-                    onStopStreaming={onStopStreaming}
-                    agentId={agentId}
-                    sandboxUrl={selectedAgentUrl}
-                  />
-                )}
-                <div className="message-text">
-                  {editingMessageId === msg.id ? (
-                    <div className="message-edit-form">
-                      <textarea
-                        className="message-edit-input"
-                        value={editingText}
-                        onChange={handleEditTextChange}
-                        onKeyDown={handleEditKeyDown}
-                        autoFocus
-                        rows={Math.min(editingText.split('\n').length || 1, 6)}
-                      />
-                      <div className="message-edit-actions">
-                        <button type="button" className="message-edit-cancel" onClick={cancelEditMessage}>
-                          {t('message.cancel')}
-                        </button>
-                        <button
-                          type="button"
-                          className="message-edit-submit"
-                          onClick={submitEditMessage}
-                          disabled={!editingText.trim() || streaming}
-                        >
-                          {t('message.submitEdit')}
-                        </button>
-                      </div>
-                    </div>
-                  ) : (
-                    !hasTranscript && <>
-                      {isLiveStreamingMessage
-                        ? renderMarkdownElement(displayContent, { streamBlur: true })
-                        : cachedMarkdown(displayContent)}
-                      {msg.role === 'assistant' && displayContent.startsWith('Error:') && !streaming && onRetry && (
-                        <button className="retry-btn" onClick={() => onRetry()} title={t('message.retry')}>Retry</button>
-                      )}
-                    </>
-                  )}
-                </div>
-                {displayContent && editingMessageId !== msg.id && (
-                  <div className="message-actions">
-                    {msg.role === 'user' && (
-                      <button
-                        type="button"
-                        className="message-action-btn message-edit-btn"
-                        onClick={() => startEditMessage(msg)}
-                        disabled={streaming}
-                        title={t('message.edit')}
-                        aria-label={t('message.edit')}
-                      >
-                        <FileEdit width={14} height={14} />
-                      </button>
-                    )}
-                    {msg.role === 'assistant' && msg.usage && (
-                      <MessageUsageStats usage={msg.usage} />
-                    )}
-                    {onForkMessage && (
-                      <button
-                        type="button"
-                        className="message-action-btn message-fork-btn"
-                        onClick={() => onForkMessage(msg.id)}
-                        disabled={streaming}
-                        title={t('message.fork')}
-                        aria-label={t('message.fork')}
-                      >
-                        <GitFork width={14} height={14} />
-                      </button>
-                    )}
-                    <button
-                      type="button"
-                      className={`message-action-btn message-copy-btn${copiedMessageId === msg.id ? ' copied' : ''}`}
-                      onClick={() => handleCopyMessage(msg)}
-                      disabled={!displayContent}
-                      title={copiedMessageId === msg.id ? t('message.copied') : t('message.copy')}
-                      aria-label={copiedMessageId === msg.id ? t('message.copied') : t('message.copy')}
-                    >
-                      <Copy width={14} height={14} />
-                    </button>
-                  </div>
-                )}
-              </div>
-            </div>
-            );
-          })}
+          {visibleMessages.map((msg, index) => (
+            <MessageRow
+              key={msg.id}
+              msg={msg}
+              previousMessage={visibleMessages[index - 1]}
+              isLastMessage={msg === messages[messages.length - 1]}
+              streaming={streaming}
+              avatar={avatar}
+              userInitial={userInitial}
+              assistantInitial={assistantInitial}
+              userName={userName}
+              assistantName={assistantName}
+              agentId={agentId}
+              selectedAgentUrl={selectedAgentUrl}
+              editingMessageId={editingMessageId === msg.id ? editingMessageId : null}
+              editingText={editingMessageId === msg.id ? editingText : ''}
+              copiedMessageId={copiedMessageId === msg.id ? copiedMessageId : null}
+              handleEditTextChange={rowActions.handleEditTextChange}
+              handleEditKeyDown={rowActions.handleEditKeyDown}
+              cancelEditMessage={rowActions.cancelEditMessage}
+              submitEditMessage={rowActions.submitEditMessage}
+              startEditMessage={rowActions.startEditMessage}
+              handleCopyMessage={rowActions.handleCopyMessage}
+              onForkMessage={onForkMessage ? rowActions.onForkMessage : null}
+              onRetry={onRetry ? rowActions.onRetry : null}
+              onStopStreaming={onStopStreaming ? rowActions.onStopStreaming : null}
+            />
+          ))}
           </>
         )}
       </div>

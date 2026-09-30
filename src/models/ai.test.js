@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { jsonSchema, stepCountIs, streamText, tool } from 'ai';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
-import { normalizeAiUsage, toModelMessages } from './ai.js';
+import { createLanguageModel, normalizeAiUsage, toModelMessages } from './ai.js';
 
 test('AI SDK executes an OpenAI-compatible tool loop and emits unified events', async () => {
   let requestCount = 0;
@@ -87,4 +87,20 @@ test('usage preserves cache reads including zero and leaves unknown cache usage 
   }
   assert.equal(normalizeAiUsage({ inputTokens: 100 }).cached_tokens, undefined);
   assert.equal(normalizeAiUsage({ inputTokens: 100, cachedInputTokens: 50 }).cached_tokens, 50);
+});
+
+
+test('lazy provider construction preserves the selected profile across loading', async () => {
+  const config = { provider: 'openai', apiKey: 'test', model: 'original' };
+  const pending = createLanguageModel(config);
+  config.model = 'changed';
+  assert.equal((await pending).modelId, 'original');
+  for (const provider of ['anthropic', 'gemini', 'openrouter', 'qwen', 'deepseek', 'custom-openai']) {
+    const model = await createLanguageModel({
+      provider, apiKey: 'test', model: 'selected', baseUrl: 'https://example.test/v1',
+    });
+    assert.equal(model.modelId, 'selected');
+    assert.equal(model.specificationVersion, 'v3');
+  }
+  await assert.rejects(createLanguageModel({}), /provider, API key, and model/);
 });

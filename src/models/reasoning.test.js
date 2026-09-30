@@ -30,7 +30,7 @@ test('model factory passes configured effort to the API request', async () => {
     return Response.json({ id: 'test', created: 1, model: 'gpt-5', choices: [{ index: 0, message: { role: 'assistant', content: 'OK' }, finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } });
   };
   try {
-    const model = createLanguageModel({ provider: 'openai', apiKey: 'test', model: 'gpt-5', reasoningEffort: 'high' });
+    const model = await createLanguageModel({ provider: 'openai', apiKey: 'test', model: 'gpt-5', reasoningEffort: 'high' });
     await model.doGenerate({ prompt: [{ role: 'user', content: [{ type: 'text', text: 'Hello' }] }] });
     assert.equal(body.reasoning_effort, 'high');
   } finally { globalThis.fetch = originalFetch; }

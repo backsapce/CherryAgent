@@ -1562,7 +1562,7 @@ function App() {
       remoteExecution = useRemoteRuntime;
       // Freeze the executable model/config at turn start. Settings changes in
       // another session must not retarget an already-started turn.
-      const languageModel = useRemoteRuntime ? null : llm.getLanguageModel(llmProfileId);
+      const languageModel = useRemoteRuntime ? null : await llm.getLanguageModel(llmProfileId);
       const remoteModelConfig = useRemoteRuntime && !opts.resumeRunId
         ? llm.getRuntimeConfig(llmProfileId)
         : null;

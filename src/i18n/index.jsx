@@ -17,8 +17,12 @@ export function I18nProvider({ initialLocale = 'auto', onLocaleChange, children 
     onLocaleChange?.(pref);
   }, [onLocaleChange]);
 
+  const value = useMemo(() => ({
+    t, locale: resolvedLocale, localePref, changeLocale,
+  }), [t, resolvedLocale, localePref, changeLocale]);
+
   return (
-    <I18nContext.Provider value={{ t, locale: resolvedLocale, localePref, changeLocale }}>
+    <I18nContext.Provider value={value}>
       {children}
     </I18nContext.Provider>
   );

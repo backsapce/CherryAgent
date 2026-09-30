@@ -192,7 +192,7 @@ export async function runAgentLoop(opts) {
       contextWindow,
       estimatedInputTokens: packed.estimatedTokens,
     });
-    const model = opts.languageModel || llm.getLanguageModel(opts.llmProfileId);
+    const model = await (opts.languageModel || llm.getLanguageModel(opts.llmProfileId));
     const tools = createAgentTools(schemas, toolContext, emit);
     const initial = await consumeAgentStream({
       model,

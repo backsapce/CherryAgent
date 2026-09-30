@@ -550,7 +550,7 @@ const llm = {
    */
   async completeSession(messages, opts = {}) {
     const result = streamText({
-      model: llm.getLanguageModel(opts.llmProfileId),
+      model: await llm.getLanguageModel(opts.llmProfileId),
       messages: toModelMessages(opts.systemPrompt
         ? [{ role: 'system', content: opts.systemPrompt }, ...messages]
         : messages),

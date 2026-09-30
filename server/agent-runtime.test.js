@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { simulateReadableStream } from 'ai';
@@ -408,7 +408,7 @@ test('sandbox run reuses duplicate wake-ups and replaces a changed request in on
         return { content: 'scheduled' };
       },
     });
-    const started = manager.start({
+    const started = await manager.start({
       runId: 'run-repeated-wakeup',
       sessionId: 'session-repeated-wakeup',
       replyId: 'reply-repeated-wakeup',
@@ -472,7 +472,7 @@ test('sandbox run enters waiting and resumes after a real agent-loop wake-up', a
       createModel: () => model,
       waitUntilWakeup: () => wakeupGate,
     });
-    const started = manager.start({
+    const started = await manager.start({
       runId: 'run-wakeup-resume',
       sessionId: 'session-wakeup-resume',
       replyId: 'reply-wakeup-resume',
@@ -592,11 +592,11 @@ test('a second session cannot disturb a waiting run and wake-up keeps compact to
       modelConfig: { provider: 'openai', model: 'test', apiKey: 'test' },
     });
 
-    const first = manager.start(input('a'));
+    const first = await manager.start(input('a'));
     const waiting = await waitForRunStatus(manager, first.id, 'waiting');
     const waitingSnapshot = structuredClone(waiting.wakeup);
 
-    const second = manager.start(input('b'));
+    const second = await manager.start(input('b'));
     const secondCompleted = await waitForRunStatus(manager, second.id, 'idle');
     assert.equal(secondCompleted.result.content, 'session B lookup finished');
     assert.equal(manager.get(first.id).status, 'waiting');
@@ -644,7 +644,7 @@ test('sandbox run enters waiting when the provider leaves the wake-up stream ope
         signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true });
       }),
     });
-    const started = manager.start({
+    const started = await manager.start({
       runId: 'run-stalled-wakeup',
       sessionId: 'session-stalled-wakeup',
       replyId: 'reply-stalled-wakeup',
@@ -716,7 +716,7 @@ test('schedule_wakeup bypasses a blocking tool in the same model step', async ()
         signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true });
       }),
     });
-    const started = manager.start({
+    const started = await manager.start({
       runId: 'run-priority-wakeup',
       sessionId: 'session-priority-wakeup',
       replyId: 'reply-priority-wakeup',
@@ -826,7 +826,7 @@ test('late output from a pre-wakeup turn cannot pollute the resumed turn', async
       },
       waitUntilWakeup: async () => {},
     });
-    const started = manager.start({
+    const started = await manager.start({
       runId: 'run-turn-epoch',
       sessionId: 'session-turn-epoch',
       replyId: 'reply-turn-epoch',
@@ -1069,7 +1069,7 @@ test('terminal runs older than the retention window are pruned from memory and d
   }
 });
 
-test('startup prune of loaded overflow runs does not touch uninitialized state', () => {
+test('startup prune of loaded overflow runs does not touch uninitialized state', async () => {
   // Regression: the first pruneExpiredRuns() call used to run before the
   // `subscribers`/`notifyStatus` consts were initialized, so a runs directory
   // with more terminal runs than the retention cap (they survive loading and
@@ -1109,7 +1109,7 @@ test('startup prune of loaded overflow runs does not touch uninitialized state',
     assert.equal(manager.get('run-old-2'), null);
     assert.equal(existsSync(join(runsDir, 'run-old-2.json')), false);
     assert.equal(manager.get('run-new')?.status, 'completed');
-    assert.equal(manager.get('run-idle-old')?.status, 'superseded');
+    await waitForRunStatus(manager, 'run-idle-old', 'superseded');
     assert.equal(manager.get('run-idle-new')?.status, 'idle');
   } finally {
     rmSync(runsDir, { recursive: true, force: true });
@@ -1164,13 +1164,13 @@ test('sandbox runs execute concurrently with isolated events, cancellation, and 
       },
     });
 
-    const first = manager.start(input('session-one'));
-    const second = manager.start(input('session-two'));
+    const first = await manager.start(input('session-one'));
+    const second = await manager.start(input('session-two'));
     await bothStarted;
 
     assert.equal(first.id, 'run-client-session-one');
     assert.equal(second.id, 'run-client-session-two');
-    assert.equal(manager.start(input('session-one')).id, first.id);
+    assert.equal((await manager.start(input('session-one'))).id, first.id);
     assert.throws(
       () => manager.start({ ...input('session-one'), runId: 'run-client-session-one-duplicate' }),
       /already has an active agent run/
@@ -1236,7 +1236,7 @@ test('sandbox abort force-terminates and unlocks a session when a provider ignor
       },
       createModel: () => ({}),
     });
-    const started = manager.start({
+    const started = await manager.start({
       runId: 'run-unresponsive-provider',
       sessionId: 'session-unresponsive',
       replyId: 'reply-unresponsive',
@@ -1251,7 +1251,7 @@ test('sandbox abort force-terminates and unlocks a session when a provider ignor
     assert.equal(aborted.status, 'aborted');
     assert.match(aborted.error, /cancellation grace period/i);
 
-    const replacement = manager.start({
+    const replacement = await manager.start({
       runId: 'run-unresponsive-replacement',
       sessionId: 'session-unresponsive',
       replyId: 'reply-replacement',
@@ -1283,7 +1283,7 @@ test('sandbox run fails and unlocks a session when the provider makes no progres
       },
       createModel: () => ({}),
     });
-    const started = manager.start({
+    const started = await manager.start({
       runId: 'run-idle-provider',
       sessionId: 'session-idle-provider',
       replyId: 'reply-idle-provider',
@@ -1295,7 +1295,7 @@ test('sandbox run fails and unlocks a session when the provider makes no progres
 
     assert.equal(receivedSignal.aborted, true);
     assert.match(failed.error, /made no progress.*LLM base URL/i);
-    const replacement = manager.start({
+    const replacement = await manager.start({
       runId: 'run-after-idle-provider',
       sessionId: 'session-idle-provider',
       replyId: 'reply-after-idle-provider',
@@ -1318,7 +1318,7 @@ test('sandbox run reports a provider AbortError as an error without a cancel req
       },
       createModel: () => ({}),
     });
-    const started = manager.start({
+    const started = await manager.start({
       runId: 'run-provider-abort-error',
       sessionId: 'session-provider-abort-error',
       replyId: 'reply-provider-abort-error',
@@ -1346,7 +1346,7 @@ test('a cancelled sandbox run drops detached late events and cannot become compl
       },
       createModel: () => ({}),
     });
-    const started = manager.start({
+    const started = await manager.start({
       runId: 'run-late-cancel-events',
       sessionId: 'session-late-cancel-events',
       replyId: 'reply-late-cancel-events',
@@ -1386,7 +1386,7 @@ test('sandbox event logs fail the owning run before consuming unbounded memory',
       },
       createModel: () => ({}),
     });
-    const started = manager.start({
+    const started = await manager.start({
       runId: 'run-event-limit',
       sessionId: 'session-event-limit',
       replyId: 'reply-event-limit',
@@ -1418,13 +1418,13 @@ test('a failed initial persist does not leave a ghost active session run', async
     };
     rmSync(runsDir, { recursive: true, force: true });
 
-    assert.throws(
+    await assert.rejects(
       () => manager.start({ ...input, runId: 'run-persist-failure' }),
       /ENOENT/
     );
 
     mkdirSync(runsDir, { recursive: true });
-    const retry = manager.start({ ...input, runId: 'run-persist-retry' });
+    const retry = await manager.start({ ...input, runId: 'run-persist-retry' });
     const completed = await waitForRunStatus(manager, retry.id, 'idle');
     assert.equal(completed.result.content, 'done');
   } finally {
@@ -1490,7 +1490,7 @@ test('a server restart re-arms a waiting run and it resumes after the wake-up', 
       waitUntilWakeup: () => abandonedWakeupGate.promise,
       runAgent,
     });
-    const started = first.start({
+    const started = await first.start({
       runId: 'run-restart-waiting',
       sessionId: 'session-restart-waiting',
       replyId: 'reply-restart-waiting',
@@ -1560,7 +1560,7 @@ test('a restart can cancel a re-armed waiting run and it does not resume twice',
       waitUntilWakeup: () => abandonedWakeupGate.promise,
       runAgent,
     });
-    const started = first.start({
+    const started = await first.start({
       runId: 'run-restart-cancel',
       sessionId: 'session-restart-cancel',
       replyId: 'reply-restart-cancel',
@@ -1652,7 +1652,7 @@ test('continue appends one user turn and returns the run to idle', async () => {
       ],
       modelConfig: { provider: 'openai', model: 'test', apiKey: 'test' },
     };
-    const started = manager.start(input);
+    const started = await manager.start(input);
     const idle = await waitForRunStatus(manager, started.id, 'idle');
     assert.equal(idle.replyId, 'reply-1');
 
@@ -1699,7 +1699,7 @@ test('continue with images materializes attachments and keeps the model-visible 
       fileExists: async () => false,
       writeFile: async (path, _content) => { written.push(path); },
     });
-    const started = manager.start({
+    const started = await manager.start({
       runId: 'run-continue-img',
       sessionId: 'session-continue-img',
       messages: [{ role: 'user', content: 'first' }],
@@ -1735,7 +1735,7 @@ test('continue validates attachment shape before touching the run', async () => 
   try {
     const { model } = simpleModel();
     const manager = createManager(runsDir, { createModel: () => model });
-    const started = manager.start({
+    const started = await manager.start({
       runId: 'run-continue-img-bad',
       sessionId: 'session-continue-img-bad',
       messages: [{ role: 'user', content: 'first' }],
@@ -1772,7 +1772,7 @@ test('continue rejects a diverged history and refuses non-idle runs', async () =
   try {
     const { model } = simpleModel();
     const manager = createManager(runsDir, { createModel: () => model });
-    const started = manager.start({
+    const started = await manager.start({
       runId: 'run-diverge',
       sessionId: 'session-diverge',
       messages: [{ role: 'user', content: 'one' }],
@@ -1791,7 +1791,7 @@ test('continue rejects a diverged history and refuses non-idle runs', async () =
     );
 
     // A full start supersedes the session's idle run.
-    const fresh = manager.start({
+    const fresh = await manager.start({
       runId: 'run-diverge-fresh',
       sessionId: 'session-diverge',
       messages: [{ role: 'user', content: 'fresh full history' }],
@@ -1837,7 +1837,7 @@ test('run subscriptions replay past the cursor and push live updates', async () 
       },
     });
     const manager = createManager(runsDir, { createModel: () => model });
-    const started = manager.start({
+    const started = await manager.start({
       runId: 'run-subscribe',
       sessionId: 'session-subscribe',
       messages: [{ role: 'user', content: 'go' }],
@@ -1894,7 +1894,7 @@ test('streaming deltas coalesce into batched log entries', async () => {
       }),
     });
     const manager = createManager(runsDir, { createModel: () => model });
-    const started = manager.start({
+    const started = await manager.start({
       runId: 'run-coalesce',
       sessionId: 'session-coalesce',
       messages: [{ role: 'user', content: 'talk' }],
@@ -1918,7 +1918,7 @@ test('idle runs beyond the LRU cap are demoted to superseded', async () => {
     const { model } = simpleModel();
     const manager = createManager(runsDir, { createModel: () => model, maxIdleRuns: 2, runPruneIntervalMs: 20 });
     for (let index = 0; index < 4; index += 1) {
-      const run = manager.start({
+      const run = await manager.start({
         runId: `run-lru-0${index}`,
         sessionId: `session-lru-${index}`,
         messages: [{ role: 'user', content: 'go' }],
@@ -1975,7 +1975,7 @@ test('a superseding continue replaces a pending wake-up with the caller message'
       createModel: () => model,
       waitUntilWakeup: () => wakeupGate.promise,
     });
-    const started = manager.start({
+    const started = await manager.start({
       runId: 'run-supersede',
       sessionId: 'session-supersede',
       messages: [{ role: 'user', content: 'schedule something' }],
@@ -2058,7 +2058,7 @@ test('a superseding continue with images attaches them to the replacement turn',
       fileExists: async () => false,
       writeFile: async (path) => { written.push(path); },
     });
-    const started = manager.start({
+    const started = await manager.start({
       runId: 'run-supersede-img',
       sessionId: 'session-supersede-img',
       messages: [{ role: 'user', content: 'schedule something' }],
@@ -2085,6 +2085,235 @@ test('a superseding continue with images attaches them to the replacement turn',
     assert.ok(serialized.includes('image/png') && serialized.includes('iVBORw0'), 'image part reaches the model');
   } finally {
     wakeupGate.resolve();
+    rmSync(runsDir, { recursive: true, force: true });
+  }
+});
+
+
+test('async event writes publish only after commit and finish in order', async () => {
+  const runsDir = mkdtempSync(join(tmpdir(), 'cherry-async-events-'));
+  const gate = deferred();
+  const entered = deferred();
+  const writes = [];
+  let active = 0;
+  let peakActive = 0;
+  const manager = createManager(runsDir, {
+    createModel: () => ({}),
+    appendEventLog: async (path, line, options) => {
+      active += 1;
+      peakActive = Math.max(peakActive, active);
+      entered.resolve();
+      await gate.promise;
+      const { appendFile } = await import('node:fs/promises');
+      await appendFile(path, line, options);
+      writes.push(JSON.parse(line));
+      active -= 1;
+    },
+    runAgent: async ({ onEvent }) => {
+      onEvent({ type: 'text-start', segmentId: 'one' });
+      onEvent({ type: 'text-delta', segmentId: 'one', text: '你好' });
+      onEvent({ type: 'text-end', segmentId: 'one' });
+      return { content: '你好' };
+    },
+  });
+  let unsubscribe;
+  try {
+    const run = await manager.start({
+      sessionId: 'async-events',
+      messages: [{ role: 'user', content: 'hello' }],
+      modelConfig: { provider: 'openai', model: 'test', apiKey: 'test' },
+    });
+    const received = [];
+    unsubscribe = manager.subscribe(run.id, 0, (payload) => {
+      for (const event of payload.events || []) {
+        const disk = readFileSync(join(runsDir, run.id + '.events.ndjson'), 'utf8');
+        assert.ok(disk.includes('"seq":' + event.remoteSequence));
+        received.push(event);
+      }
+    });
+    await entered.promise;
+    assert.equal(manager.get(run.id).status, 'running');
+    assert.equal(manager.get(run.id).sequence, 0);
+    assert.deepEqual(received, []);
+    gate.resolve();
+    await waitForRunStatus(manager, run.id, 'idle');
+    assert.equal(peakActive, 1);
+    assert.deepEqual(writes.map((event) => event.seq), [1, 2, 3]);
+    assert.deepEqual(received.map((event) => event.remoteSequence), [1, 2, 3]);
+    const restored = createManager(runsDir);
+    assert.equal(restored.get(run.id).sequence, 3);
+    assert.equal(restored.get(run.id).events[1].text, '你好');
+  } finally {
+    gate.resolve();
+    unsubscribe?.();
+    rmSync(runsDir, { recursive: true, force: true });
+  }
+});
+
+test('a failed async append prevents later publication and idle success', async () => {
+  const runsDir = mkdtempSync(join(tmpdir(), 'cherry-failed-events-'));
+  let attempts = 0;
+  try {
+    const manager = createManager(runsDir, {
+      createModel: () => ({}),
+      appendEventLog: async () => {
+        attempts += 1;
+        throw new Error('disk unavailable');
+      },
+      runAgent: async ({ onEvent }) => {
+        onEvent({ type: 'text-start', segmentId: 'one' });
+        onEvent({ type: 'text-end', segmentId: 'one' });
+        return { content: 'answer' };
+      },
+    });
+    const run = await manager.start({
+      sessionId: 'failed-events',
+      messages: [{ role: 'user', content: 'hello' }],
+      modelConfig: { provider: 'openai', model: 'test', apiKey: 'test' },
+    });
+    const failed = await waitForRunStatus(manager, run.id, 'error');
+    assert.equal(attempts, 1);
+    assert.equal(failed.error, 'disk unavailable');
+    assert.equal(failed.sequence, 0);
+    assert.deepEqual(failed.events, []);
+    const saved = JSON.parse(readFileSync(join(runsDir, run.id + '.json'), 'utf8'));
+    assert.equal(saved.status, 'error');
+  } finally {
+    rmSync(runsDir, { recursive: true, force: true });
+  }
+});
+
+test('forced cancellation stays bounded while an event write is stalled', async () => {
+  const runsDir = mkdtempSync(join(tmpdir(), 'cherry-stalled-events-'));
+  const gate = deferred();
+  const entered = deferred();
+  const appended = deferred();
+  try {
+    const manager = createManager(runsDir, {
+      abortWaitMs: 5,
+      createModel: () => ({}),
+      appendEventLog: async () => {
+        entered.resolve();
+        await gate.promise;
+        appended.resolve();
+      },
+      runAgent: async ({ onEvent }) => {
+        onEvent({ type: 'text-start', segmentId: 'one' });
+        return new Promise(() => {});
+      },
+    });
+    const run = await manager.start({
+      sessionId: 'stalled-events',
+      messages: [{ role: 'user', content: 'hello' }],
+      modelConfig: { provider: 'openai', model: 'test', apiKey: 'test' },
+    });
+    await entered.promise;
+    let timeout;
+    try {
+      const aborted = await Promise.race([
+        manager.abort(run.id),
+        new Promise((_resolve, reject) => {
+          timeout = setTimeout(() => reject(new Error('abort waited for disk')), 200);
+        }),
+      ]);
+      assert.equal(aborted.status, 'aborted');
+      assert.equal(JSON.parse(readFileSync(join(runsDir, run.id + '.json'), 'utf8')).status, 'aborted');
+    } finally {
+      clearTimeout(timeout);
+    }
+    gate.resolve();
+    await appended.promise;
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(manager.get(run.id).status, 'aborted');
+  } finally {
+    gate.resolve();
+    rmSync(runsDir, { recursive: true, force: true });
+  }
+});
+
+
+test('initial async snapshot gates model execution and cancellation wins the queued write', async () => {
+  const runsDir = mkdtempSync(join(tmpdir(), 'cherry-snapshot-race-'));
+  const entered = deferred();
+  const gate = deferred();
+  let calls = 0;
+  const written = [];
+  try {
+    const manager = createManager(runsDir, {
+      abortWaitMs: 5,
+      createModel: () => ({}),
+      runAgent: async () => { calls += 1; return { content: 'should not run' }; },
+      writeSnapshot: async (path, json, options) => {
+        const data = JSON.parse(json);
+        written.push(data.status);
+        if (written.length === 1) {
+          entered.resolve();
+          await gate.promise;
+        }
+        const { writeFile } = await import('node:fs/promises');
+        await writeFile(path, json, options);
+      },
+    });
+    const input = {
+      runId: 'run-snapshot-race',
+      sessionId: 'snapshot-race',
+      messages: [{ role: 'user', content: 'hello' }],
+      modelConfig: { provider: 'openai', model: 'test', apiKey: 'test' },
+    };
+    const starting = manager.start(input);
+    const duplicate = manager.start(input);
+    assert.strictEqual(starting, duplicate);
+    await entered.promise;
+    assert.equal(calls, 0);
+    const aborting = manager.abort(input.runId);
+    // The event loop stays available while the disk write is blocked.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    gate.resolve();
+    await starting;
+    const aborted = await aborting;
+    assert.equal(aborted.status, 'aborted');
+    assert.equal(calls, 0);
+    assert.deepEqual(written, ['running', 'aborted']);
+    const saved = JSON.parse(readFileSync(join(runsDir, input.runId + '.json'), 'utf8'));
+    assert.equal(saved.status, 'aborted');
+  } finally {
+    gate.resolve();
+    rmSync(runsDir, { recursive: true, force: true });
+  }
+});
+
+test('idle is published only after its asynchronous recovery snapshot is durable', async () => {
+  const runsDir = mkdtempSync(join(tmpdir(), 'cherry-snapshot-idle-'));
+  const entered = deferred();
+  const gate = deferred();
+  try {
+    const manager = createManager(runsDir, {
+      createModel: () => ({}),
+      runAgent: async () => ({ content: 'done' }),
+      writeSnapshot: async (path, json, options) => {
+        if (JSON.parse(json).status === 'idle') {
+          entered.resolve();
+          await gate.promise;
+        }
+        const { writeFile } = await import('node:fs/promises');
+        await writeFile(path, json, options);
+      },
+    });
+    const run = await manager.start({
+      sessionId: 'snapshot-idle',
+      messages: [{ role: 'user', content: 'hello' }],
+      modelConfig: { provider: 'openai', model: 'test', apiKey: 'test' },
+    });
+    await entered.promise;
+    assert.equal(manager.get(run.id).status, 'running');
+    gate.resolve();
+    await waitForRunStatus(manager, run.id, 'idle');
+    const restored = createManager(runsDir);
+    assert.equal(restored.get(run.id).status, 'idle');
+    const saved = JSON.parse(readFileSync(join(runsDir, run.id + '.json'), 'utf8'));
+    assert.equal(saved.resume.result.content, 'done');
+  } finally {
+    gate.resolve();
     rmSync(runsDir, { recursive: true, force: true });
   }
 });

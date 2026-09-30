@@ -1,4 +1,5 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFile, writeFile as writeSnapshotFile, rename, rm } from 'node:fs/promises';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createLanguageModel } from '../src/models/ai.js';
@@ -166,11 +167,15 @@ export function createAgentRunManager({
   runPruneIntervalMs = DEFAULT_RUN_PRUNE_INTERVAL_MS,
   maxRetainedTerminalRuns = MAX_RETAINED_TERMINAL_RUNS,
   maxIdleRuns = MAX_IDLE_RUNS,
+  appendEventLog = appendFile,
+  writeSnapshot = writeSnapshotFile,
 }) {
   mkdirSync(runsDir, { recursive: true, mode: 0o700 });
   const runs = new Map();
   const cancelledRunIds = new Map();
+  const snapshotWrites = new WeakMap();
   loadPersistedRuns(runsDir, runs, { retentionMs: runRetentionMs });
+  for (const run of runs.values()) run.durableStatus = run.status;
 
   // Drop terminal runs that aged out or exceed the retained count, and demote
   // idle runs past their LRU cap (their conversations are the expensive part).
@@ -179,7 +184,7 @@ export function createAgentRunManager({
   const pruneExpiredRuns = () => {
     const cutoff = Date.now() - Math.max(1, runRetentionMs);
     const terminal = [...runs.values()]
-      .filter((run) => TERMINAL_RUN_STATUSES.has(run.status))
+      .filter((run) => TERMINAL_RUN_STATUSES.has(run.status) && !eventWrites.get(run)?.pending && !snapshotWrites.get(run)?.pending)
       .sort((a, b) => String(a.updatedAt || '').localeCompare(String(b.updatedAt || '')));
     // Oldest first; everything past the newest maxRetainedTerminalRuns is dropped.
     const overflow = terminal.slice(0, Math.max(0, terminal.length - maxRetainedTerminalRuns));
@@ -191,7 +196,7 @@ export function createAgentRunManager({
     }
 
     const idle = [...runs.values()]
-      .filter((run) => run.status === 'idle')
+      .filter((run) => run.status === 'idle' && !snapshotWrites.get(run)?.pending)
       .sort((a, b) => String(a.updatedAt || '').localeCompare(String(b.updatedAt || '')));
     const idleOverflow = idle.slice(0, Math.max(0, idle.length - maxIdleRuns));
     for (const run of idleOverflow) {
@@ -199,11 +204,9 @@ export function createAgentRunManager({
       run.resume = null;
       run.updatedAt = new Date().toISOString();
       notifyStatus(run);
-      try {
-        persist(run);
-      } catch (error) {
+      persist(run).then(() => notifyStatus(run)).catch((error) => {
         console.error(`Failed to persist demoted idle agent run ${run.id}:`, error);
-      }
+      });
     }
   };
 
@@ -220,39 +223,74 @@ export function createAgentRunManager({
   };
 
   const persist = (run) => {
-    const publicRun = serializeRun(run);
-    // `resume` is durable recovery state only (it can include the model config
-    // and the full conversation). Keep it out of API responses via serializeRun
-    // but write it alongside the run so a restart can re-arm a waiting run.
+    const publicRun = serializeRun(run, true);
     const stored = run.resume ? { ...publicRun, resume: run.resume } : publicRun;
+    // Capture the exact generation before yielding: a later cancel/continue
+    // must never change the bytes of an already queued snapshot.
+    const json = JSON.stringify(stored);
+    let writer = snapshotWrites.get(run);
+    if (!writer) {
+      writer = { tail: Promise.resolve(), pending: 0, generation: 0 };
+      snapshotWrites.set(run, writer);
+    }
+    const generation = ++writer.generation;
+    writer.pending += 1;
     const target = join(runsDir, `${run.id}.json`);
     const temporary = `${target}.tmp`;
-    try {
-      // 0600: run records can carry model credentials while a run is waiting.
-      writeFileSync(temporary, JSON.stringify(stored, null, 2), { encoding: 'utf8', mode: 0o600 });
-      renameSync(temporary, target);
-    } catch (error) {
+    const task = writer.tail.then(async () => {
       try {
-        rmSync(temporary, { force: true });
-      } catch {
-        // Preserve the original persistence error.
+        await writeSnapshot(temporary, json, { encoding: 'utf8', mode: 0o600 });
+        await rename(temporary, target);
+        if (generation === writer.generation) run.durableStatus = publicRun.status;
+      } catch (error) {
+        await rm(temporary, { force: true }).catch(() => {});
+        throw error;
+      } finally {
+        writer.pending -= 1;
       }
-      throw error;
-    }
+    });
+    // A failed generation must not prevent a subsequent cancellation/error
+    // snapshot from becoming durable.
+    writer.tail = task.catch(() => {});
+    return task;
   };
 
+  // Reserve sequence/bytes synchronously, but publish only committed events.
+  // A failed append poisons this run's queue so later events cannot skip a hole.
+  const eventWrites = new WeakMap();
+  const eventWriter = (run) => {
+    let writer = eventWrites.get(run);
+    if (!writer) {
+      writer = { tail: Promise.resolve(), sequence: run.sequence, bytes: run.eventBytes, pending: 0 };
+      eventWrites.set(run, writer);
+    }
+    return writer;
+  };
+  const drainEvents = (run) => eventWrites.get(run)?.tail;
+
   const emit = (run, turn, event) => {
-    const line = `${JSON.stringify({ v: 2, seq: run.sequence + 1, turn, ev: event })}\n`;
+    const writer = eventWriter(run);
+    const seq = writer.sequence + 1;
+    const line = `${JSON.stringify({ v: 2, seq, turn, ev: event })}\n`;
     const lineBytes = Buffer.byteLength(line);
-    if (run.eventBytes + lineBytes > maxEventBytes) {
+    if (writer.bytes + lineBytes > maxEventBytes) {
       throw new Error(`Agent run event log exceeded ${maxEventBytes} bytes.`);
     }
-    run.sequence += 1;
-    run.events.push({ seq: run.sequence, turn, ev: event });
-    run.updatedAt = new Date().toISOString();
-    appendFileSync(join(runsDir, `${run.id}.events.ndjson`), line, { encoding: 'utf8', mode: 0o600 });
-    run.eventBytes += lineBytes;
-    return run.events[run.events.length - 1];
+    writer.sequence = seq;
+    writer.bytes += lineBytes;
+    writer.pending += 1;
+    writer.tail = writer.tail.then(async () => {
+      await appendEventLog(join(runsDir, `${run.id}.events.ndjson`), line, { encoding: 'utf8', mode: 0o600 });
+      // Parse the captured line so mutable provider objects cannot change the
+      // replay payload after it was serialized for disk.
+      const entry = JSON.parse(line);
+      run.sequence = seq;
+      run.events.push({ seq, turn, ev: entry.ev });
+      run.eventBytes += lineBytes;
+      run.updatedAt = new Date().toISOString();
+      notifyEvents(run, [run.events[run.events.length - 1]]);
+    }).finally(() => { writer.pending -= 1; });
+    writer.tail.catch((error) => run.controller?.abort(error));
   };
 
   /**
@@ -323,8 +361,7 @@ export function createAgentRunManager({
       if (!pending) return;
       const batch = pending;
       pending = null;
-      const entry = emit(run, turnNumber, batch);
-      notifyEvents(run, [entry]);
+      emit(run, turnNumber, batch);
     };
     return {
       offer(event) {
@@ -412,7 +449,7 @@ export function createAgentRunManager({
           run.status = 'waiting';
           run.wakeup = pendingWakeup;
           run.updatedAt = new Date().toISOString();
-          persist(run);
+          await persist(run);
           notifyStatus(run);
           // A superseding continue() resolves this race early and replaces
           // the wake-up prompt with the caller's message.
@@ -434,7 +471,7 @@ export function createAgentRunManager({
           run.wakeup = null;
           run.resume = null;
           run.updatedAt = new Date().toISOString();
-          persist(run);
+          await persist(run);
           notifyStatus(run);
           runtimeMessages = [
             ...runtimeMessages,
@@ -449,6 +486,8 @@ export function createAgentRunManager({
         const turnToken = {};
         activeTurnToken = turnToken;
         let scheduledWakeup = null;
+        const languageModel = await createModel(modelConfig);
+        throwIfRunCancelled(run);
         const coalescer = createDeltaCoalescer(run, turnNumber);
         const activityWatchdog = createActivityWatchdog(idleTimeoutMs, (error) => {
           run.controller?.abort(error);
@@ -464,7 +503,7 @@ export function createAgentRunManager({
               contextWindow: modelConfig.contextWindow || undefined,
               maxRounds: input.maxRounds,
               signal: run.controller.signal,
-              languageModel: createModel(modelConfig),
+              languageModel,
               runtimeContext: normalizeRuntimeContext(input.runtimeContext),
               toolSchemas: searchConfig
                 ? REMOTE_TOOL_SCHEMAS
@@ -505,8 +544,7 @@ export function createAgentRunManager({
                     return;
                   }
                   coalescer.flush();
-                  const entry = emit(run, turnNumber, event);
-                  notifyEvents(run, [entry]);
+                  emit(run, turnNumber, event);
                 } catch (error) {
                   run.controller?.abort(error);
                 }
@@ -515,9 +553,13 @@ export function createAgentRunManager({
             activityWatchdog.promise,
           ]);
         } finally {
-          coalescer.flush();
-          activityWatchdog.dispose();
-          if (activeTurnToken === turnToken) activeTurnToken = null;
+          try {
+            coalescer.flush();
+          } finally {
+            activityWatchdog.dispose();
+            if (activeTurnToken === turnToken) activeTurnToken = null;
+            await drainEvents(run);
+          }
         }
 
         throwIfRunCancelled(run);
@@ -560,8 +602,13 @@ export function createAgentRunManager({
         run.controller = null;
         run.wakeEarly = null;
         try {
-          persist(run);
+          await persist(run);
         } catch (error) {
+          if (!run.forceTerminated) {
+            run.status = run.durableStatus = 'error';
+            run.error = error.message || String(error);
+            run.resume = null;
+          }
           console.error(`Failed to persist terminal agent run ${run.id}:`, error);
         }
       }
@@ -608,7 +655,7 @@ export function createAgentRunManager({
       if (
         existingById.sessionId === sessionId
         && existingById.replyId === (input.replyId ? String(input.replyId) : null)
-      ) return serializeRun(existingById);
+      ) return existingById.starting || serializeRun(existingById);
       const error = new Error(`Agent run id already exists: ${id}`);
       error.statusCode = 409;
       throw error;
@@ -630,11 +677,9 @@ export function createAgentRunManager({
       candidate.resume = null;
       candidate.updatedAt = new Date().toISOString();
       notifyStatus(candidate);
-      try {
-        persist(candidate);
-      } catch (error) {
+      persist(candidate).then(() => notifyStatus(candidate)).catch((error) => {
         console.error(`Failed to persist superseded agent run ${candidate.id}:`, error);
-      }
+      });
     }
     let resolveCompletion;
     const completion = new Promise((resolve) => { resolveCompletion = resolve; });
@@ -643,6 +688,7 @@ export function createAgentRunManager({
       sessionId,
       replyId: input.replyId ? String(input.replyId) : null,
       status: 'running',
+      durableStatus: 'running',
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       sequence: 0,
@@ -657,16 +703,16 @@ export function createAgentRunManager({
       eventBytes: 0,
     };
     runs.set(id, run);
-    try {
-      persist(run);
-    } catch (error) {
+    run.starting = persist(run).then(() => {
+      if (!run.forceTerminated) Promise.resolve().then(() => executeRunLoop(run, input, null));
+      return serializeRun(run);
+    }, (error) => {
       runs.delete(id);
+      run.resolveCompletion();
       throw error;
-    }
-
-    Promise.resolve().then(() => executeRunLoop(run, input, null));
-
-    return serializeRun(run);
+    });
+    run.starting.finally(() => { run.starting = null; }).catch(() => {});
+    return run.starting;
   };
 
   /**
@@ -686,6 +732,7 @@ export function createAgentRunManager({
       error.statusCode = 404;
       throw error;
     }
+    await snapshotWrites.get(run)?.tail;
     const message = input?.message;
     if (typeof message !== 'string' || !message.trim()) {
       const error = new Error('Missing or invalid "message" field.');
@@ -763,6 +810,7 @@ export function createAgentRunManager({
     run.cancelRequested = false;
     run.forceTerminated = false;
     run.status = 'running';
+    run.durableStatus = 'running';
     run.error = null;
     run.result = null;
     run.wakeup = null;
@@ -771,7 +819,7 @@ export function createAgentRunManager({
     run.completion = new Promise((resolve) => { resolveCompletion = resolve; });
     run.resolveCompletion = resolveCompletion;
     run.controller = new AbortController();
-    persist(run);
+    await persist(run);
     notifyStatus(run);
     Promise.resolve().then(() => executeRunLoop(run, resume.input, {
       runtimeMessages,
@@ -857,7 +905,7 @@ export function createAgentRunManager({
       // session permanently locked. Late callbacks are already fenced by
       // cancelRequested/status/controller checks in onEvent, and tool dispatch
       // checks the aborted signal before starting new work.
-      return waitForSettlement(run.completion, abortWaitMs).then((settled) => {
+      return waitForSettlement(run.completion, abortWaitMs).then(async (settled) => {
         if (!settled && ['running', 'waiting'].includes(run.status)) {
           // Make the forced terminal snapshot immutable. The detached provider
           // may eventually settle, but it no longer owns this durable state.
@@ -868,7 +916,7 @@ export function createAgentRunManager({
           run.updatedAt = new Date().toISOString();
           run.controller = null;
           try {
-            persist(run);
+            await persist(run);
           } catch (error) {
             console.error(`Failed to persist force-aborted agent run ${run.id}:`, error);
           }
@@ -1657,12 +1705,12 @@ function normalizeRuntimeContext(value) {
   };
 }
 
-function serializeRun(run) {
+function serializeRun(run, forStorage = false) {
   return {
     id: run.id,
     sessionId: run.sessionId,
     replyId: run.replyId,
-    status: run.status,
+    status: forStorage ? run.status : (run.durableStatus || run.status),
     createdAt: run.createdAt,
     updatedAt: run.updatedAt,
     sequence: run.sequence,
@@ -1701,8 +1749,9 @@ function loadPersistedRuns(runsDir, runs, { retentionMs = DEFAULT_RUN_RETENTION_
         continue;
       }
       const eventsPath = join(runsDir, `${saved.id}.events.ndjson`);
-      const events = existsSync(eventsPath)
-        ? readFileSync(eventsPath, 'utf8').split('\n').filter(Boolean).map((line) => {
+      const eventLog = existsSync(eventsPath) ? readFileSync(eventsPath) : null;
+      const events = eventLog
+        ? eventLog.toString('utf8').split('\n').filter(Boolean).map((line) => {
           const stored = JSON.parse(line);
           if (stored?.v === 2 && stored.ev) {
             return { seq: Number(stored.seq) || 0, turn: Number(stored.turn) || 0, ev: stored.ev };
@@ -1723,7 +1772,7 @@ function loadPersistedRuns(runsDir, runs, { retentionMs = DEFAULT_RUN_RETENTION_
         // during this load, so a restart cannot immediately erase them.
         ...(interruptedByRestart ? { updatedAt: new Date().toISOString() } : {}),
         events,
-        eventBytes: existsSync(eventsPath) ? readFileSync(eventsPath).byteLength : 0,
+        eventBytes: eventLog?.byteLength ?? 0,
         controller: null,
         completion: Promise.resolve(),
       });

@@ -7,7 +7,7 @@
  */
 
 import config from '../config/config.js';
-import { Sandbox } from 'e2b';
+
 
 const E2B_TEMPLATE = 'base';
 const E2B_META_KEY = 'cherrysandbox';
@@ -35,6 +35,7 @@ function getOrCreateId() {
  * Returns the sandbox info if found, null otherwise.
  */
 async function findExistingSandbox(apiKey, metaId = getOrCreateId()) {
+  const { Sandbox } = await import('e2b');
   const paginator = await Sandbox.list({
     apiKey,
     query: { metadata: { [E2B_META_KEY]: metaId } },
@@ -198,8 +199,8 @@ async function openPersistentSandbox({
   apiKey,
   metaId,
   find = findExistingSandbox,
-  connect = (sandboxId, options) => Sandbox.connect(sandboxId, options),
-  create = (options) => Sandbox.create(options),
+  connect = async (sandboxId, options) => (await import('e2b')).Sandbox.connect(sandboxId, options),
+  create = async (options) => (await import('e2b')).Sandbox.create(options),
 }) {
   const existing = await find(apiKey, metaId);
   if (existing) {

@@ -90,17 +90,17 @@ test('backend operations reject oversized keys before issuing a request', async 
 });
 
 test('S3 client uses bounded retries and required-only checksum behavior', async () => {
-  const lowerBounded = __s3BackendInternals.createClient({
+  const lowerBounded = await __s3BackendInternals.createClient({
     ...TEST_CONFIG,
     maxAttempts: 0,
     retryMode: 'invalid',
   });
-  const upperBounded = __s3BackendInternals.createClient({
+  const upperBounded = await __s3BackendInternals.createClient({
     ...TEST_CONFIG,
     maxAttempts: 99,
     retryMode: 'adaptive',
   });
-  const defaulted = __s3BackendInternals.createClient({
+  const defaulted = await __s3BackendInternals.createClient({
     ...TEST_CONFIG,
     maxAttempts: '',
   });
@@ -297,7 +297,7 @@ test('S3 client and commands honor exact bucket/CNAME endpoint mode', async () =
     bucketEndpoint: true,
     forcePathStyle: false,
   };
-  const sdkClient = __s3BackendInternals.createClient(endpointConfig);
+  const sdkClient = await __s3BackendInternals.createClient(endpointConfig);
   try {
     assert.equal(sdkClient.config.bucketEndpoint, true);
     assert.equal(sdkClient.config.forcePathStyle, false);
@@ -324,7 +324,7 @@ test('S3 client and commands honor exact bucket/CNAME endpoint mode', async () =
   );
 
   const resolvedRequests = [];
-  const middlewareClient = __s3BackendInternals.createClient(bucketlessConfig, {
+  const middlewareClient = await __s3BackendInternals.createClient(bucketlessConfig, {
     requestHandler: {
       handle: async (request) => {
         resolvedRequests.push(request);

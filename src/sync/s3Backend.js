@@ -1,10 +1,3 @@
-import {
-  DeleteObjectCommand,
-  GetObjectCommand,
-  ListObjectsV2Command,
-  PutObjectCommand,
-  S3Client,
-} from '@aws-sdk/client-s3';
 import { validateProviderConfig } from './providerPresets.js';
 import { randomId } from '../utils/misc.js';
 
@@ -115,8 +108,9 @@ function downloadStreamTimeout(
   return sizeAwareTransferTimeout(expectedBytes, configuredTimeout);
 }
 
-function createClient(config, clientOptions = {}) {
+async function createClient(config, clientOptions = {}) {
   const normalized = validateProviderConfig(config);
+  const { S3Client } = await import('@aws-sdk/client-s3');
   return new S3Client({
     region: normalized.region || 'us-east-1',
     endpoint: normalized.endpoint || undefined,
@@ -538,7 +532,7 @@ function bytesEqual(left, right) {
 
 export function createS3Backend(config, dependencies = {}) {
   const normalized = validateProviderConfig(config);
-  const client = dependencies.client || createClient(normalized);
+  let client = dependencies.client;
   const requestTimeoutMs = boundedTimeout(
     normalized.requestTimeoutMs,
     DEFAULT_REQUEST_TIMEOUT_MS
@@ -561,11 +555,20 @@ export function createS3Backend(config, dependencies = {}) {
     : normalized.bucket;
 
   async function send(command, options = {}) {
+    // Construct the SDK client only on the first actual operation. Share its
+    // pending initialization across concurrent requests and allow retries.
+    if (!client) {
+      client = createClient(normalized).catch((error) => {
+        client = null;
+        throw error;
+      });
+    }
+    const readyClient = await client;
     const timeoutMs = options.timeoutMs || requestTimeoutMs;
     const controller = new AbortController();
     try {
       return await timeoutRace(
-        Promise.resolve().then(() => client.send(command, { abortSignal: controller.signal })),
+        Promise.resolve().then(() => readyClient.send(command, { abortSignal: controller.signal })),
         timeoutMs,
         () => {
           const error = new S3RequestTimeoutError(timeoutMs);
@@ -591,6 +594,7 @@ export function createS3Backend(config, dependencies = {}) {
 
   async function getBytesWithMetadata(key, options = {}) {
     key = assertValidObjectKey(key);
+    const { GetObjectCommand } = await import('@aws-sdk/client-s3');
     try {
       const response = await send(new GetObjectCommand({
         Bucket: bucket,
@@ -624,6 +628,7 @@ export function createS3Backend(config, dependencies = {}) {
 
   async function putBytes(key, body, contentType = 'application/octet-stream', options = {}) {
     key = assertValidObjectKey(key);
+    const { PutObjectCommand } = await import('@aws-sdk/client-s3');
     if (contentType && typeof contentType === 'object') {
       options = contentType;
       contentType = options.contentType || 'application/octet-stream';
@@ -642,6 +647,7 @@ export function createS3Backend(config, dependencies = {}) {
 
   async function deleteObject(key, options = {}) {
     key = assertValidObjectKey(key);
+    const { DeleteObjectCommand } = await import('@aws-sdk/client-s3');
     await send(new DeleteObjectCommand({
       Bucket: bucket,
       Key: key,
@@ -651,6 +657,7 @@ export function createS3Backend(config, dependencies = {}) {
 
   async function listObjects(prefix, options = {}) {
     prefix = assertValidObjectKey(prefix, 'S3 object-listing prefix');
+    const { ListObjectsV2Command } = await import('@aws-sdk/client-s3');
     const requestedMaxObjects = Number(options.maxObjects);
     const maxObjects = Number.isFinite(requestedMaxObjects)
       ? Math.min(100_000, Math.max(1, Math.floor(requestedMaxObjects)))
@@ -756,6 +763,7 @@ export function createS3Backend(config, dependencies = {}) {
 
     async putJson(key, data, options = {}) {
       key = assertValidObjectKey(key);
+      const { PutObjectCommand } = await import('@aws-sdk/client-s3');
       const body = JSON.stringify(data);
       const response = await send(new PutObjectCommand({
         Bucket: bucket,

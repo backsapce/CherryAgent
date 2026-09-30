@@ -7,10 +7,6 @@ import { resolveReasoningLevels, reasoningProviderOptions } from './reasoning.js
  * the app to use the provider-neutral Vercel AI SDK APIs.
  */
 
-import { createAnthropic } from '@ai-sdk/anthropic';
-import { createGoogleGenerativeAI } from '@ai-sdk/google';
-import { createOpenAI } from '@ai-sdk/openai';
-import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 
 const DEFAULT_BASE_URLS = {
   openai: 'https://api.openai.com/v1',
@@ -27,8 +23,9 @@ const DEFAULT_BASE_URLS = {
  * The application intentionally creates a provider per request: profiles can
  * change at runtime and each request must use the selected session profile.
  */
-export function createLanguageModel(config = {}) {
-  const model = createBaseLanguageModel(config);
+export async function createLanguageModel(config = {}) {
+  config = { ...config };
+  const model = await createBaseLanguageModel(config);
   if (!config.reasoningEffort) return model;
   return wrapLanguageModel({ model, middleware: {
     specificationVersion: 'v3',
@@ -45,7 +42,7 @@ export function createLanguageModel(config = {}) {
   } });
 }
 
-function createBaseLanguageModel(config = {}) {
+async function createBaseLanguageModel(config = {}) {
   const provider = config.provider;
   const apiKey = config.apiKey;
   const model = config.model;
@@ -57,9 +54,9 @@ function createBaseLanguageModel(config = {}) {
 
   switch (provider) {
     case 'openai':
-      return createOpenAI({ apiKey, ...(baseUrl ? { baseURL: baseUrl } : {}) }).chat(model);
+      return (await import('@ai-sdk/openai')).createOpenAI({ apiKey, ...(baseUrl ? { baseURL: baseUrl } : {}) }).chat(model);
     case 'anthropic':
-      return createAnthropic({
+      return (await import('@ai-sdk/anthropic')).createAnthropic({
         apiKey,
         baseURL: anthropicBaseUrl(baseUrl),
         // The app is intentionally browser-first. Anthropic requires this
@@ -67,7 +64,7 @@ function createBaseLanguageModel(config = {}) {
         headers: { 'anthropic-dangerous-direct-browser-access': 'true' },
       }).messages(model);
     case 'gemini':
-      return createGoogleGenerativeAI({
+      return (await import('@ai-sdk/google')).createGoogleGenerativeAI({
         apiKey,
         ...(baseUrl ? { baseURL: baseUrl } : {}),
       })(model);
@@ -140,11 +137,11 @@ export function toModelMessages(messages = []) {
     });
 }
 
-function createCompatibleModel({ provider, apiKey, baseUrl, model, headers }) {
+async function createCompatibleModel({ provider, apiKey, baseUrl, model, headers }) {
   if (!baseUrl) {
     throw new Error(`A base URL is required for ${provider}.`);
   }
-  return createOpenAICompatible({
+  return (await import('@ai-sdk/openai-compatible')).createOpenAICompatible({
     name: provider,
     apiKey,
     baseURL: baseUrl,
