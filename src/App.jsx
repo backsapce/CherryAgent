@@ -4,7 +4,9 @@ import MessagePanel from './components/MessagePanel/MessagePanel';
 import {
   loadSessionMetadata,
   loadSessionMessages,
+  loadSessionFolders,
   saveSessions,
+  saveSessionFolders,
   clearAll,
   deleteSession as deleteSessionFile,
   exportToZip,
@@ -43,6 +45,12 @@ import {
   sortSessions,
 } from './sessionRefresh';
 import { createSessionSaveCoordinator } from './sessionPersistence';
+import {
+  DEFAULT_FOLDER_ID,
+  nextFolderName,
+  sessionFolderKey,
+  sortSessionFolders,
+} from './sessionFolders';
 import { createSessionRunRegistry } from './sessionRuns';
 import { buildWakeupMessage, createOrReplaceTurnWakeup, findNextWakeup } from './agent/wakeup';
 import { WifiOff, ChevronRight } from './components/Icons/Icons';
@@ -347,6 +355,7 @@ function App() {
   const [agentListReady, setAgentListReady] = useState(false);
   const [sessionAgents, setSessionAgents] = useState({}); // { sessionId -> agentId }
   const [lastAgentId, setLastAgentId] = useState(null); // agent used by most recent session
+  const [sessionFolders, setSessionFolders] = useState([]); // [{ id, name, createdAtMs }]
   const [sessionLlmProfiles, setSessionLlmProfiles] = useState({}); // { sessionId -> llmProfileId }
   const [currentLlmProfileId, setCurrentLlmProfileId] = useState(null);
   const [storageVersion, setStorageVersion] = useState(0);
@@ -380,6 +389,7 @@ function App() {
   const selectedAgentRef = useRef(null); // avoid stale closure
   const messagePanelRef = useRef(null);
   const sessionsRef = useRef(sessions);
+  const sessionFoldersRef = useRef(sessionFolders);
   const activeSessionIdRef = useRef(activeSessionId);
   const localePrefRef = useRef(localePref);
   const sessionLoadRequestRef = useRef(0);
@@ -422,6 +432,10 @@ function App() {
   }, [sessions]);
 
   useLayoutEffect(() => {
+    sessionFoldersRef.current = sessionFolders;
+  }, [sessionFolders]);
+
+  useLayoutEffect(() => {
     activeSessionIdRef.current = activeSessionId;
   }, [activeSessionId]);
 
@@ -448,6 +462,9 @@ function App() {
 
       const persistedBeforeRefresh = persistedSessionsRef.current;
       const savedMetadata = await loadSessionMetadata();
+      loadSessionFolders()
+        .then((folders) => setSessionFolders(sortSessionFolders(folders)))
+        .catch((err) => console.warn('Failed to load session folders:', err));
       const selectedId = activeSessionIdRef.current;
       const savedSessions = sortSessions(await Promise.all(savedMetadata.map(async (session) => (
         session.id === selectedId
@@ -635,6 +652,10 @@ function App() {
         // config/session storage is corrupt. The recovery screen must see a
         // stable snapshot that the user can export before choosing a reset.
         if (!sessionLoadSucceeded) return;
+
+        loadSessionFolders()
+          .then((folders) => setSessionFolders(sortSessionFolders(folders)))
+          .catch((err) => console.warn('Failed to load session folders:', err));
 
         initAgents().then(({ agents: allAgents, selectedUrl }) => {
           setAgents(allAgents);
@@ -970,13 +991,81 @@ function App() {
     }
   }, [cancelPendingSessionStart, stopSessionRun]);
 
-  const handleNewSession = useCallback(async () => {
+  const persistSessionFolders = useCallback((nextFolders) => {
+    const records = sortSessionFolders(nextFolders);
+    setSessionFolders(records);
+    sessionFoldersRef.current = records;
+    return saveSessionFolders(records);
+  }, []);
+
+  // Create a folder with an untitled-style base name, deduplicated against the
+  // existing folders. Returns the created record so the sidebar can enter
+  // rename mode on it immediately.
+  const handleAddSessionFolder = useCallback(async (baseName) => {
+    const name = nextFolderName(
+      sessionFoldersRef.current,
+      String(baseName || '').trim() || 'Untitled',
+    );
+    const folder = { id: `folder-${generateId()}`, name, createdAtMs: Date.now() };
+    try {
+      await persistSessionFolders([...sessionFoldersRef.current, folder]);
+    } catch (error) {
+      console.error('Failed to save session folders:', error);
+    }
+    return folder;
+  }, [persistSessionFolders]);
+
+  const handleRenameSessionFolder = useCallback(async (folderId, name) => {
+    const trimmed = String(name || '').trim();
+    if (!trimmed) return;
+    const current = sessionFoldersRef.current;
+    const folder = current.find((item) => item.id === folderId);
+    if (!folder || folder.name === trimmed) return;
+    try {
+      await persistSessionFolders(current.map((item) => (
+        item.id === folderId ? { ...item, name: trimmed } : item
+      )));
+    } catch (error) {
+      console.error('Failed to save session folders:', error);
+    }
+  }, [persistSessionFolders]);
+
+  // Drop a session into a folder (or back into the implicit default folder).
+  // Touching the session timestamps keeps the folder assignment on the winning
+  // side of the timestamp-based session merge.
+  const handleMoveSessionToFolder = useCallback((sessionId, folderId) => {
+    const target = folderId === DEFAULT_FOLDER_ID
+      ? null
+      : sessionFoldersRef.current.find((item) => item.id === folderId);
+    if (folderId !== DEFAULT_FOLDER_ID && !target) return;
+    const session = sessionsRef.current.find((item) => item.id === sessionId);
+    if (!session || sessionFolderKey(session) === (target ? target.id : DEFAULT_FOLDER_ID)) return;
+    setSessions((prev) => prev.map((item) => {
+      if (item.id !== sessionId) return item;
+      const next = { ...item, ...sessionTimeFields() };
+      if (target) next.folderId = target.id;
+      else delete next.folderId;
+      return next;
+    }));
+  }, []);
+
+  const handleNewSession = useCallback(async (folderId = null) => {
     messagePanelRef.current?.focusInput();
     if (!agentListReady) return;
 
+    const targetFolderId = folderId && folderId !== DEFAULT_FOLDER_ID
+      && sessionFoldersRef.current.some((item) => item.id === folderId)
+      ? folderId
+      : null;
+
     // If the active session is still empty, just keep it — don't spawn another
     const current = sessions.find((c) => c.id === activeSessionId);
-    if (current && Array.isArray(current.messages) && current.messages.length === 0) return;
+    if (
+      current
+      && Array.isArray(current.messages)
+      && current.messages.length === 0
+      && sessionFolderKey(current) === (targetFolderId || DEFAULT_FOLDER_ID)
+    ) return;
 
     // Use last used agent, falling back to first available agent
     const agentId = lastAgentId ?? (agentList.length > 0 ? agentList[0].id : null);
@@ -990,6 +1079,7 @@ function App() {
       lastMessage: '',
       ...sessionTimeFields(),
       messages: [],
+      ...(targetFolderId && { folderId: targetFolderId }),
       ...(llmProfileId && { llmProfileId }),
       ...(agentId && { agentId }),
     };
@@ -2677,6 +2767,7 @@ function App() {
       lastMessage: lastMessage.slice(0, 60),
       ...sessionTimeFields(),
       messages: forkedMessages,
+      ...(session.folderId && { folderId: session.folderId }),
       ...(session.llmProfileId && { llmProfileId: session.llmProfileId }),
       ...(session.agentId && { agentId: session.agentId }),
     };
@@ -2939,6 +3030,10 @@ function App() {
         sessionAgents={sessionAgents}
         agentList={agentList}
         runningSessionIds={busySessionIdsForUi}
+        folders={sessionFolders}
+        onAddFolder={handleAddSessionFolder}
+        onRenameFolder={handleRenameSessionFolder}
+        onMoveSessionToFolder={handleMoveSessionToFolder}
       />
       {/* Expand button - visible when left panel is collapsed (PC mode only) */}
       {leftPanelCollapsed && (

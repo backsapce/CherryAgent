@@ -16,7 +16,14 @@
     "cancelWakeup": "Cancel scheduled wake-up",
     "noMessages": "No messages yet",
     "noConversations": "No conversations yet",
-    "clickToStart": "Click + to start a new session"
+    "clickToStart": "Click + to start a new session",
+    "newFolder": "New Folder",
+    "renameFolder": "Rename",
+    "untitledFolder": "Untitled",
+    "showMore": "Show more ({count})",
+    "newSessionHere": "New session in this folder",
+    "folderMenu": "Folder menu",
+    "moveToFolder": "Move to folder"
   },
   "message": {
     "cacheHitRate": "Cache hit rate",

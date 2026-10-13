@@ -518,6 +518,7 @@ function shouldMergeIncomingFile(path) {
     'config.yml',
     'config.json',
     'session.json',
+    'folders.json',
     'chat.json',
     'chats.json',
   ].includes(path) || /^(sessions|messages)\/[^/]+\.json$/.test(path);
@@ -617,6 +618,7 @@ export async function listEntries(dirHandle) {
 // ─── Session Operations ───────────────────────────────────────────────────────
 
 const SESSION_FILE = 'session.json';
+const FOLDERS_FILE = 'folders.json';
 const LEGACY_CONVERSATION_FILES = ['chats.json', 'chat.json'];
 const SESSIONS_DIR = 'sessions';
 const LEGACY_MESSAGES_DIR = 'messages';
@@ -709,6 +711,56 @@ export async function loadSessionMetadata() {
   const { sessions, loadedPrimaryIndex } = await loadSessionIndex(root);
   sessionMetadataWriteSnapshot = loadedPrimaryIndex ? JSON.stringify(sessions) : null;
   return sessions;
+}
+
+/**
+ * Load the persisted session folder records. Entries with missing or unsafe
+ * fields are skipped rather than fatal: sessions in a dropped folder simply
+ * fall back to the implicit default folder.
+ * @returns {Promise<Array<{id: string, name: string, createdAtMs?: number}>>}
+ */
+export async function loadSessionFolders() {
+  const root = await getRootDir();
+  const stored = await readJSON(root, FOLDERS_FILE);
+  if (stored == null) return [];
+  if (!Array.isArray(stored)) {
+    throw new Error(`${FOLDERS_FILE} must contain a JSON array`);
+  }
+  const folders = [];
+  const seenIds = new Set();
+  for (const folder of stored) {
+    if (!isPlainObject(folder)) continue;
+    const id = typeof folder.id === 'string' ? folder.id.trim() : '';
+    if (!id || id.includes('/') || seenIds.has(id)) continue;
+    seenIds.add(id);
+    folders.push({
+      id,
+      name: typeof folder.name === 'string' && folder.name.trim() ? folder.name : id,
+      ...(Number.isFinite(folder.createdAtMs) ? { createdAtMs: folder.createdAtMs } : {}),
+    });
+  }
+  return folders;
+}
+
+/** Persist the session folder records. */
+export async function saveSessionFolders(folders) {
+  const root = await getRootDir();
+  const records = [];
+  const seenIds = new Set();
+  for (const folder of folders || []) {
+    if (!isPlainObject(folder)) continue;
+    const id = typeof folder.id === 'string' ? folder.id.trim() : '';
+    const name = typeof folder.name === 'string' ? folder.name.trim() : '';
+    if (!id || id.includes('/') || !name || seenIds.has(id)) continue;
+    seenIds.add(id);
+    records.push({
+      id,
+      name,
+      ...(Number.isFinite(folder.createdAtMs) ? { createdAtMs: folder.createdAtMs } : {}),
+    });
+  }
+  await writeJSON(root, FOLDERS_FILE, records);
+  return records;
 }
 
 /** Load one session's message body on demand. */

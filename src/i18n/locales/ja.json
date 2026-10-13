@@ -16,7 +16,14 @@
     "cancelWakeup": "予約済みのウェイクアップをキャンセル",
     "noMessages": "メッセージなし",
     "noConversations": "会話はまだありません",
-    "clickToStart": "+ をクリックして新しいセッションを開始"
+    "clickToStart": "+ をクリックして新しいセッションを開始",
+    "newFolder": "新しいフォルダー",
+    "renameFolder": "名前の変更",
+    "untitledFolder": "無題",
+    "showMore": "さらに表示（{count}）",
+    "newSessionHere": "このフォルダーで新規セッション",
+    "folderMenu": "フォルダーメニュー",
+    "moveToFolder": "フォルダーに移動"
   },
   "message": {
     "cacheHitRate": "キャッシュヒット率",

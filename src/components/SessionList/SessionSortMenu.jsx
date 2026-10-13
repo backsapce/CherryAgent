@@ -2,9 +2,9 @@ import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import config from '../../config/config';
 import { useI18n } from '../../i18n/context';
-import { Check, ChevronRight } from '../Icons/Icons';
+import { Check, ChevronRight, FolderPlus } from '../Icons/Icons';
 
-export default function SessionSortMenu({ sortBy }) {
+export default function SessionSortMenu({ sortBy, onAddFolder }) {
   const { t } = useI18n();
   const [position, setPosition] = useState(null);
   const [sortOpen, setSortOpen] = useState(false);
@@ -79,6 +79,22 @@ export default function SessionSortMenu({ sortBy }) {
             if (!event.currentTarget.contains(event.relatedTarget)) setPosition(null);
           }}
         >
+          {onAddFolder && (
+            <button
+              type="button"
+              className="session-sort-item"
+              onClick={() => {
+                setPosition(null);
+                triggerRef.current?.focus();
+                onAddFolder();
+              }}
+            >
+              <span className="session-sort-item-label">
+                <FolderPlus width={15} height={15} />
+                {t('session.newFolder')}
+              </span>
+            </button>
+          )}
           <div onMouseEnter={() => setSortOpen(true)} onMouseLeave={() => {
             if (!menuRef.current?.contains(document.activeElement) || document.activeElement === sortRef.current) setSortOpen(false);
           }}>
