@@ -189,6 +189,13 @@
   animation: image-preview-ai-slide-in 0.2s ease-out;
 }
 
+/* The overlay stays dark in both themes, but the global ::selection tint tracks
+   --color-primary, which is near-black in the light theme — an invisible band
+   on this panel. Highlight with the accent instead so drag selection shows. */
+.image-preview-overlay ::selection {
+  background: color-mix(in srgb, var(--color-accent-strong, #a79fdf) 55%, transparent);
+}
+
 .image-preview-ai-panel-header {
   flex: 0 0 auto;
   display: flex;
