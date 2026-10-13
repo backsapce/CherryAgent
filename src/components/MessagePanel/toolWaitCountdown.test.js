@@ -6,8 +6,8 @@ import {
   getWaitCommandWaitSeconds,
 } from './toolWaitCountdown.js';
 
-test('getWaitCommandWaitSeconds applies the 30 second default and clamps', () => {
-  assert.equal(getWaitCommandWaitSeconds({ name: 'wait_command' }), 30);
+test('getWaitCommandWaitSeconds applies the 60 second default and clamps', () => {
+  assert.equal(getWaitCommandWaitSeconds({ name: 'wait_command' }), 60);
   assert.equal(getWaitCommandWaitSeconds({
     name: 'wait_command',
     parsedArgs: { wait_seconds: 90 },
@@ -15,7 +15,7 @@ test('getWaitCommandWaitSeconds applies the 30 second default and clamps', () =>
   assert.equal(getWaitCommandWaitSeconds({
     name: 'wait_command',
     parsedArgs: { wait_seconds: 0 },
-  }), 30);
+  }), 60);
   assert.equal(getWaitCommandWaitSeconds({
     name: 'wait_command',
     parsedArgs: { wait_seconds: 99_999_999 },
@@ -35,7 +35,7 @@ test('getWaitCommandWaitSeconds prefers a runtime-reported slice budget', () => 
   assert.equal(getWaitCommandWaitSeconds({
     name: 'wait_command',
     waitBudgetSeconds: 0,
-  }), 30);
+  }), 60);
 });
 
 test('getWaitCommandStartedAtMs parses the recorded start timestamp', () => {

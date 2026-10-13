@@ -263,6 +263,101 @@ test('parseAiImageMeta joins conditioned text nodes through the positive chain',
   assert.deepEqual(meta.loras, []);
 });
 
+test('parseAiImageMeta follows wired text widgets through switch/concat/multiline nodes', async () => {
+  const graph = JSON.stringify({
+    1: {
+      class_type: 'KSampler',
+      inputs: {
+        seed: 723282680748150, steps: 8, cfg: 1, sampler_name: 'euler', scheduler: 'simple', denoise: 1,
+        model: ['2', 0], positive: ['3', 0], negative: ['5', 0], latent_image: ['6', 0],
+      },
+    },
+    2: { class_type: 'UNETLoader', inputs: { unet_name: 'krea2_turbo_int8_convrot.safetensors', weight_dtype: 'default' } },
+    3: { class_type: 'CLIPTextEncode', inputs: { text: ['4', 0], clip: ['7', 0] } },
+    4: { class_type: 'ComfySwitchNode', inputs: { switch: ['8', 0], on_false: ['9', 0], on_true: ['10', 0] } },
+    5: { class_type: 'ConditioningZeroOut', inputs: { conditioning: ['3', 0] } },
+    6: { class_type: 'EmptyLatentImage', inputs: { width: 1024, height: 1024, batch_size: 1 } },
+    7: { class_type: 'CLIPLoader', inputs: { clip_name: 't5xxl.safetensors', type: 'flux' } },
+    8: { class_type: 'PrimitiveBoolean', inputs: { value: true } },
+    9: { class_type: 'PrimitiveStringMultiline', inputs: { value: ['11', 0] } },
+    10: { class_type: 'StringConcatenate', inputs: { string_a: ['9', 0], string_b: 'backspaceycc', delimiter: ', ' } },
+    11: { class_type: 'PrimitiveStringMultiline', inputs: { value: 'Concept: a cheerful young woman dancing in a cozy living room' } },
+  });
+  const meta = await parseAiImageMeta(makePng(textChunk('prompt', graph)));
+  assert.ok(meta);
+  assert.equal(meta.source, 'comfyui');
+  assert.equal(meta.prompt, 'Concept: a cheerful young woman dancing in a cozy living room, backspaceycc');
+  assert.equal(meta.negativePrompt, 'Concept: a cheerful young woman dancing in a cozy living room, backspaceycc');
+  assert.equal(meta.model, 'krea2_turbo_int8_convrot.safetensors');
+  assert.equal(meta.steps, 8);
+});
+
+test('parseAiImageMeta picks the disabled switch branch when the selector is false', async () => {
+  const graph = JSON.stringify({
+    1: {
+      class_type: 'KSampler',
+      inputs: {
+        seed: 1, steps: 8, cfg: 1, sampler_name: 'euler', scheduler: 'simple',
+        model: ['2', 0], positive: ['3', 0], negative: ['5', 0], latent_image: ['6', 0],
+      },
+    },
+    2: { class_type: 'UNETLoader', inputs: { unet_name: 'flux.safetensors', weight_dtype: 'default' } },
+    3: { class_type: 'CLIPTextEncode', inputs: { text: ['4', 0], clip: ['7', 0] } },
+    4: { class_type: 'ComfySwitchNode', inputs: { switch: ['8', 0], on_false: ['9', 0], on_true: ['10', 0] } },
+    5: { class_type: 'ConditioningZeroOut', inputs: { conditioning: ['3', 0] } },
+    6: { class_type: 'EmptyLatentImage', inputs: { width: 512, height: 512, batch_size: 1 } },
+    7: { class_type: 'CLIPLoader', inputs: { clip_name: 't5xxl.safetensors' } },
+    8: { class_type: 'PrimitiveBoolean', inputs: { value: false } },
+    9: { class_type: 'PrimitiveStringMultiline', inputs: { value: 'the encoded prompt' } },
+    10: { class_type: 'StringConcatenate', inputs: { string_a: ['9', 0], string_b: 'trigger word', delimiter: ', ' } },
+  });
+  const meta = await parseAiImageMeta(makePng(textChunk('prompt', graph)));
+  assert.ok(meta);
+  assert.equal(meta.prompt, 'the encoded prompt');
+});
+
+test('parseAiImageMeta yields null prompt when a wired text chain holds no literal text', async () => {
+  const graph = JSON.stringify({
+    1: {
+      class_type: 'KSampler',
+      inputs: {
+        seed: 1, steps: 4, cfg: 1, sampler_name: 'euler', scheduler: 'simple',
+        model: ['2', 0], positive: ['3', 0], negative: ['3', 0], latent_image: ['6', 0],
+      },
+    },
+    2: { class_type: 'UNETLoader', inputs: { unet_name: 'flux.safetensors', weight_dtype: 'default' } },
+    3: { class_type: 'CLIPTextEncode', inputs: { text: ['4', 0], clip: ['7', 0] } },
+    4: { class_type: 'TextGenerate', inputs: { prompt: 'rewrite this', max_length: 1024 } },
+    6: { class_type: 'EmptyLatentImage', inputs: { width: 512, height: 512, batch_size: 1 } },
+    7: { class_type: 'CLIPLoader', inputs: { clip_name: 't5xxl.safetensors' } },
+  });
+  const meta = await parseAiImageMeta(makePng(textChunk('prompt', graph)));
+  assert.ok(meta);
+  assert.equal(meta.source, 'comfyui');
+  assert.equal(meta.prompt, null);
+  assert.equal(meta.negativePrompt, null);
+  assert.equal(meta.steps, 4);
+});
+
+test('parseAiImageMeta stops on cyclic string links instead of hanging', async () => {
+  const graph = JSON.stringify({
+    1: {
+      class_type: 'KSampler',
+      inputs: {
+        seed: 1, steps: 4, cfg: 1, sampler_name: 'euler', scheduler: 'simple',
+        positive: ['3', 0], negative: ['3', 0], latent_image: ['6', 0],
+      },
+    },
+    3: { class_type: 'CLIPTextEncode', inputs: { text: ['4', 0] } },
+    4: { class_type: 'PrimitiveStringMultiline', inputs: { value: ['5', 0] } },
+    5: { class_type: 'PrimitiveStringMultiline', inputs: { value: ['4', 0] } },
+    6: { class_type: 'EmptyLatentImage', inputs: { width: 512, height: 512, batch_size: 1 } },
+  });
+  const meta = await parseAiImageMeta(makePng(textChunk('prompt', graph)));
+  assert.ok(meta);
+  assert.equal(meta.prompt, null);
+});
+
 test('parseAiImageMeta returns null for images without AI metadata', async () => {
   assert.equal(await parseAiImageMeta(makePng()), null);
   assert.equal(await parseAiImageMeta(new ArrayBuffer(0)), null);

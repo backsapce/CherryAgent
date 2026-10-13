@@ -360,11 +360,11 @@ registry.register({
   category: 'shell',
   schema: {
     description:
-      'Start a managed background command and wait for it in ONE call: pass the command (foreground form, no & or nohup) and this call starts the job, blocks until it finishes or emits logs, and returns the full result including job_id and nextCursor. Or pass job_id (with cursor from the previous result) to keep waiting on an existing job. Returns early on completion or new output, so size wait_seconds (default 30, at most 7 days) to the expected remaining time instead of a tight loop of short re-waits; the user sees the remaining wait time while it runs. Use start_command instead only when the turn must not wait now (fire-and-forget, or a schedule_wakeup continuation will check the job later).',
+      'Start a managed background command and wait for it in ONE call: pass the command (foreground form, no & or nohup) and this call starts the job, blocks until it finishes or emits logs, and returns the full result including job_id and nextCursor. Or pass job_id (with cursor from the previous result) to keep waiting on an existing job. Returns early on completion or new output, so size wait_seconds (default 60, at most 7 days) to the expected remaining time instead of a tight loop of short re-waits; the user sees the remaining wait time while it runs. Use start_command instead only when the turn must not wait now (fire-and-forget, or a schedule_wakeup continuation will check the job later).',
     parameters: TOOL_PARAMETER_SCHEMAS.wait_command,
   },
   checkAvailable: managedCommandAvailable,
-  async handler({ command, job_id: jobId, cursor = 0, wait_seconds: waitSeconds = 30 }, ctx) {
+  async handler({ command, job_id: jobId, cursor = 0, wait_seconds: waitSeconds = 60 }, ctx) {
     if (command && jobId) {
       throw new Error('wait_command: pass either command (start a new job and wait) or job_id (wait on an existing job), not both.');
     }

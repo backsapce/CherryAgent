@@ -4,6 +4,7 @@
 
 const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 const CONDITIONING_FOLLOW_DEPTH = 12;
+const STRING_FOLLOW_DEPTH = 24;
 
 async function inflate(bytes) {
   const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate'));
@@ -160,14 +161,80 @@ function parseComfyGraph(graph) {
     return nested === undefined ? undefined : literal(nested);
   };
 
+  // A widget constant (e.g. a switch selector) may be set inline or wired to a
+  // Primitive* node; resolve either shape to its literal value.
+  const constLiteral = (ref) => {
+    if (!Array.isArray(ref)) return literal(ref);
+    const linked = node(ref);
+    if (!linked) return undefined;
+    return literal(linked.inputs?.value ?? linked.inputs?.int ?? linked.inputs?.boolean);
+  };
+
+  // Follows a string-producing chain to the literal text behind a widget link:
+  // multiline string primitives, concatenations, switches, and pass-through
+  // nodes (PreviewAny, TextGenerate, custom routers). Returns null when the
+  // chain holds no literal text.
+  const resolveStringRef = (ref, depth = 0, visited = new Set()) => {
+    if (!Array.isArray(ref)) {
+      const value = literal(ref);
+      return value === undefined || value === null ? null : String(value);
+    }
+    const linked = node(ref);
+    if (!linked || depth > STRING_FOLLOW_DEPTH) return null;
+    const id = String(ref[0]);
+    if (visited.has(id)) return null;
+    visited.add(id);
+
+    const classType = linked.class_type || '';
+    const inputs = linked.inputs || {};
+    const follow = (value) => (value === undefined ? null : resolveStringRef(value, depth + 1, visited));
+
+    if (/Primitive\w*String/i.test(classType)) {
+      return follow(inputs.string ?? inputs.value);
+    }
+    if (/Concat|JoinString/i.test(classType)) {
+      const parts = [inputs.string_a, inputs.string_b, inputs.string_c, inputs.text_a, inputs.text_b]
+        .map(follow)
+        .filter((part) => part !== null);
+      if (!parts.length) return null;
+      const delimiter = typeof inputs.delimiter === 'string' ? inputs.delimiter : '';
+      return parts.join(delimiter);
+    }
+    if (/Switch/i.test(classType)) {
+      const branchKeys = Object.keys(inputs).filter((key) => /^(on_true|on_false|(?:case_)?\d+)$/.test(key));
+      const selector = constLiteral(inputs.switch ?? inputs.select ?? inputs.selection);
+      let ordered = branchKeys;
+      if (typeof selector === 'boolean') {
+        const preferred = selector ? 'on_true' : 'on_false';
+        ordered = [...branchKeys.filter((key) => key === preferred), ...branchKeys.filter((key) => key !== preferred)];
+      } else if (Number.isInteger(selector)) {
+        const numeric = branchKeys.filter((key) => /^\d+$/.test(key)).sort((a, b) => Number(a) - Number(b));
+        const picked = numeric[selector - 1] ?? numeric[selector];
+        if (picked !== undefined) ordered = [picked, ...branchKeys.filter((key) => key !== picked)];
+      }
+      for (const key of ordered) {
+        const resolved = follow(inputs[key]);
+        if (resolved !== null) return resolved;
+      }
+      return null;
+    }
+    // Generic pass-through: take text from linked inputs in declared order.
+    const parts = Object.values(inputs)
+      .map((value) => (Array.isArray(value) ? follow(value) : null))
+      .filter((part) => part !== null);
+    return parts.length ? parts.join('\n') : null;
+  };
+
   const promptTexts = (ref, depth = 0, acc = [], seen = new Set()) => {
     const linked = node(ref);
     if (!linked || depth > CONDITIONING_FOLLOW_DEPTH) return acc;
     const classType = linked.class_type || '';
     if (/CLIPTextEncode/i.test(classType)) {
-      if (linked.inputs?.text && !seen.has(linked.inputs.text)) {
-        seen.add(linked.inputs.text);
-        acc.push(String(linked.inputs.text));
+      const raw = linked.inputs?.text;
+      const text = Array.isArray(raw) ? resolveStringRef(raw) : (raw === undefined || raw === null ? null : String(raw));
+      if (text && !seen.has(text)) {
+        seen.add(text);
+        acc.push(text);
       }
       return acc;
     }

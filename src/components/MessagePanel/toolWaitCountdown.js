@@ -1,7 +1,7 @@
 const MAX_WAIT_SECONDS = 7 * 24 * 60 * 60;
 
 /**
- * Effective wait duration in seconds, defaulting to 30 when absent. Prefers a
+ * Effective wait duration in seconds, defaulting to 60 when absent. Prefers a
  * runtime-reported per-call budget (sandbox runs slice long waits into bounded
  * calls) over the model-requested duration.
  */
@@ -12,7 +12,7 @@ export function getWaitCommandWaitSeconds(toolCall) {
     return Math.min(MAX_WAIT_SECONDS, Math.round(budgetSeconds));
   }
   const seconds = Number(toolCall.parsedArgs?.wait_seconds);
-  if (!Number.isFinite(seconds) || seconds < 1) return 30;
+  if (!Number.isFinite(seconds) || seconds < 1) return 60;
   return Math.min(MAX_WAIT_SECONDS, Math.round(seconds));
 }
 

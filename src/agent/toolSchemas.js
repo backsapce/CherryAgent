@@ -54,7 +54,7 @@ export const TOOL_PARAMETER_SCHEMAS = {
         type: 'integer',
         minimum: 1,
         maximum: 604800,
-        description: 'Maximum seconds to block waiting for output or completion, from 1 second up to 7 days. Always decide this explicitly (default 30). Size it to cover the expected remaining time of the job rather than re-waiting in a short loop; the user sees this duration while the wait runs.',
+        description: 'Maximum seconds to block waiting for output or completion, from 1 second up to 7 days. Always decide this explicitly (default 60). Size it to cover the expected remaining time of the job rather than re-waiting in a short loop; the user sees this duration while the wait runs.',
       },
     },
     required: [],

@@ -390,7 +390,7 @@ export function getCommand(jobId, url, cursor = 0, signal) {
  * is re-established until the budget is spent, and budget exhaustion settles
  * on a fresh job.get rather than a stale pushed snapshot.
  */
-export async function waitCommand(jobId, url, { cursor = 0, waitMs = 30_000, signal } = {}) {
+export async function waitCommand(jobId, url, { cursor = 0, waitMs = 60_000, signal } = {}) {
   assertManagedCommandRuntime(url);
   const boundedWaitMs = Math.min(MAX_COMMAND_WAIT_MS, Math.max(0, Number(waitMs) || 0));
   const conn = connFor(url);
