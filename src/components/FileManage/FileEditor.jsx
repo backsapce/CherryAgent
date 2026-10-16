@@ -12,6 +12,8 @@ import { html } from '@codemirror/lang-html';
 import { xml } from '@codemirror/lang-xml';
 import { oneDark } from '@codemirror/theme-one-dark';
 import { EditorView } from '@codemirror/view';
+import { unifiedMergeView } from '@codemirror/merge';
+import { computeLineDiff } from '../../agent/lineDiff';
 import { X, Save, FileEdit } from '../Icons/Icons';
 import './FileEditor.css';
 
@@ -32,6 +34,7 @@ const FileEditor = ({ show, onClose, fileName, filePath, fileSource, sandboxUrl,
   const [error, setError] = useState(null);
   const [isDirty, setIsDirty] = useState(false);
   const [originalContent, setOriginalContent] = useState('');
+  const [diffMode, setDiffMode] = useState(false);
 
   // Check if file is editable based on extension
   const isEditable = useMemo(() => {
@@ -76,6 +79,26 @@ const FileEditor = ({ show, onClose, fileName, filePath, fileSource, sandboxUrl,
         return [];
     }
   }, [fileName]);
+
+  // Live +/- line counts of the working copy against the last saved version.
+  const lineChanges = useMemo(
+    () => (originalContent === content ? null : computeLineDiff(originalContent, content)),
+    [originalContent, content]
+  );
+
+  // The merge extension is keyed by the saved baseline only: keystrokes must
+  // not rebuild it, or chunk interaction state resets on every edit.
+  const editorExtensions = useMemo(() => [
+    ...getLanguageExtension(),
+    EditorView.lineWrapping,
+    ...(diffMode
+      ? [unifiedMergeView({
+        original: originalContent,
+        highlightChanges: true,
+        collapseUnchanged: { margin: 3, minSize: 6 },
+      })]
+      : []),
+  ], [getLanguageExtension, diffMode, originalContent]);
 
   // Load file content when editor is shown
   useEffect(() => {
@@ -199,6 +222,24 @@ const FileEditor = ({ show, onClose, fileName, filePath, fileSource, sandboxUrl,
             {isDirty && <span className="file-dirty-indicator">*</span>}
           </div>
           <div className="file-editor-buttons">
+            <div className="file-editor-mode-toggle" role="group" aria-label={t('filemanage.editorMode')}>
+              <button
+                type="button"
+                className={`file-editor-mode-btn${!diffMode ? ' active' : ''}`}
+                onClick={() => setDiffMode(false)}
+              >
+                {t('filemanage.editMode')}
+              </button>
+              <button
+                type="button"
+                className={`file-editor-mode-btn${diffMode ? ' active' : ''}`}
+                onClick={() => setDiffMode(true)}
+                disabled={!diffMode && !loading && !error && originalContent === content}
+                title={t('filemanage.diffModeHint')}
+              >
+                {t('filemanage.diffMode')}
+              </button>
+            </div>
             <button
               className="file-editor-btn save"
               onClick={handleSave}
@@ -234,10 +275,7 @@ const FileEditor = ({ show, onClose, fileName, filePath, fileSource, sandboxUrl,
               value={content}
               height="100%"
               theme={oneDark}
-              extensions={[
-                ...getLanguageExtension(),
-                EditorView.lineWrapping,
-              ]}
+              extensions={editorExtensions}
               onChange={handleContentChange}
               basicSetup={true}
               className="file-editor-codemirror"
@@ -249,6 +287,12 @@ const FileEditor = ({ show, onClose, fileName, filePath, fileSource, sandboxUrl,
         <div className="file-editor-footer">
           <span className="file-editor-status">
             {isDirty ? t('filemanage.unsavedChanges') : t('filemanage.saved')}
+            {lineChanges && (
+              <span className="file-editor-diff-stat">
+                <span className="diff-stat-add">+{lineChanges.added}</span>
+                <span className="diff-stat-del">−{lineChanges.removed}</span>
+              </span>
+            )}
           </span>
           <span className="file-editor-hint">
             {t('filemanage.saveHint')}

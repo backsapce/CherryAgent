@@ -162,6 +162,38 @@ Inspect sandbox files.
   assert.match(reference, /Check the runtime output/);
 });
 
+test('write_sandbox_file returns a structured diff result', async () => {
+  const fileApi = createRuntimeFileApi(new Map([['app.py', 'a\nb\nc\n']]));
+  const dispatch = createRuntimeToolDispatcher({
+    execCommand: async () => ({ stdout: '', stderr: '', code: 0 }),
+    listFiles: fileApi.listFiles,
+    readFile: fileApi.readFile,
+    writeFile: fileApi.writeFile,
+  });
+
+  const edit = JSON.parse(await dispatch('write_sandbox_file', {
+    path: 'app.py',
+    content: 'a\nB\nc\nd\n',
+  }));
+  assert.equal(edit.kind, 'file_edit');
+  assert.equal(edit.source, 'sandbox');
+  assert.equal(edit.path, 'app.py');
+  assert.equal(edit.created, false);
+  assert.equal(edit.added, 2);
+  assert.equal(edit.removed, 1);
+  assert.match(edit.diff, /-b\n\+B/);
+  assert.equal(fileApi.files.get('app.py'), 'a\nB\nc\nd\n');
+
+  const created = JSON.parse(await dispatch('write_sandbox_file', {
+    path: 'new.txt',
+    content: 'one\ntwo\n',
+  }));
+  assert.equal(created.created, true);
+  assert.equal(created.added, 2);
+  assert.equal(created.removed, 0);
+  assert.equal(created.old_lines, 0);
+});
+
 test('sandbox web tool dispatch runs through injected search and fetch', async () => {
   const searches = [];
   const fetches = [];

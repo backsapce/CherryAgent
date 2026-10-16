@@ -413,6 +413,70 @@ test('an empty API connection error includes its nested network code', async () 
   );
 });
 
+test('a text-only model rejecting attached images is reported with an image-input hint', async () => {
+  const events = [];
+  const model = new MockLanguageModelV3({
+    doStream: async () => {
+      throw new APICallError({
+        message: 'messages.content.type 参数非法，取值范围 ["text"]',
+        url: 'https://open.bigmodel.cn/api/paas/v4/chat/completions',
+        requestBodyValues: {},
+        statusCode: 400,
+        isRetryable: false,
+      });
+    },
+  });
+
+  await assert.rejects(
+    withTestDeadline(runAgentLoop({
+      ...createConcurrentRunOptions('image-rejection'),
+      messages: [{
+        role: 'user',
+        content: 'what is in this picture?',
+        images: [{ dataUrl: 'data:image/png;base64,AAAA', name: 'chart.png' }],
+      }],
+      model: 'glm-4.6',
+      languageModel: model,
+      modelMaxRetries: 0,
+      toolSchemas: [],
+      onEvent: (event) => events.push(event),
+    })),
+    (error) => error?.code === 'MODEL_REJECTED_IMAGE_INPUT'
+      && error.message.includes('does not support image input')
+      && error.message.includes('(glm-4.6)')
+      && error.message.includes('messages.content.type 参数非法')
+  );
+
+  assert.equal(events.at(-1)?.type, 'run-error');
+  assert.equal(events.at(-1)?.error?.code, 'MODEL_REJECTED_IMAGE_INPUT');
+});
+
+test('a content-type rejection without attached images keeps the provider message', async () => {
+  const model = new MockLanguageModelV3({
+    doStream: async () => {
+      throw new APICallError({
+        message: 'messages.content.type 参数非法，取值范围 ["text"]',
+        url: 'https://open.bigmodel.cn/api/paas/v4/chat/completions',
+        requestBodyValues: {},
+        statusCode: 400,
+        isRetryable: false,
+      });
+    },
+  });
+
+  await assert.rejects(
+    withTestDeadline(runAgentLoop({
+      ...createConcurrentRunOptions('text-only-rejection'),
+      languageModel: model,
+      modelMaxRetries: 0,
+      toolSchemas: [],
+    })),
+    (error) => error?.code !== 'MODEL_REJECTED_IMAGE_INPUT'
+      && error.message.includes('messages.content.type 参数非法')
+      && !error.message.includes('does not support image input')
+  );
+});
+
 test('a provider AbortError is reported as an error when the caller did not cancel', async () => {
   const events = [];
   const model = new MockLanguageModelV3({

@@ -315,7 +315,11 @@ export async function runAgentLoop(opts) {
 
     return buildAgentLoopResult({ state, runId, usage, summaryState: packed.summaryState });
   } catch (caughtError) {
-    const err = enrichEmptyCauseMessage(asError(caughtError));
+    const err = rewriteImageContentRejection(
+      enrichEmptyCauseMessage(asError(caughtError)),
+      packed.apiMessages,
+      opts.model
+    );
     if (err?.code === 'MODEL_TIMEOUT') {
       // Reader cancellation is best effort. Abort the turn as well so the AI
       // SDK, provider request, and any in-flight tool all receive the timeout.
@@ -1149,6 +1153,37 @@ function enrichEmptyCauseMessage(error) {
     enriched.name = error.name;
     return enriched;
   }
+}
+
+/**
+ * Text-only chat models reject multimodal user content with parameter errors
+ * such as Zhipu GLM's `messages.content.type 参数非法，取值范围 ["text"]`.
+ * Image parts are the only non-text content this loop ever sends, so when the
+ * outgoing request carried user images, translate the cryptic provider message
+ * into the actual remedy instead of surfacing it verbatim.
+ */
+function rewriteImageContentRejection(error, apiMessages, model) {
+  if (!error?.message) return error;
+  const requestHasImages = (apiMessages || []).some(
+    (message) => message?.role === 'user' && Array.isArray(message.images) && message.images.length > 0
+  );
+  if (!requestHasImages || !isContentPartTypeRejection(error.message)) return error;
+  error.code = 'MODEL_REJECTED_IMAGE_INPUT';
+  error.message = [
+    `The selected model${model ? ` (${model})` : ''} does not support image input: the provider rejected the attached images.`,
+    `Provider error: ${error.message}`,
+    'Remove the images from this conversation or switch to a multimodal (vision-capable) model, then retry.',
+  ].join(' ');
+  return error;
+}
+
+function isContentPartTypeRejection(message) {
+  const text = String(message || '');
+  if (!/messages\.content(?:\[\d+\])?\.type/i.test(text)) return false;
+  // Gateways either name the rejected image part or list text as the only
+  // accepted content type (Chinese and English variants).
+  return /image(?:_url)?/i.test(text)
+    || /(?:取值范围|allowed|valid|expected|支持)[^\n]*["']?\s*text\s*["']?/i.test(text);
 }
 
 function throwIfAborted(signal) {

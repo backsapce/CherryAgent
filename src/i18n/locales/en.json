@@ -71,7 +71,9 @@
     "globalSkill": "Global",
     "noSandboxSelected": "No sandbox selected",
     "noProviderConfigured": "No provider configured",
-    "uploaded": "uploaded"
+    "uploaded": "uploaded",
+    "editFile": "Edit",
+    "createFile": "Create"
   },
   "settings": {
     "title": "Settings",
@@ -412,7 +414,11 @@
     "aiSteps": "Steps",
     "aiSeed": "Seed",
     "aiCfg": "CFG scale",
-    "aiDuration": "Generation time"
+    "aiDuration": "Generation time",
+    "editorMode": "Editor mode",
+    "editMode": "Edit",
+    "diffMode": "Diff",
+    "diffModeHint": "Compare unsaved changes against the last saved version"
   },
   "permissions": {
     "title": "Approval needed",

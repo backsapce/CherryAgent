@@ -71,7 +71,9 @@
     "globalSkill": "全局",
     "noSandboxSelected": "未选择沙箱",
     "noProviderConfigured": "未配置服务商",
-    "uploaded": "已上传"
+    "uploaded": "已上传",
+    "editFile": "编辑",
+    "createFile": "新建"
   },
   "settings": {
     "title": "设置",
@@ -412,7 +414,11 @@
     "aiSteps": "步数",
     "aiSeed": "种子",
     "aiCfg": "CFG",
-    "aiDuration": "运行时间"
+    "aiDuration": "运行时间",
+    "editorMode": "编辑器模式",
+    "editMode": "编辑",
+    "diffMode": "Diff",
+    "diffModeHint": "对比未保存的更改与最近保存的版本"
   },
   "permissions": {
     "title": "需要确认",

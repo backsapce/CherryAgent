@@ -19,6 +19,7 @@ import {
   validateSkillContent,
 } from '../src/agent/skillCore.js';
 import { TOOL_PARAMETER_SCHEMAS, formatCommandResult } from '../src/agent/toolSchemas.js';
+import { buildFileEditResult } from '../src/agent/fileEdit.js';
 import { fetchWebPage, formatWebPageForModel } from '../src/agent/webFetch.js';
 import { formatSearchResults, runWebSearch } from '../src/models/search.js';
 import { imageMimeFromPath, splitFilePath, waitForSettlement } from '../src/utils/misc.js';
@@ -1359,8 +1360,19 @@ export function createRuntimeToolDispatcher({
       });
     }
     if (name === 'write_sandbox_file') {
+      let previous = null;
+      try {
+        previous = await readFile(input.path);
+      } catch {
+        // Missing file: this write creates it.
+      }
       await writeFile(input.path, input.content);
-      return `Successfully wrote sandbox file ${input.path}`;
+      return buildFileEditResult({
+        source: 'sandbox',
+        path: input.path,
+        oldContent: previous,
+        newContent: input.content,
+      });
     }
     if (name === 'skill') {
       return dispatchSandboxSkill(input, { listFiles, readFile, writeFile });

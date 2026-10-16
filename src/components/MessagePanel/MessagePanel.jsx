@@ -16,7 +16,8 @@ import { loadDroppedImage } from './droppedImage';
 import { imageDownloadName } from './imageDownload';
 import { splitTaggedReasoningContent } from '../../agent/reasoningTags';
 import { searchSkills } from '../../agent/skills';
-import { ChevronRight, Settings as SettingsIcon, Folder, File, FileEdit, Copy, GitFork, MessageSquare, Plus, X, Send, Stop, Plug, Cloud, User, ImageGenerate, Refresh, Activity } from '../Icons/Icons';
+import { parseUnifiedDiff } from '../../agent/lineDiff';
+import { ChevronRight, Settings as SettingsIcon, Folder, File, FileEdit, FilePlus, Copy, GitFork, MessageSquare, Plus, X, Send, Stop, Plug, Cloud, User, ImageGenerate, Refresh, Activity } from '../Icons/Icons';
 import { getSkillCommandRange } from './skillCommand';
 import {
   clampRestoredScrollTop,
@@ -633,6 +634,88 @@ function parseImageReference(toolCall) {
   }
 }
 
+const FILE_EDIT_TOOL_NAMES = new Set(['write_browser_file', 'write_sandbox_file']);
+
+function parseFileEdit(toolCall) {
+  if (!FILE_EDIT_TOOL_NAMES.has(toolCall?.name)) return null;
+  try {
+    const edit = JSON.parse(toolCall.result || '');
+    if (edit?.kind !== 'file_edit' || typeof edit.path !== 'string') return null;
+    return edit;
+  } catch {
+    return null;
+  }
+}
+
+// Small diffs open like ZCode's edit cards; big rewrites stay collapsed with
+// the +/- counts visible in the header.
+const TOOL_DIFF_AUTO_EXPAND_ROWS = 60;
+
+const DiffStat = ({ added, removed }) => {
+  if (!added && !removed) return null;
+  return (
+    <span className="tool-diff-stat">
+      {added > 0 && <span className="tool-diff-stat-add">+{added}</span>}
+      {removed > 0 && <span className="tool-diff-stat-del">−{removed}</span>}
+    </span>
+  );
+};
+
+const ToolDiffBody = ({ edit }) => {
+  const rows = useMemo(() => parseUnifiedDiff(edit.diff || ''), [edit.diff]);
+  if (!rows.length) return null;
+  return (
+    <div className="tool-diff-body">
+      {rows.map((row, index) => {
+        if (row.type === 'hunk') {
+          return <div className="tool-diff-row tool-diff-hunk" key={index}>{row.text}</div>;
+        }
+        if (row.type === 'meta') {
+          return <div className="tool-diff-row tool-diff-meta" key={index}>{row.text}</div>;
+        }
+        return (
+          <div className={`tool-diff-row tool-diff-${row.type}`} key={index}>
+            <span className="tool-diff-line-num old">{row.type === 'add' ? '' : row.oldLine ?? ''}</span>
+            <span className="tool-diff-line-num new">{row.type === 'del' ? '' : row.newLine ?? ''}</span>
+            <span className="tool-diff-sign">{row.type === 'add' ? '+' : row.type === 'del' ? '−' : ''}</span>
+            <span className="tool-diff-text">{row.text}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+};
+
+const ToolFileDiff = ({ toolCall, edit }) => {
+  const { t } = useI18n();
+  const [expanded, setExpanded] = useState(
+    () => parseUnifiedDiff(edit.diff || '').length <= TOOL_DIFF_AUTO_EXPAND_ROWS
+  );
+  return (
+    <div className="tool-block tool-diff-block">
+      <div className="tool-header" onClick={() => setExpanded((v) => !v)}>
+        <ChevronRight className={expanded ? 'expanded' : ''} width={14} height={14} />
+        {edit.created ? (
+          <FilePlus width={16} height={16} className="tool-kind-icon" />
+        ) : (
+          <FileEdit width={16} height={16} className="tool-kind-icon" />
+        )}
+        <span className="tool-label">{edit.created ? t('message.createFile') : t('message.editFile')}</span>
+        <span className="tool-diff-path" title={edit.path}>{edit.path}</span>
+        <DiffStat added={edit.added} removed={edit.removed} />
+        {['pending', 'running', 'writing'].includes(toolCall?.status) && (
+          <span className="tool-exit-code writing">{t('message.writing')}</span>
+        )}
+        {toolCall?.status === 'completed' && <span className="tool-exit-code success">{t('message.completed')}</span>}
+        {(toolCall?.status === 'error' || toolCall?.status === 'aborted') && (
+          <span className="tool-exit-code error">{t(toolCall.status === 'error' ? 'message.error' : 'message.aborted')}</span>
+        )}
+      </div>
+      {expanded && edit.diff && <ToolDiffBody edit={edit} />}
+    </div>
+  );
+};
+
 const ToolImageReference = ({ reference, agentId, sandboxUrl }) => {
   const [imageUrl, setImageUrl] = useState('');
   const [downloadName, setDownloadName] = useState('');
@@ -830,6 +913,11 @@ const ToolBlock = ({ toolCall, onStopStreaming, agentId, sandboxUrl }) => {
         <ToolImageReference reference={imageReference} agentId={agentId} sandboxUrl={sandboxUrl} />
       </div>
     );
+  }
+  // A completed write renders as a diff card with +/- line counts.
+  const fileEdit = parseFileEdit(toolCall);
+  if (fileEdit) {
+    return <ToolFileDiff toolCall={toolCall} edit={fileEdit} />;
   }
   const label = renderTerminal ? t('message.execute') : (isImageGeneration ? t('message.imageGeneration') : name);
   const wakeupRunAtMs = getScheduleWakeupRunAtMs(toolCall);

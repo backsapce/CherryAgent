@@ -1104,6 +1104,106 @@
   color: #ef4444;
 }
 
+/* File-edit diff card */
+.tool-diff-path {
+  min-width: 0;
+  flex: 0 1 auto;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 12px;
+  color: var(--color-text-content);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-diff-stat {
+  display: inline-flex;
+  gap: 6px;
+  flex-shrink: 0;
+  font-family: 'SF Mono', 'Fira Code', ui-monospace, monospace;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.tool-diff-stat-add {
+  color: var(--color-success);
+}
+
+.tool-diff-stat-del {
+  color: #ef4444;
+}
+
+.tool-diff-body {
+  font-family: 'SF Mono', 'Fira Code', ui-monospace, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  background: var(--color-bg);
+  max-height: 380px;
+  overflow: auto;
+}
+
+.tool-diff-row {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  white-space: pre;
+}
+
+.tool-diff-line-num {
+  flex-shrink: 0;
+  width: 3.2em;
+  padding: 0 6px;
+  text-align: right;
+  color: var(--color-text-secondary);
+  opacity: 0.75;
+  user-select: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.tool-diff-sign {
+  flex-shrink: 0;
+  width: 1.2em;
+  text-align: center;
+  user-select: none;
+}
+
+.tool-diff-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: normal;
+}
+
+.tool-diff-row.tool-diff-add {
+  background: color-mix(in srgb, var(--color-success) 13%, transparent);
+}
+
+.tool-diff-row.tool-diff-add .tool-diff-sign {
+  color: var(--color-success);
+}
+
+.tool-diff-row.tool-diff-del {
+  background: color-mix(in srgb, #ef4444 12%, transparent);
+}
+
+.tool-diff-row.tool-diff-del .tool-diff-sign {
+  color: #ef4444;
+}
+
+.tool-diff-row.tool-diff-hunk {
+  padding: 2px 8px;
+  color: var(--color-accent-strong);
+  background: color-mix(in srgb, var(--color-accent-strong) 8%, transparent);
+}
+
+.tool-diff-row.tool-diff-meta {
+  padding: 2px 8px;
+  color: var(--color-text-secondary);
+  font-style: italic;
+}
+
+
 .tool-image-artifact {
   margin: 8px 0;
   padding: 10px 12px 12px;

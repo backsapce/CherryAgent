@@ -71,7 +71,9 @@
     "globalSkill": "グローバル",
     "noSandboxSelected": "サンドボックス未選択",
     "noProviderConfigured": "プロバイダー未設定",
-    "uploaded": "アップロード済み"
+    "uploaded": "アップロード済み",
+    "editFile": "編集",
+    "createFile": "作成"
   },
   "settings": {
     "title": "設定",
@@ -412,7 +414,11 @@
     "aiSteps": "ステップ数",
     "aiSeed": "シード",
     "aiCfg": "CFGスケール",
-    "aiDuration": "生成時間"
+    "aiDuration": "生成時間",
+    "editorMode": "エディターモード",
+    "editMode": "編集",
+    "diffMode": "Diff",
+    "diffModeHint": "未保存の変更を最後に保存したバージョンと比較します"
   },
   "permissions": {
     "title": "確認が必要です",

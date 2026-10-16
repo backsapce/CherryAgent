@@ -25,6 +25,7 @@ import {
 } from './skills.js';
 import { wakeupDelayToSeconds } from './wakeup.js';
 import { truncateMiddle } from './toolObservation.js';
+import { buildFileEditResult } from './fileEdit.js';
 import { formatSkills } from './skillCore.js';
 import {
   ABSOLUTE_READ_FILE_MAX_BYTES,
@@ -296,6 +297,24 @@ function imageReferenceResult(source, path, metadata = {}) {
   });
 }
 
+/** Previous content before a write, or null when the file does not exist yet. */
+async function readPreviousAgentFile(agentId, path) {
+  try {
+    return await readAgentFile(agentId, path);
+  } catch {
+    return null;
+  }
+}
+
+async function readPreviousSandboxFile(path, ctx) {
+  try {
+    return await readFileText(path, ctx.agentUrl, { signal: ctx.signal });
+  } catch (err) {
+    rethrowIfToolAborted(err, ctx.signal);
+    return null;
+  }
+}
+
 registry.register({
   name: 'execute_command',
   category: 'shell',
@@ -537,8 +556,14 @@ registry.register({
   checkAvailable: (ctx) => !!ctx?.agentId,
   async handler({ path, content }, ctx) {
     try {
+      const previous = await readPreviousAgentFile(ctx.agentId, path);
       await writeAgentFile(ctx.agentId, path, content);
-      return `Successfully wrote active-agent browser file ${path}`;
+      return buildFileEditResult({
+        source: 'browser',
+        path,
+        oldContent: previous,
+        newContent: content,
+      });
     } catch (err) {
       return `Error writing browser file ${path}: ${err.message}`;
     }
@@ -637,8 +662,14 @@ registry.register({
   checkAvailable: (ctx) => !!ctx?.agentUrl,
   async handler({ path, content }, ctx) {
     try {
+      const previous = await readPreviousSandboxFile(path, ctx);
       await writeFile(path, content, ctx.agentUrl);
-      return `Successfully wrote sandbox file ${path}`;
+      return buildFileEditResult({
+        source: 'sandbox',
+        path,
+        oldContent: previous,
+        newContent: content,
+      });
     } catch (err) {
       return `Error writing sandbox file ${path}: ${err.message}`;
     }
