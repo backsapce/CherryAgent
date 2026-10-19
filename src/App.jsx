@@ -60,6 +60,7 @@ import { downloadBlobFile, truncateText as truncateForPrompt, waitForSettlement 
 import {
   assertRemoteRunSnapshot,
   captureRemoteReplyFields,
+  continuedRunReplayBoundary,
   findSessionReply,
   finishReplyRunTiming,
   isSlowRemoteRetryError,
@@ -1560,6 +1561,12 @@ function App() {
       seedReply,
       Boolean(opts.resumeRunId)
     );
+    // A continued run appends its new turn to the same durable event log that
+    // already holds the previous turns. The live subscription must start past
+    // that history, or the old turn's text deltas and tool calls replay into
+    // the fresh reply below the user's message. The canContinue branch sets
+    // this boundary once the server accepts the continuation.
+    let continueEventBoundary = 0;
     const toolCalls = [...(remoteEventReplay.seed?.toolCalls || [])];
     let agentEventState = createAgentEventState({
       ...(remoteEventReplay.seed || {}),
@@ -1737,6 +1744,10 @@ function App() {
           }
           if (remoteRun) {
             remoteRunRecoverable = true;
+            // Everything up to this sequence belongs to replies that are
+            // already persisted; only later events belong to the new turn.
+            continueEventBoundary = continuedRunReplayBoundary(remoteRun, previousRemoteRun);
+            lastRemoteEventSequence = Math.max(lastRemoteEventSequence, continueEventBoundary);
             updateSessionsForRun((prev) => prev.map((session) => session.id === sessionId ? {
               ...session,
               remoteRun: {
@@ -1746,6 +1757,12 @@ function App() {
                 status: remoteRun.status,
                 sequence: Number(remoteRun.sequence) || 0,
               },
+              // Persist the boundary on the fresh reply immediately: a browser
+              // restart before the first event flush must resume from the
+              // boundary instead of replaying the whole log from zero.
+              messages: upsertSessionReply(session.messages, sessionMessages, replyId, {
+                remoteEventSequence: continueEventBoundary,
+              }),
               ...sessionTimeFields(),
             } : session));
           }
@@ -1850,7 +1867,7 @@ function App() {
         // The assistant reply and its applied event cursor are persisted in one
         // object. Seed the reducer from that reply and replay only later events;
         // the live subscription pushes everything after it.
-        let remoteEventCursor = remoteEventReplay.cursor;
+        let remoteEventCursor = Math.max(remoteEventReplay.cursor, continueEventBoundary);
         const persistRemoteSnapshot = () => {
           updateSessionsForRun((prev) => prev.map((session) => session.id === sessionId ? {
             ...session,

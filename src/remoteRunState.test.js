@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   assertRemoteRunSnapshot,
   captureRemoteReplyFields,
+  continuedRunReplayBoundary,
   findSessionReply,
   finishReplyRunTiming,
   isSlowRemoteRetryError,
@@ -77,6 +78,32 @@ test('force-detaching a run seals its reply timing without resetting its start',
   assert.equal(finished[0].transcript[0].finishedAt, '2026-01-01T00:00:09.000Z');
   assert.strictEqual(finished[1], messages[1]);
   assert.strictEqual(finishReplyRunTiming(messages, 'missing', '2026-01-01T00:00:09.000Z'), messages);
+});
+
+test('a continued run replays only events past the previous turn boundary', () => {
+  // run.continue keeps one event log across turns: the server-reported
+  // sequence at acceptance is the first sequence the new turn may use.
+  assert.equal(continuedRunReplayBoundary({ sequence: 41 }, { sequence: 39 }), 41);
+  // A server that omits the sequence still must not replay from zero when the
+  // persisted remote-run cursor knows where the previous turn ended.
+  assert.equal(continuedRunReplayBoundary({}, { sequence: 39 }), 39);
+  assert.equal(continuedRunReplayBoundary(null, { sequence: 39 }), 39);
+  assert.equal(continuedRunReplayBoundary({ sequence: 'n/a' }, undefined), 0);
+  assert.equal(continuedRunReplayBoundary({}, {}), 0);
+});
+
+test('a fresh reply seeded with the continuation boundary resumes without replaying history', () => {
+  const seededReply = {
+    id: 'reply-2',
+    role: 'assistant',
+    content: '',
+    toolCalls: [],
+    remoteEventSequence: 41,
+  };
+  assert.deepEqual(prepareRemoteEventReplay(seededReply, true), {
+    cursor: 41,
+    seed: seededReply,
+  });
 });
 
 test('legacy replies rebuild from event zero instead of duplicating their saved transcript', () => {

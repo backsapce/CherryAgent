@@ -94,6 +94,21 @@ export function finishReplyRunTiming(messages, replyId, finishedAt, fallbackStar
 }
 
 /**
+ * Event-log boundary for a continued run. `run.continue` appends the new turn
+ * to the same durable log that already holds the previous turns, so the live
+ * subscription must replay from the sequence the server reported when the
+ * continuation was accepted — never from zero, or the previous turn's text
+ * deltas and tool calls fold into the fresh reply below the new user message.
+ * The persisted remote-run sequence is a floor for servers that omit it.
+ */
+export function continuedRunReplayBoundary(remoteRunSnapshot, previousRemoteRun) {
+  return Math.max(
+    Number(remoteRunSnapshot?.sequence) || 0,
+    Number(previousRemoteRun?.sequence) || 0
+  );
+}
+
+/**
  * A saved reducer state is only safe to reuse when it has the matching durable
  * event cursor. Legacy replies have no cursor, so they must be rebuilt from the
  * server log instead of being seeded and then replayed again from event zero.
