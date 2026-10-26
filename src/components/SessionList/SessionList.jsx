@@ -172,11 +172,13 @@ const SessionItem = ({
   );
 };
 
-// Contextual menu for one folder row (rename). Rendered in a portal like the
-// header sort menu so it can overlay the scrollable session list.
-const FolderMenu = ({ folder, position, onClose, onRename }) => {
+// Contextual menu for one folder row (rename / delete; the implicit default
+// folder offers clear instead of delete since it always exists). Rendered in a
+// portal like the header sort menu so it can overlay the scrollable list.
+const FolderMenu = ({ folder, name, position, onClose, onRename, onDelete, onClear }) => {
   const { t } = useI18n();
   const menuRef = useRef(null);
+  const isDefaultFolder = !folder;
 
   useEffect(() => {
     const dismiss = (event) => {
@@ -202,7 +204,7 @@ const FolderMenu = ({ folder, position, onClose, onRename }) => {
       className="session-sort-menu session-folder-menu"
       style={position}
       role="menu"
-      aria-label={folder.name}
+      aria-label={name}
       tabIndex={-1}
       onKeyDown={(event) => {
         if (event.key === 'Escape') {
@@ -214,14 +216,35 @@ const FolderMenu = ({ folder, position, onClose, onRename }) => {
         if (!event.currentTarget.contains(event.relatedTarget)) onClose();
       }}
     >
-      <button
-        type="button"
-        className="session-sort-item"
-        role="menuitem"
-        onClick={onRename}
-      >
-        {t('session.renameFolder')}
-      </button>
+      {!isDefaultFolder && (
+        <button
+          type="button"
+          className="session-sort-item"
+          role="menuitem"
+          onClick={onRename}
+        >
+          {t('session.renameFolder')}
+        </button>
+      )}
+      {isDefaultFolder ? (
+        <button
+          type="button"
+          className="session-sort-item"
+          role="menuitem"
+          onClick={onClear}
+        >
+          {t('session.clearFolder')}
+        </button>
+      ) : (
+        <button
+          type="button"
+          className="session-sort-item"
+          role="menuitem"
+          onClick={onDelete}
+        >
+          {t('session.deleteFolder')}
+        </button>
+      )}
     </div>, document.body,
   );
 };
@@ -312,6 +335,8 @@ const SessionList = ({
   onAddFolder,
   onRenameFolder,
   onMoveSessionToFolder,
+  onDeleteFolder,
+  onClearFolder,
 }) => {
   const { t } = useI18n();
   const sortBy = useSyncExternalStore(config.subscribe, getSessionSort);
@@ -425,6 +450,23 @@ const SessionList = ({
     if (folder) startFolderEdit(folder.id, folder.name);
   }, [onAddFolder, startFolderEdit, t]);
 
+  // Both actions are bulk-destructive, so each confirms with the session count
+  // of the group it is about to remove.
+  const handleFolderDelete = useCallback((menu) => {
+    setFolderMenu(null);
+    const count = menu.sessionCount;
+    const key = count > 0 ? 'session.confirmDeleteFolder' : 'session.confirmDeleteFolderEmpty';
+    if (!window.confirm(t(key, { name: menu.name, count }))) return;
+    onDeleteFolder?.(menu.folder.id);
+  }, [t, onDeleteFolder]);
+
+  const handleFolderClear = useCallback((menu) => {
+    if (menu.sessionCount === 0) return;
+    setFolderMenu(null);
+    if (!window.confirm(t('session.confirmClearFolder', { name: menu.name, count: menu.sessionCount }))) return;
+    onClearFolder?.(menu.id);
+  }, [t, onClearFolder]);
+
   const handleExportDebug = useCallback(() => {
     onExportDebug?.();
   }, [onExportDebug]);
@@ -519,10 +561,13 @@ const SessionList = ({
     setVisibleExtra((prev) => ({ ...prev, [folderId]: (prev[folderId] || 0) + FOLDER_PAGE_SIZE }));
   }, []);
 
-  const openFolderMenu = useCallback((event, folder) => {
+  const openFolderMenu = useCallback((event, group) => {
     const rect = event.currentTarget.getBoundingClientRect();
     setFolderMenu({
-      folder,
+      id: group.id,
+      folder: group.folder,
+      name: group.name,
+      sessionCount: group.sessions.length,
       position: {
         top: Math.min(rect.bottom + 6, window.innerHeight - 60),
         left: Math.max(8, Math.min(rect.right - 148, window.innerWidth - 156)),
@@ -579,7 +624,6 @@ const SessionList = ({
           </div>
           <div className="session-list-items">
             {folderGroups.map((group) => {
-              const isDefaultFolder = !group.folder;
               const isEditing = editingFolderId === group.id;
               const isDropTarget = dragOverFolderId === group.id;
               const isCollapsed = collapsedFolders.has(group.id);
@@ -646,29 +690,27 @@ const SessionList = ({
                           >
                             <Plus width={14} height={14} />
                           </button>
-                          {!isDefaultFolder && (
-                            <button
-                              type="button"
-                              className="session-folder-menu-trigger"
-                              title={t('session.folderMenu')}
-                              aria-label={`${t('session.folderMenu')}: ${group.name}`}
-                              aria-expanded={folderMenu?.folder?.id === group.id}
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                if (folderMenu?.folder?.id === group.id) {
-                                  setFolderMenu(null);
-                                } else {
-                                  openFolderMenu(event, group.folder);
-                                }
-                              }}
-                            >
-                              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                                <circle cx="5" cy="12" r="1.8" />
-                                <circle cx="12" cy="12" r="1.8" />
-                                <circle cx="19" cy="12" r="1.8" />
-                              </svg>
-                            </button>
-                          )}
+                          <button
+                            type="button"
+                            className="session-folder-menu-trigger"
+                            title={t('session.folderMenu')}
+                            aria-label={`${t('session.folderMenu')}: ${group.name}`}
+                            aria-expanded={folderMenu?.id === group.id}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              if (folderMenu?.id === group.id) {
+                                setFolderMenu(null);
+                              } else {
+                                openFolderMenu(event, group);
+                              }
+                            }}
+                          >
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                              <circle cx="5" cy="12" r="1.8" />
+                              <circle cx="12" cy="12" r="1.8" />
+                              <circle cx="19" cy="12" r="1.8" />
+                            </svg>
+                          </button>
                         </span>
                       </>
                     )}
@@ -751,9 +793,12 @@ const SessionList = ({
       {folderMenu && (
         <FolderMenu
           folder={folderMenu.folder}
+          name={folderMenu.name}
           position={folderMenu.position}
           onClose={() => setFolderMenu(null)}
           onRename={() => startFolderEdit(folderMenu.folder.id, folderMenu.folder.name)}
+          onDelete={() => handleFolderDelete(folderMenu)}
+          onClear={() => handleFolderClear(folderMenu)}
         />
       )}
       {sessionMenu && (

@@ -23,7 +23,12 @@
     "showMore": "显示更多（{count}）",
     "newSessionHere": "在此目录新建会话",
     "folderMenu": "目录菜单",
-    "moveToFolder": "移动到目录"
+    "moveToFolder": "移动到目录",
+    "deleteFolder": "删除目录",
+    "clearFolder": "清空目录",
+    "confirmDeleteFolder": "删除目录 \"{name}\"？其中的 {count} 个会话也会被删除。",
+    "confirmDeleteFolderEmpty": "删除目录 \"{name}\"？",
+    "confirmClearFolder": "清空目录 \"{name}\"？其中的 {count} 个会话会被删除。"
   },
   "message": {
     "cacheHitRate": "缓存命中率",

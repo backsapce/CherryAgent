@@ -23,7 +23,12 @@
     "showMore": "Show more ({count})",
     "newSessionHere": "New session in this folder",
     "folderMenu": "Folder menu",
-    "moveToFolder": "Move to folder"
+    "moveToFolder": "Move to folder",
+    "deleteFolder": "Delete folder",
+    "clearFolder": "Clear folder",
+    "confirmDeleteFolder": "Delete folder \"{name}\"? Its {count} sessions will also be deleted.",
+    "confirmDeleteFolderEmpty": "Delete folder \"{name}\"?",
+    "confirmClearFolder": "Clear folder \"{name}\"? Its {count} sessions will be deleted."
   },
   "message": {
     "cacheHitRate": "Cache hit rate",

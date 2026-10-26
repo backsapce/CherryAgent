@@ -1304,6 +1304,40 @@ function App() {
     }
   }, [beginSessionStorageBarrier, cancelPendingSessionStart, stopSessionRun]);
 
+  // Deleting a folder deletes its sessions too (the sidebar confirm states the
+  // count), then drops the folder record and its collapsed-state bookmark.
+  const handleDeleteSessionFolder = useCallback(async (folderId) => {
+    const folder = sessionFoldersRef.current.find((item) => item.id === folderId);
+    if (!folder) return;
+    const sessionIds = sessionsRef.current
+      .filter((session) => sessionFolderKey(session) === folderId)
+      .map((session) => session.id);
+    for (const sessionId of sessionIds) {
+      await handleDeleteSession(sessionId);
+    }
+    try {
+      await persistSessionFolders(sessionFoldersRef.current.filter((item) => item.id !== folderId));
+    } catch (error) {
+      console.error('Failed to save session folders:', error);
+    }
+    const collapsedIds = config.get('general.sessionFoldersCollapsed');
+    if (Array.isArray(collapsedIds) && collapsedIds.includes(folderId)) {
+      config.set('general.sessionFoldersCollapsed', collapsedIds.filter((id) => id !== folderId))
+        .catch((error) => console.error('Failed to persist folder collapse state:', error));
+    }
+  }, [handleDeleteSession, persistSessionFolders]);
+
+  // Clearing removes every session in a folder but keeps the folder itself;
+  // only offered for the implicit default folder, which cannot be deleted.
+  const handleClearSessionFolder = useCallback(async (folderId) => {
+    const sessionIds = sessionsRef.current
+      .filter((session) => sessionFolderKey(session) === folderId)
+      .map((session) => session.id);
+    for (const sessionId of sessionIds) {
+      await handleDeleteSession(sessionId);
+    }
+  }, [handleDeleteSession]);
+
   const handleExportDebug = useCallback(() => {
     const session = sessions.find((c) => c.id === activeSessionId);
     if (!session?.messages) return;
@@ -3051,6 +3085,8 @@ function App() {
         onAddFolder={handleAddSessionFolder}
         onRenameFolder={handleRenameSessionFolder}
         onMoveSessionToFolder={handleMoveSessionToFolder}
+        onDeleteFolder={handleDeleteSessionFolder}
+        onClearFolder={handleClearSessionFolder}
       />
       {/* Expand button - visible when left panel is collapsed (PC mode only) */}
       {leftPanelCollapsed && (

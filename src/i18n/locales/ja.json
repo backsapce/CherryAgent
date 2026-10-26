@@ -23,7 +23,12 @@
     "showMore": "さらに表示（{count}）",
     "newSessionHere": "このフォルダーで新規セッション",
     "folderMenu": "フォルダーメニュー",
-    "moveToFolder": "フォルダーに移動"
+    "moveToFolder": "フォルダーに移動",
+    "deleteFolder": "フォルダーを削除",
+    "clearFolder": "フォルダーを空にする",
+    "confirmDeleteFolder": "フォルダー「{name}」を削除しますか？内側の {count} 件のセッションも削除されます。",
+    "confirmDeleteFolderEmpty": "フォルダー「{name}」を削除しますか？",
+    "confirmClearFolder": "フォルダー「{name}」を空にしますか？内側の {count} 件のセッションが削除されます。"
   },
   "message": {
     "cacheHitRate": "キャッシュヒット率",
