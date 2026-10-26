@@ -595,6 +595,18 @@ async function consumeAgentStream({
     } : {}),
     ...(signal ? { abortSignal: signal } : {}),
     prepareStep: ({ messages: stepMessages }) => {
+      // SDK start-step is delivered only after doStream returns (response
+      // headers). Publish before the request so prefill/network waits are
+      // visible too, especially between tool execution and the next response.
+      if (lifecycle) {
+        lifecycle.stepIndex += 1;
+        lifecycle.currentStepId = `step-${lifecycle.stepIndex}`;
+      }
+      emit({
+        type: 'step-start',
+        stepId: lifecycle?.currentStepId,
+        stepIndex: lifecycle?.stepIndex,
+      });
       const compacted = compactAiMessages(stepMessages, contextWindow);
       if (compacted !== stepMessages) {
         emit({
@@ -639,15 +651,6 @@ async function consumeAgentStream({
         currentStepHasReasoning = false;
         stepStartedAt = Date.now();
         stepFirstTokenAt = null;
-        if (lifecycle) {
-          lifecycle.stepIndex += 1;
-          lifecycle.currentStepId = `step-${lifecycle.stepIndex}`;
-        }
-        emit({
-          type: 'step-start',
-          stepId: lifecycle?.currentStepId,
-          stepIndex: lifecycle?.stepIndex,
-        });
         break;
       case 'text-start':
         emit({ type: 'text-start', segmentId: part.id, stepId: lifecycle?.currentStepId });

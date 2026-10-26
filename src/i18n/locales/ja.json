@@ -2,6 +2,7 @@
   "app": {
     "name": "CherryAgent",
     "tagline": "ブラウザで完全に動作する AI エージェント",
+    "agentReconnecting": "エージェントサーバーに接続できません。再接続中…（{count} 回目）",
     "sendHint": "メッセージを送信して開始",
     "image": "[画像]"
   },
@@ -65,6 +66,7 @@
     "submitEdit": "送信",
     "placeholder": "メッセージを入力...",
     "stop": "停止",
+    "runInterrupted": "エージェントサーバーがこの実行中に再起動したため（例：デプロイによる更新）、実行は完了前に中断されました。",
     "send": "送信",
     "inputHint": "Enter で送信、{modifier}+Enter で改行、/ でスキル選択",
     "skillMenuTitle": "/ スキル",

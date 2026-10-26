@@ -28,6 +28,7 @@ import {
   LLM_SETTINGS_SCHEMA_VERSION,
   defaultLlmName,
   defaultProviderName,
+  findDuplicateLlm,
   normalizeLlmConfig,
   normalizeLlmSettings,
   normalizeProviderConfig,
@@ -470,19 +471,35 @@ const llm = {
   },
 
   async configureLlm(cfg = {}) {
-    const id = hasOwn(cfg, 'id') ? (cfg.id || generateLlmId()) : (activeLlmId || generateLlmId());
-    const previous = getLlm(id);
+    let id = hasOwn(cfg, 'id') ? (cfg.id || generateLlmId()) : (activeLlmId || generateLlmId());
+    let previous = getLlm(id);
     const providerId = cfg.providerId || previous?.providerId;
     const providerConfig = getProviderConfig(providerId);
     if (!providerConfig) throw new Error('Select a configured provider before saving the LLM.');
     const adapter = providers[providerConfig.type];
     const model = String(cfg.model || previous?.model || adapter?.defaultModel || '').trim();
     if (!model) throw new Error('A model is required.');
+    const requestedName = String(cfg.name || '').trim();
+
+    // Idempotent create: a save that targets no existing profile updates a
+    // matching one (same provider + model + resolved name) instead of adding a
+    // duplicate, so repeated clicks and re-submits converge on one profile.
+    if (!previous) {
+      const duplicate = findDuplicateLlm(llms, {
+        providerId,
+        model,
+        name: requestedName,
+        provider: providerConfig,
+      });
+      if (duplicate) {
+        id = duplicate.id;
+        previous = duplicate;
+      }
+    }
 
     const previousProvider = getProviderConfig(previous?.providerId);
     const previousAutoName = previous ? defaultLlmName(previousProvider, previous.model) : null;
     const hasCustomPreviousName = Boolean(previous?.name && previous.name !== previousAutoName);
-    const requestedName = String(cfg.name || '').trim();
     const name = requestedName
       || (hasCustomPreviousName ? previous.name : defaultLlmName(providerConfig, model));
     const modelChanged = previous?.providerId !== providerId || previous?.model !== model;

@@ -1236,7 +1236,7 @@ test('sandbox runs execute concurrently with isolated events, cancellation, and 
     const aborted = await waitForRunStatus(manager, first.id, 'aborted');
     assert.equal(active.get('session-one').signal.aborted, true);
     assert.equal(active.get('session-two').signal.aborted, false);
-    assert.match(aborted.error, /aborted session-one/);
+    assert.match(aborted.error, /abort/i);
     assert.equal(manager.get(second.id).status, 'running');
 
     active.get('session-two').emit({ type: 'text-delta', text: 'two-after-abort' });
@@ -1256,7 +1256,7 @@ test('sandbox runs execute concurrently with isolated events, cancellation, and 
   }
 });
 
-test('sandbox abort force-terminates and unlocks a session when a provider ignores cancellation', async () => {
+test('sandbox abort unlocks a session when a provider ignores cancellation', async () => {
   const runsDir = mkdtempSync(join(tmpdir(), 'cherry-runs-'));
   try {
     let receivedSignal;
@@ -1281,7 +1281,7 @@ test('sandbox abort force-terminates and unlocks a session when a provider ignor
 
     assert.equal(receivedSignal.aborted, true);
     assert.equal(aborted.status, 'aborted');
-    assert.match(aborted.error, /cancellation grace period/i);
+    assert.match(aborted.error, /abort/i);
 
     const replacement = await manager.start({
       runId: 'run-unresponsive-replacement',
@@ -2345,6 +2345,50 @@ test('idle is published only after its asynchronous recovery snapshot is durable
     const saved = JSON.parse(readFileSync(join(runsDir, run.id + '.json'), 'utf8'));
     assert.equal(saved.resume.result.content, 'done');
   } finally {
+    gate.resolve();
+    rmSync(runsDir, { recursive: true, force: true });
+  }
+});
+
+test('cancellation releases a run promptly even when the agent ignores abort', async () => {
+  const runsDir = mkdtempSync(join(tmpdir(), 'cherry-prompt-abort-'));
+  const entered = deferred();
+  const gate = deferred();
+  let lateEmit;
+  const manager = createManager(runsDir, {
+    abortWaitMs: 10_000,
+    createModel: () => ({}),
+    runAgent: async ({ onEvent }) => {
+      lateEmit = onEvent;
+      entered.resolve();
+      await gate.promise;
+      return { content: 'late result' };
+    },
+  });
+  let timer;
+  try {
+    const started = await manager.start({
+      sessionId: 'session-prompt-abort',
+      replyId: 'reply-prompt-abort',
+      messages: [{ role: 'user', content: 'test' }],
+      modelConfig: { provider: 'openai', model: 'test', apiKey: 'test' },
+    });
+    await entered.promise;
+    const stopped = await Promise.race([
+      manager.abort(started.id),
+      new Promise((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error('cancellation waited for agent settlement')), 500);
+      }),
+    ]);
+    assert.equal(stopped.status, 'aborted');
+    lateEmit({ type: 'text-delta', text: 'stale' });
+    gate.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const replay = manager.get(started.id);
+    assert.equal(replay.status, 'aborted');
+    assert.equal(replay.events.some((event) => event.text === 'stale'), false);
+  } finally {
+    clearTimeout(timer);
     gate.resolve();
     rmSync(runsDir, { recursive: true, force: true });
   }

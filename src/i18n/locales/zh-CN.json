@@ -2,6 +2,7 @@
   "app": {
     "name": "CherryAgent",
     "tagline": "完全在浏览器中运行的 AI 助手",
+    "agentReconnecting": "无法连接 Agent 服务器，正在重连…（第 {count} 次）",
     "sendHint": "发送消息开始会话",
     "image": "[图片]"
   },
@@ -65,6 +66,7 @@
     "submitEdit": "提交",
     "placeholder": "输入消息...",
     "stop": "停止",
+    "runInterrupted": "Agent 服务器在本次运行期间重启（例如部署更新），运行未完成即被中断。",
     "send": "发送",
     "inputHint": "Enter 发送，{modifier}+Enter 换行，/ 选择技能",
     "skillMenuTitle": "/ 技能",

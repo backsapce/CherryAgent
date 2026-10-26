@@ -2,6 +2,7 @@
   "app": {
     "name": "CherryAgent",
     "tagline": "AI agent running purely in your browser",
+    "agentReconnecting": "Cannot reach the agent server — reconnecting… (attempt {count})",
     "sendHint": "Send a message to get started",
     "image": "[Image]"
   },
@@ -65,6 +66,7 @@
     "submitEdit": "Submit",
     "placeholder": "Send a message...",
     "stop": "Stop",
+    "runInterrupted": "The agent server restarted during this run (for example a deployment update), so it stopped before completing.",
     "send": "Send",
     "inputHint": "Enter to send, {modifier}+Enter for new line, / for skills",
     "skillMenuTitle": "/ Skills",

@@ -493,8 +493,17 @@ export function createAgentRunManager({
         const activityWatchdog = createActivityWatchdog(idleTimeoutMs, (error) => {
           run.controller?.abort(error);
         });
+        // Do not depend on providers/tools settling their own promises after
+        // abort. Fence their late callbacks below and release the run promptly.
+        const turnSignal = run.controller.signal;
+        let rejectAbort;
+        const aborted = new Promise((_resolve, reject) => { rejectAbort = reject; });
+        const onAbort = () => rejectAbort(turnSignal.reason instanceof Error ? turnSignal.reason : createRunAbortError());
+        turnSignal.addEventListener('abort', onAbort, { once: true });
+        if (turnSignal.aborted) onAbort();
         try {
           result = await Promise.race([
+            aborted,
             Promise.resolve(runAgent({
               messages: runtimeMessages,
               systemPrompt: input.systemPrompt || '',
@@ -554,6 +563,7 @@ export function createAgentRunManager({
             activityWatchdog.promise,
           ]);
         } finally {
+          turnSignal.removeEventListener('abort', onAbort);
           try {
             coalescer.flush();
           } finally {

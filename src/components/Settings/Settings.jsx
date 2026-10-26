@@ -175,6 +175,10 @@ const Settings = ({
   const [editingLlmId, setEditingLlmId] = useState(null);
   const [editingProviderId, setEditingProviderId] = useState(null);
   const [llmSettingsError, setLlmSettingsError] = useState(null);
+  const [llmSaving, setLlmSaving] = useState(false);
+  const llmSavingRef = useRef(false);
+  const [providerSaving, setProviderSaving] = useState(false);
+  const providerSavingRef = useRef(false);
   const modelComboRef = useRef(null);
   const modelRequestIdRef = useRef(0);
   const [newAgentUrl, setNewAgentUrl] = useState('');
@@ -743,8 +747,11 @@ const Settings = ({
   };
 
   const handleSaveProvider = async () => {
+    if (providerSavingRef.current) return;
     if (!providerForm.type) return;
     setLlmSettingsError(null);
+    providerSavingRef.current = true;
+    setProviderSaving(true);
     try {
       const saved = await onConfigureProvider({
         id: editingProviderId || null,
@@ -763,6 +770,9 @@ const Settings = ({
       });
     } catch (err) {
       setLlmSettingsError(err.message);
+    } finally {
+      providerSavingRef.current = false;
+      setProviderSaving(false);
     }
   };
 
@@ -780,6 +790,7 @@ const Settings = ({
   };
 
   const handleSaveSettings = async () => {
+    if (llmSavingRef.current) return;
     if (!settingsForm.providerId) return;
     const manualModel = settingsForm.model.trim();
     const modelIds = selectedModels.length > 0
@@ -800,6 +811,8 @@ const Settings = ({
     const baseName = trimmedName && trimmedName !== currentAutoName ? trimmedName : '';
 
     setLlmSettingsError(null);
+    llmSavingRef.current = true;
+    setLlmSaving(true);
     try {
       for (const [index, modelId] of modelIds.entries()) {
         await onConfigureLLM({
@@ -817,6 +830,9 @@ const Settings = ({
       onClose();
     } catch (err) {
       setLlmSettingsError(err.message);
+    } finally {
+      llmSavingRef.current = false;
+      setLlmSaving(false);
     }
   };
 
@@ -1349,7 +1365,7 @@ const Settings = ({
                   <button
                     className="settings-save"
                     onClick={handleSaveSettings}
-                    disabled={!settingsForm.providerId || (!settingsForm.model.trim() && selectedModels.length === 0)}
+                    disabled={llmSaving || !settingsForm.providerId || (!settingsForm.model.trim() && selectedModels.length === 0)}
                   >
                     {t('llmSettings.saveLlm')}
                   </button>
@@ -1357,7 +1373,7 @@ const Settings = ({
                   <button
                     className="settings-save"
                     onClick={handleSaveProvider}
-                    disabled={!providerForm.type || (editingProviderType?.requiresBaseUrl && !providerForm.baseUrl.trim())}
+                    disabled={providerSaving || !providerForm.type || (editingProviderType?.requiresBaseUrl && !providerForm.baseUrl.trim())}
                   >
                     {t('llmSettings.saveProvider')}
                   </button>

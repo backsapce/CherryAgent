@@ -56,6 +56,37 @@
   opacity: 0.8;
 }
 
+/* Agent-server reconnect banner: the sandbox run keeps executing server-side
+   while the browser bridges the outage. */
+.agent-reconnect-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 9998;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 6px 16px;
+  background: color-mix(in srgb, var(--color-warning-bg, #fff3cd) 86%, var(--color-surface));
+  color: var(--color-warning-text, #856404);
+  font-size: 13px;
+  font-weight: 500;
+  border-bottom: 1px solid var(--color-warning-border, #ffc107);
+  animation: slideDown 0.3s ease;
+}
+
+.agent-reconnect-banner svg {
+  flex-shrink: 0;
+  animation: reconnectSpin 1.6s linear infinite;
+}
+
+@keyframes reconnectSpin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
 @keyframes slideDown {
   from { transform: translateY(-100%); }
   to   { transform: translateY(0); }

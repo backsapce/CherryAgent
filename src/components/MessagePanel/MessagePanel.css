@@ -1520,6 +1520,7 @@
   min-width: 0;
   overflow: hidden;
   white-space: nowrap;
+  font-style: italic;
   font-size: 12px;
   line-height: 1.4;
   color: var(--color-thinking-text);
@@ -1605,6 +1606,7 @@
 .thinking-content {
   margin-top: 6px;
   padding: 10px 12px;
+  font-style: italic;
   background: var(--color-thinking-content-bg);
   border: 1px solid var(--color-border);
   border-radius: 8px;

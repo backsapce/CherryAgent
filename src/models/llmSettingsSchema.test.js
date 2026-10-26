@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { normalizeLlmSettings } from './llmSettingsSchema.js';
+import { findDuplicateLlm, normalizeLlmSettings } from './llmSettingsSchema.js';
 
 const providerTypes = {
   openai: {
@@ -95,4 +95,41 @@ test('v2 keeps the same model independent across provider connections', () => {
   assert.equal(settings.providers.gateway.apiKey, 'key-b');
   assert.deepEqual(settings.deletedProviderIds, ['old-provider']);
   assert.deepEqual(settings.deletedLlmIds, ['old-llm']);
+});
+
+test('findDuplicateLlm collapses repeated saves of the same new profile', () => {
+  const provider = { id: 'p1', name: 'OpenAI' };
+  const llms = {
+    a: { id: 'a', providerId: 'p1', model: 'gpt-4o', name: 'OpenAI / gpt-4o' },
+    b: { id: 'b', providerId: 'p1', model: 'gpt-4o', name: 'Draft' },
+    c: { id: 'c', providerId: 'p2', model: 'gpt-4o', name: 'OpenAI / gpt-4o' },
+  };
+
+  // Re-saving the same new profile (auto name) resolves to the existing copy.
+  assert.equal(findDuplicateLlm(llms, { providerId: 'p1', model: 'gpt-4o', provider }), llms.a);
+  // An explicit name matches only the profile carrying that exact name.
+  assert.equal(findDuplicateLlm(llms, { providerId: 'p1', model: 'gpt-4o', name: 'Draft', provider }), llms.b);
+  // Different provider with the same display name is a different profile.
+  assert.equal(findDuplicateLlm(llms, { providerId: 'p2', model: 'gpt-4o', provider }), llms.c);
+  // Different model or distinct custom name is not a duplicate.
+  assert.equal(findDuplicateLlm(llms, { providerId: 'p1', model: 'gpt-4.1', provider }), null);
+  assert.equal(findDuplicateLlm(llms, { providerId: 'p1', model: 'gpt-4o', name: 'Final', provider }), null);
+  // Missing provider or model never matches.
+  assert.equal(findDuplicateLlm(llms, { model: 'gpt-4o', provider }), null);
+  assert.equal(findDuplicateLlm(llms, { providerId: 'p1', provider }), null);
+  // A stored profile without a name still matches its auto name.
+  assert.equal(
+    findDuplicateLlm(
+      { x: { id: 'x', providerId: 'p1', model: 'gpt-4o' } },
+      { providerId: 'p1', model: 'gpt-4o', provider },
+    )?.id,
+    'x',
+  );
+  assert.equal(
+    findDuplicateLlm(
+      { x: { id: 'x', providerId: 'p1', model: 'gpt-4o' } },
+      { providerId: 'p1', model: 'gpt-4o', name: 'OpenAI / gpt-4o', provider },
+    )?.id,
+    'x',
+  );
 });

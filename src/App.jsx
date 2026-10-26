@@ -30,7 +30,7 @@ import { ensureDefaultAgent, listAgents, updateAgentConfig } from './agents/agen
 import { configureAutoSync, suspendAutoSync, waitForSyncIdle } from './sync/syncManager';
 import { I18nProvider } from './i18n/index';
 import { useI18n } from './i18n/context';
-import { resolveLocale } from './i18n/locales';
+import { createT, resolveLocale } from './i18n/locales';
 import {
   buildSessionTitleRequest,
   cleanGeneratedSessionTitle,
@@ -53,9 +53,10 @@ import {
 } from './sessionFolders';
 import { createSessionRunRegistry } from './sessionRuns';
 import { buildWakeupMessage, createOrReplaceTurnWakeup, findNextWakeup } from './agent/wakeup';
-import { WifiOff, ChevronRight } from './components/Icons/Icons';
+import { WifiOff, Refresh, ChevronRight } from './components/Icons/Icons';
 import { boundContextFilesForPrompt, stripLegacyContextFileSummary } from './contextFiles';
 import { canSupersedeRemoteRun, formatRunFailureContent } from './remoteRunPresentation';
+import { attachRemoteRunStream } from './remoteRunReconnect';
 import { downloadBlobFile, truncateText as truncateForPrompt, waitForSettlement } from './utils/misc.js';
 import {
   assertRemoteRunSnapshot,
@@ -286,6 +287,19 @@ function OfflineBanner() {
   );
 }
 
+// Shown while a durable sandbox run is bridging an agent-server outage: the
+// run keeps executing server-side, the stream reattaches automatically, and
+// the user sees why output paused instead of a hard error.
+function AgentReconnectBanner({ attempt }) {
+  const { t } = useI18n();
+  return (
+    <div className="agent-reconnect-banner" role="status" aria-live="polite">
+      <Refresh width={16} height={16} />
+      <span>{t('app.agentReconnecting', { count: attempt })}</span>
+    </div>
+  );
+}
+
 // Rendered inside <I18nProvider> (App renders the provider itself, so this
 // must live in a child component to use the i18n context).
 function PermissionCardStack({ items, onResolve }) {
@@ -337,6 +351,8 @@ function App() {
   const [startupRecoveryError, setStartupRecoveryError] = useState(null);
   const [_llmReady, setLlmReady] = useState(false); // triggers re-render on config change
   const [runningSessionIds, setRunningSessionIds] = useState(() => new Set());
+  // sessionId → { attempt, sinceMs } while its sandbox run is reconnecting to the agent server.
+  const [remoteReconnects, setRemoteReconnects] = useState({});
   const [pendingSessionIds, setPendingSessionIds] = useState(() => new Set());
   const [stoppingSessionIds, setStoppingSessionIds] = useState(() => new Set());
   const [loadingSessionIds, setLoadingSessionIds] = useState(() => new Set());
@@ -768,6 +784,15 @@ function App() {
     await config.set('theme', newTheme);
   }, []);
 
+  // Locale-aware text for App-level code paths that run inside the provider
+  // App itself renders (run outcomes, banners data). Reads the ref so a
+  // language switch applies to the next generated string without rebuilding
+  // every callback that closes over it.
+  const appT = useCallback(
+    (key, params) => createT(resolveLocale(localePrefRef.current))(key, params),
+    []
+  );
+
   const handleLocaleChange = useCallback(async (pref) => {
     localePrefRef.current = pref;
     setLocalePref(pref);
@@ -786,6 +811,7 @@ function App() {
     )
   );
   const activeSessionLoading = Boolean(activeSessionId && loadingSessionIds.has(activeSessionId));
+  const activeSessionReconnect = activeSessionId ? remoteReconnects[activeSessionId] : null;
   const activeSessionAgentLoading = Boolean(
     !agentListReady && (!activeSessionId || activeSession?.agentId)
   );
@@ -1922,20 +1948,18 @@ function App() {
         // past the persisted cursor, then pushes coalesced deltas and status
         // transitions. Waiting runs stay subscribed — the server pushes when
         // the wake-up fires, so no browser deadline timers are needed.
-        let loopSettled = false;
-        let resolveLoop;
-        let rejectLoop;
-        const loopDone = new Promise((resolve, reject) => { resolveLoop = resolve; rejectLoop = reject; });
-        const finishLoop = (error) => {
-          if (loopSettled) return;
-          loopSettled = true;
-          if (error) rejectLoop(error);
-          else resolveLoop();
-        };
-        const subscription = subscribeRemoteAgentRun(sandboxUrl, {
+        // Transport drops (network blips, agent-server restarts for a
+        // deployment) do not fail the turn: the durable run keeps executing
+        // server-side, so the stream reattaches from the persisted cursor
+        // while the UI shows a reconnect notice, until the server reports a
+        // definitive status.
+        await attachRemoteRunStream({
+          url: sandboxUrl,
           runId: remoteRun.id,
-          after: remoteEventCursor,
+          cursor: remoteEventCursor,
           signal: run.controller.signal,
+          isAlive: isRunCurrent,
+          subscribe: subscribeRemoteAgentRun,
           onEvents: (events) => {
             if (run.controller.signal.aborted || !isRunCurrent()) return;
             for (const event of events) {
@@ -1948,22 +1972,28 @@ function App() {
             if (run.controller.signal.aborted || !isRunCurrent()) return;
             remoteRun = { ...remoteRun, ...snapshot };
             persistRemoteSnapshot();
-            if (!['running', 'waiting'].includes(remoteRun.status)) finishLoop();
           },
-          onError: finishLoop,
+          onReconnect: (notice) => {
+            setRemoteReconnects((prev) => {
+              if (notice) return { ...prev, [sessionId]: notice };
+              if (!(sessionId in prev)) return prev;
+              const next = { ...prev };
+              delete next[sessionId];
+              return next;
+            });
+          },
         });
-        try {
-          await subscription.ready;
-          assertRunActive();
-          if (!loopSettled) await loopDone;
-        } catch (loopError) {
-          finishLoop(loopError instanceof Error ? loopError : new Error(String(loopError)));
-          throw loopError instanceof Error ? loopError : new Error(String(loopError));
-        } finally {
-          subscription.unsubscribe();
-        }
+        assertRunActive();
         if (!['completed', 'waiting', 'idle'].includes(remoteRun.status)) {
           confirmedRemoteFailureStatus = remoteRun.status;
+          if (remoteRun.status === 'interrupted') {
+            // A server restart/update stopped the run; keep the partial
+            // response but explain it in the user's language instead of the
+            // raw server-side string.
+            const interrupted = new Error(appT('message.runInterrupted'));
+            interrupted.code = 'AGENT_RUN_INTERRUPTED';
+            throw interrupted;
+          }
           throw new Error(remoteRun.error || `Sandbox run ${remoteRun.status}`);
         }
         result = remoteRun.result;
@@ -2217,13 +2247,21 @@ function App() {
         cancelAnimationFrame(run.rafId);
         run.rafId = null;
       }
+      // The reattach loop clears its own notice; this guarantees no stale
+      // banner survives an unexpected exit path.
+      setRemoteReconnects((prev) => {
+        if (!(sessionId in prev)) return prev;
+        const next = { ...prev };
+        delete next[sessionId];
+        return next;
+      });
       const finishedCurrentRun = runRegistry.finish(sessionId, run);
       if (finishedCurrentRun && automaticTitleInput && !run.skipAutomaticTitle) {
         void generateAutomaticSessionTitle(automaticTitleInput);
       }
     }
     return runOutcome;
-  }, [handlePermissionRequest, agentList, agentListReady, sessionAgents, sessionLlmProfiles, currentLlmProfileId, generateAutomaticSessionTitle, getFirstLlmProfileId]);
+  }, [handlePermissionRequest, appT, agentList, agentListReady, sessionAgents, sessionLlmProfiles, currentLlmProfileId, generateAutomaticSessionTitle, getFirstLlmProfileId]);
 
   const scheduleStreamResponse = useCallback((sessionId, sessionMessages, opts = {}) => {
     const session = sessionsRef.current.find((item) => item.id === sessionId);
@@ -2401,10 +2439,10 @@ function App() {
         ) return;
         const terminalFailure = latest.status === 'error' || latest.status === 'interrupted';
         const replyId = latest.replyId || generateId();
-        const terminalDetail = String(latest.error || '').trim()
-          || (latest.status === 'interrupted'
-            ? 'Sandbox run was interrupted before it could finish.'
-            : 'Sandbox run failed before it could return a response.');
+        const terminalDetail = latest.status === 'interrupted'
+          ? appT('message.runInterrupted')
+          : (String(latest.error || '').trim()
+            || 'Sandbox run failed before it could return a response.');
         const terminalContent = formatRunFailureContent('', terminalDetail);
         setSessions((prev) => prev.map((item) => {
           if (item.id !== session.id || item.remoteRun) return item;
@@ -2459,7 +2497,7 @@ function App() {
         if (!factoryResetInProgressRef.current) scheduleDiscoveryRetry(discoveryKey);
       });
     }
-  }, [agentList, loaded, pendingSessionIds, remoteDiscoveryVersion, runningSessionIds, sessions]);
+  }, [agentList, appT, loaded, pendingSessionIds, remoteDiscoveryVersion, runningSessionIds, sessions]);
 
   const cancelPendingStreamStarts = useCallback(({ notify = true } = {}) => {
     const pendingStarts = [...pendingStreamStartsRef.current.values()];
@@ -3067,6 +3105,7 @@ function App() {
     <I18nProvider initialLocale={localePref} onLocaleChange={handleLocaleChange}>
     <div className="app">
       {isOffline && <OfflineBanner />}
+      {!isOffline && activeSessionReconnect && <AgentReconnectBanner attempt={activeSessionReconnect.attempt} />}
       <SessionList
         sessions={sessions}
         activeSessionId={activeSessionId}

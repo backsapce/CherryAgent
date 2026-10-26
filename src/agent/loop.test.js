@@ -735,3 +735,32 @@ function withTestDeadline(promise, timeoutMs = 1_500) {
 function sequenceThrough(length) {
   return Array.from({ length }, (_value, index) => index + 1);
 }
+
+test('step-start is published before waiting for provider response headers', async () => {
+  const events = [];
+  const model = new MockLanguageModelV3({
+    doStream: async () => {
+      assert.equal(events.filter((event) => event.type === 'step-start').length, 1);
+      return {
+        stream: simulateReadableStream({
+          chunks: [
+            { type: 'stream-start', warnings: [] },
+            { type: 'text-start', id: 'text' },
+            { type: 'text-delta', id: 'text', delta: 'ok' },
+            { type: 'text-end', id: 'text' },
+            { type: 'finish', finishReason: { unified: 'stop', raw: 'stop' }, usage: TEST_USAGE },
+          ],
+          initialDelayInMs: null,
+          chunkDelayInMs: null,
+        }),
+      };
+    },
+  });
+  await runAgentLoop({
+    ...createConcurrentRunOptions('request-start'),
+    toolSchemas: [],
+    languageModel: model,
+    onEvent: (event) => events.push(event),
+  });
+  assert.equal(events.filter((event) => event.type === 'step-start').length, 1);
+});

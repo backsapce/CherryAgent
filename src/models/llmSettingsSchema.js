@@ -69,6 +69,26 @@ export function defaultLlmName(provider, model) {
   return modelName ? `${providerName} / ${modelName}` : providerName;
 }
 
+/**
+ * Find an existing LLM profile that saving the given new profile would
+ * duplicate: same provider, model, and resolved display name. Saving the
+ * same "new" LLM twice (double-click, re-submit, re-picking a model that
+ * already has a profile) must update the existing profile instead of
+ * stacking identical copies.
+ */
+export function findDuplicateLlm(llmsById = {}, { providerId, model, name, provider } = {}) {
+  const key = nullableString(providerId);
+  const targetModel = nullableString(model);
+  if (!key || !targetModel) return null;
+  const autoName = defaultLlmName(provider, targetModel);
+  const targetName = nullableString(name) || autoName;
+  for (const profile of Object.values(llmsById || {})) {
+    if (!profile || profile.providerId !== key || profile.model !== targetModel) continue;
+    if ((nullableString(profile.name) || autoName) === targetName) return profile;
+  }
+  return null;
+}
+
 export function normalizeProviderConfig(id, value = {}, providerTypes = {}) {
   const type = nullableString(value.type ?? value.provider);
   const updatedAtMs = normalizeTimestamp(value.updatedAtMs);
