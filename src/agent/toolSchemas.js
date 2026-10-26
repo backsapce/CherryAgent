@@ -73,7 +73,7 @@ export const TOOL_PARAMETER_SCHEMAS = {
     properties: {
       path: {
         type: 'string',
-        description: 'Sandbox workdir directory path to list. Empty means the sandbox files root/workdir.',
+        description: 'Directory path to list. Relative paths resolve against the sandbox workdir; absolute paths anywhere in the sandbox container are allowed. Empty means the sandbox workdir root.',
       },
     },
     required: [],
@@ -84,7 +84,7 @@ export const TOOL_PARAMETER_SCHEMAS = {
     properties: {
       path: {
         type: 'string',
-        description: 'Sandbox workdir file path.',
+        description: 'File path to read. Relative paths resolve against the sandbox workdir; absolute paths anywhere in the sandbox container are allowed.',
       },
       max_bytes: {
         type: 'number',
@@ -99,7 +99,7 @@ export const TOOL_PARAMETER_SCHEMAS = {
     properties: {
       path: {
         type: 'string',
-        description: 'Sandbox workdir file path.',
+        description: 'File path to write. Relative paths resolve against the sandbox workdir; absolute paths anywhere in the sandbox container are allowed.',
       },
       content: {
         type: 'string',

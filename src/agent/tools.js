@@ -577,7 +577,7 @@ registry.register({
   parallelSafe: true,
   schema: {
     description:
-      'List files in the sandbox runtime workdir used by command tools. This is NOT browser OPFS or workspace/<active-agent>/files/. Use the skill tool, not generic file tools, for skills/. Other browser-owned files are unavailable unless explicitly copied.',
+      'List files in the sandbox runtime. Relative paths resolve against the workdir used by command tools; absolute paths anywhere in the sandbox container are allowed. This is NOT browser OPFS or workspace/<active-agent>/files/. Use the skill tool, not generic file tools, for skills/. Other browser-owned files are unavailable unless explicitly copied.',
     parameters: TOOL_PARAMETER_SCHEMAS.list_sandbox_files,
   },
   checkAvailable: (ctx) => !!ctx?.agentUrl,
@@ -599,7 +599,7 @@ registry.register({
   parallelSafe: true,
   schema: {
     description:
-      'Read a text file from the sandbox runtime workdir used by command tools. Use read_browser_file for files under workspace/<active-agent>/files/.',
+      'Read a text file from the sandbox runtime. Relative paths resolve against the workdir used by command tools; absolute paths anywhere in the sandbox container are allowed. Use read_browser_file for files under workspace/<active-agent>/files/.',
     parameters: TOOL_PARAMETER_SCHEMAS.read_sandbox_file,
   },
   checkAvailable: (ctx) => !!ctx?.agentUrl,
@@ -656,7 +656,7 @@ registry.register({
   category: 'sandbox-files',
   schema: {
     description:
-      'Write a text file to the sandbox runtime workdir used by command tools. This does not update browser OPFS or workspace/<active-agent>/files/.',
+      'Write a text file to the sandbox runtime. Relative paths resolve against the workdir used by command tools; absolute paths anywhere in the sandbox container are allowed. This does not update browser OPFS or workspace/<active-agent>/files/.',
     parameters: TOOL_PARAMETER_SCHEMAS.write_sandbox_file,
   },
   checkAvailable: (ctx) => !!ctx?.agentUrl,

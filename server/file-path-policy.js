@@ -1,11 +1,10 @@
-import { existsSync, lstatSync, realpathSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import {
   basename,
   dirname,
   isAbsolute,
   join,
   normalize,
-  relative,
   resolve,
   sep,
 } from 'node:path';
@@ -38,7 +37,6 @@ export function createFilePathPolicy({
   platform = process.platform,
 }) {
   const root = resolve(filesRootDir);
-  const canonicalRoot = resolvePathThroughExistingPrefix(root);
   const canonicalProtectedPaths = [...new Set(
     protectedPaths.map((path) => resolvePathThroughExistingPrefix(path))
   )];
@@ -48,22 +46,6 @@ export function createFilePathPolicy({
     const compareParent = comparablePath(resolve(parent), platform);
     return compareCandidate === compareParent
       || compareCandidate.startsWith(compareParent + sep);
-  };
-
-  const hasSymlinkBelowRoot = (resolvedPath) => {
-    const relativePath = relative(root, resolvedPath);
-    if (!relativePath) return false;
-    let current = root;
-    for (const segment of relativePath.split(/[\\/]+/).filter(Boolean)) {
-      current = join(current, segment);
-      try {
-        if (lstatSync(current).isSymbolicLink()) return true;
-      } catch (error) {
-        if (error?.code === 'ENOENT') return false;
-        return true;
-      }
-    }
-    return false;
   };
 
   const isProtectedPath = (path) => {
@@ -80,24 +62,18 @@ export function createFilePathPolicy({
     ));
   };
 
+  // Unrestricted resolution: absolute paths are honored as-is and relative
+  // paths resolve against the files root. There is no containment, traversal
+  // (`..`), or symlink rejection — the sandbox container is the security
+  // boundary, matching the already-unrestricted shell tools. Only protected
+  // control-plane paths remain guarded for mutations (delete/move), so a run
+  // cannot destroy the agent server's own state, tokens, or job records.
   const resolveSafePath = (inputPath) => {
-    if (
-      typeof inputPath !== 'string'
-      || inputPath.includes('\0')
-      || isAbsolute(inputPath)
-    ) return null;
-    const normalizedPath = normalize(inputPath);
-    if (normalizedPath.split(/[\\/]+/).includes('..')) return null;
-    const resolvedPath = resolve(join(root, normalizedPath));
-    if (!isSameOrChild(resolvedPath, root)) return null;
-
-    // Existing symlinks below the public root are never followed. This also
-    // protects not-yet-created targets whose nearest existing parent is an
-    // alias to the isolated control plane.
-    if (hasSymlinkBelowRoot(resolvedPath)) return null;
+    if (typeof inputPath !== 'string' || inputPath.includes('\0')) return null;
+    const resolvedPath = isAbsolute(inputPath)
+      ? resolve(inputPath)
+      : resolve(join(root, normalize(inputPath)));
     const canonicalPath = resolvePathThroughExistingPrefix(resolvedPath);
-    if (!isSameOrChild(canonicalPath, canonicalRoot)) return null;
-    if (isProtectedPath(canonicalPath)) return null;
     return { resolvedPath, canonicalPath };
   };
 
@@ -107,7 +83,11 @@ export function createFilePathPolicy({
     isSameOrChildPath: isSameOrChild,
     isSafeMutationPath(inputPath) {
       const safePath = resolveSafePath(inputPath);
-      return Boolean(safePath && !containsProtectedPath(safePath.canonicalPath));
+      return Boolean(
+        safePath
+        && !isProtectedPath(safePath.canonicalPath)
+        && !containsProtectedPath(safePath.canonicalPath)
+      );
     },
     isSafePath(inputPath) {
       return Boolean(resolveSafePath(inputPath));

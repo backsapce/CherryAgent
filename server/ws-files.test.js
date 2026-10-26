@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WS_OPCODE, encodeMaskedWsFrame, parseWsFrames } from './ws-frames.js';
@@ -135,6 +135,29 @@ test('file.create, file.move, and file.delete round-trip', async () => {
   socket.clientJson({ id: 'q5', type: 'file.move', payload: { sourcePath: 'a/../escape', targetPath: 'b' } });
   await flush();
   assert.equal(socket.replyOf('q5').code, 403);
+});
+
+test('absolute paths outside the files root are honored for list/read/write', async () => {
+  const { socket } = createFixture();
+  const outsideRoot = mkdtempSync(join(tmpdir(), 'cherry-ws-files-outside-'));
+  try {
+    const target = join(outsideRoot, 'abs.txt');
+    socket.clientJson({ id: 'q1', type: 'file.create', payload: { path: target, content: 'outside' } });
+    await flush();
+    assert.equal(socket.replyOf('q1').ok, true);
+    assert.equal(readFileSync(target, 'utf8'), 'outside');
+
+    socket.clientJson({ id: 'q2', type: 'file.list', payload: { path: outsideRoot } });
+    await flush();
+    assert.equal(socket.replyOf('q2').ok, true);
+    assert.ok(socket.replyOf('q2').data.some((entry) => entry.name === 'abs.txt'));
+
+    socket.clientJson({ id: 'q3', type: 'file.download', payload: { path: target, streamId: 9 } });
+    await flush(30);
+    assert.equal(socket.replyOf('q3').ok, true);
+  } finally {
+    rmSync(outsideRoot, { recursive: true, force: true });
+  }
 });
 
 test('file.download streams binary frames and reassembles byte-exact', async () => {

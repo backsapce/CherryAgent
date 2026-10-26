@@ -58,7 +58,7 @@ The loop is built on the Vercel AI SDK: `streamText` owns the model → tool →
 - **`command-executor.js`** — spawns commands in their own process group with tree-kill on timeout/abort/output-limit, streaming UTF-8 decoding, and a settle watchdog.
 - **`command-jobs.js`** — durable background jobs with incremental byte-cursor logs (UTF-8-boundary-safe reads), capped active jobs, and retention-based cleanup.
 - **`agent-runtime.js`** — durable sandbox runs: the server runs the agent loop itself (model calls included) with an idle watchdog, wake-up continuations that survive restarts, immutable forced cancellation, and retention-based pruning. Protocol 4: completed turns leave the run `idle` and continuable (`run.continue` appends one user message instead of re-uploading history; divergence is detected via the client's user-message count), streaming deltas are coalesced (~100ms batches) before hitting the ndjson log, the log stores bare events (scope prefixes are applied at serve time), and live subscriptions push event batches + status snapshots. Run state files are mode 0600 because waiting/idle runs carry the caller's model credentials.
-- **`file-path-policy.js`** — path safety: lexical + realpath + symlink-never-followed checks for the files root and protected control-plane paths.
+- **`file-path-policy.js`** — path resolution for the files root. Unrestricted by design: absolute paths anywhere in the container and `..` traversal are honored (the sandbox container is the boundary, matching the shell tools); only mutations (delete/move) of protected control-plane paths (state dir, tokens, runs, jobs) are refused.
 
 ### OPFS VFS (`src/vfs/opfs.js`)
 
@@ -93,4 +93,4 @@ React context i18n with dot-path keys and `{param}` interpolation (en, zh-CN, ja
 - Tool schemas are filtered by `checkAvailable()` before sending to the LLM
 - All browser↔agent-server traffic (auth, commands, jobs, files, web proxies, runs) multiplexes over one WebSocket per agent URL (`src/models/agentConnection.js` + `server/ws-protocol.js`); there is no `/agent` HTTP API anymore
 - Memory is a frozen snapshot loaded once per run; mid-session writes update disk but not the active prompt
-- Security invariants worth preserving: agent server stays loopback by default; sync credentials never leave the device; permission approval gates destructive commands; file-path policy rejects symlinks below the files root
+- Security invariants worth preserving: agent server stays loopback by default; sync credentials never leave the device; permission approval gates destructive commands; file reads/writes resolve unrestricted (absolute paths honored) while delete/move still refuse protected control-plane paths

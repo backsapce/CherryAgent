@@ -46,9 +46,13 @@ export function imageMimeFromPath(path) {
 
 /** Split a POSIX-ish path (backslashes treated as separators) into parent + name. */
 export function splitFilePath(path) {
-  const parts = String(path || '').replace(/\\/g, '/').split('/').filter(Boolean);
+  const normalized = String(path || '').replace(/\\/g, '/');
+  const parts = normalized.split('/').filter(Boolean);
   const name = parts.pop() || '';
-  return { parent: parts.join('/'), name };
+  const parent = parts.join('/');
+  // Preserve the root slash for absolute paths so parent listings resolve
+  // correctly when files live outside the sandbox files root.
+  return { parent: normalized.startsWith('/') ? `/${parent}` : parent, name };
 }
 
 /** Race a promise against a timeout; true when it settled, false on timeout. */

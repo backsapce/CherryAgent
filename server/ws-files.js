@@ -1,9 +1,11 @@
 /**
  * File-domain operations for the agent server, shared by the WebSocket
- * handlers and (transitionally) the HTTP file routes. All paths are validated
- * by the injected file-path policy; uploads stream to a sibling temp file and
- * atomically rename into place, downloads stream as chunked binary frames
- * with backpressure.
+ * handlers and (transitionally) the HTTP file routes. Paths resolve
+ * unrestricted (absolute paths anywhere in the container, relative paths
+ * against the files root); the injected policy only rejects malformed input
+ * and guards protected control-plane paths against delete/move. Uploads
+ * stream to a sibling temp file and atomically rename into place, downloads
+ * stream as chunked binary frames with backpressure.
  */
 
 import {
@@ -18,7 +20,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { join, normalize, resolve } from 'node:path';
+import { isAbsolute, join, normalize, resolve } from 'node:path';
 
 const DOWNLOAD_CHUNK_BYTES = 256 * 1024;
 
@@ -53,11 +55,29 @@ export function createFileOperations(deps) {
   // In-flight uploads keyed by stream id, shared across connections.
   const uploads = new Map();
 
+  // A fs.WriteStream that received end() may still be flushing to disk;
+  // uploads must wait for that flush before the atomic rename.
+  function whenUploadStreamSettled(stream) {
+    if (stream.writableFinished) return Promise.resolve();
+    return new Promise((resolveSettled, rejectSettled) => {
+      stream.once('finish', resolveSettled);
+      stream.once('error', rejectSettled);
+    });
+  }
+
+  // Absolute paths are honored anywhere in the container; relative paths
+  // resolve against the files root.
+  function resolveFilesPath(inputPath) {
+    return isAbsolute(inputPath || '')
+      ? resolve(inputPath)
+      : resolve(join(filesRootDir, normalize(inputPath || '')));
+  }
+
   function resolvedSafePath(inputPath) {
     if (!isSafePath(inputPath)) {
       throw errorWithCode('Access denied: Path outside agent files root', 403);
     }
-    return resolve(join(filesRootDir, normalize(inputPath || '')));
+    return resolveFilesPath(inputPath);
   }
 
   function listFileEntries(resolvedPath, normalizedPath, recursive = false, includeHidden = false) {
@@ -145,8 +165,8 @@ export function createFileOperations(deps) {
       if (normalizedSource === normalizedTarget) {
         return { success: true, message: 'Already at target path' };
       }
-      const resolvedSource = resolve(join(filesRootDir, normalizedSource));
-      const resolvedTarget = resolve(join(filesRootDir, normalizedTarget));
+      const resolvedSource = resolveFilesPath(normalizedSource);
+      const resolvedTarget = resolveFilesPath(normalizedTarget);
       if (!existsSync(resolvedSource)) throw errorWithCode('Source file or directory not found', 404);
       if (existsSync(resolvedTarget)) throw errorWithCode('Destination already exists', 409);
       const stats = statSync(resolvedSource);
@@ -263,7 +283,7 @@ export function createFileOperations(deps) {
       return { accepted: true };
     },
 
-    finishUpload(streamId, conn) {
+    async finishUpload(streamId, conn) {
       const upload = uploads.get(streamId);
       if (!upload || upload.failed) {
         throw errorWithCode('Upload stream not found or aborted.', 404);
@@ -279,6 +299,7 @@ export function createFileOperations(deps) {
       conn.finishUpload(streamId);
       uploads.delete(streamId);
       try {
+        await whenUploadStreamSettled(upload.stream);
         renameSync(upload.tempPath, upload.resolvedPath);
       } catch (error) {
         try { unlinkSync(upload.tempPath); } catch { /* best effort */ }

@@ -36,6 +36,7 @@ import {
 } from 'node:fs';
 import {
   extname,
+  isAbsolute,
   join,
   normalize,
   resolve,
@@ -342,9 +343,16 @@ function truncateLog(value, max = 2000) {
   return value.length > max ? `${value.slice(0, max)}\n...[truncated]` : value;
 }
 
+// Unrestricted path resolution for the sandbox runtime file tools: absolute
+// paths are honored anywhere in the container, relative paths resolve against
+// the files root. The sandbox container itself is the security boundary.
 function runtimePath(inputPath = '') {
-  if (!isSafePath(inputPath)) throw new Error('Access denied: Path outside agent files root');
-  return resolve(join(FILES_ROOT_DIR, normalize(inputPath)));
+  if (typeof inputPath !== 'string' || inputPath.includes('\0')) {
+    throw new Error('Invalid file path');
+  }
+  return isAbsolute(inputPath)
+    ? resolve(inputPath)
+    : resolve(join(FILES_ROOT_DIR, normalize(inputPath)));
 }
 
 const fileOperations = createFileOperations({
