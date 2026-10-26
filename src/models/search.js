@@ -34,6 +34,14 @@ export const SEARCH_PROVIDERS = [
     docsUrl: 'https://brave.com/search/api/',
   },
   {
+    id: 'deepseek',
+    name: 'DeepSeek Search',
+    requiresApiKey: true,
+    requiresBaseUrl: false,
+    // api.deepseek.com sends CORS headers, so the browser can call it directly.
+    docsUrl: 'https://api-docs.deepseek.com/guides/search/',
+  },
+  {
     id: 'searxng',
     name: 'SearXNG',
     requiresApiKey: false,
@@ -206,7 +214,10 @@ async function requestJson(url, init, { signal, timeoutMs } = {}) {
   if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
   const body = await res.json().catch(() => ({}));
   if (!res.ok) {
-    const detail = body?.detail || body?.message || body?.error;
+    // Tavily uses {detail}, Brave {message}, DeepSeek OpenAI-style
+    // {error: {message}} — fall through until something stringifies usefully.
+    const detail = body?.detail || body?.message || body?.error?.message
+      || (typeof body?.error === 'string' ? body.error : null);
     const error = new Error(
       `Search provider returned ${res.status}${detail ? `: ${String(detail).slice(0, 300)}` : ''}`
     );
@@ -256,6 +267,30 @@ async function braveSearch(config, request, opts) {
   }));
 }
 
+async function deepseekSearch(config, request, opts) {
+  const body = await requestJson('https://api.deepseek.com/v1/tools/search', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${config.apiKey}`,
+    },
+    body: JSON.stringify({
+      // The API caps queries at 128 characters; the query syntax (site:,
+      // lang:, after:, ...) passes through to the engine untouched.
+      query: request.query.slice(0, 128),
+      count: request.maxResults,
+    }),
+  }, opts);
+  const results = Array.isArray(body?.results) ? body.results : [];
+  return results.map((result) => ({
+    title: stripHtml(result.title) || result.url,
+    url: String(result.url || ''),
+    // summary is the model-oriented digest (~600-800 chars); snippet is the
+    // shorter UI-oriented one.
+    snippet: stripHtml(result.summary || result.snippet).slice(0, 1_000),
+  }));
+}
+
 async function searxngSearch(config, request, opts) {
   const base = String(config.baseUrl || '').replace(/\/+$/, '');
   const endpoint = `${base}/search?format=json&q=${encodeURIComponent(request.query)}`;
@@ -273,6 +308,7 @@ async function searxngSearch(config, request, opts) {
 const PROVIDER_ADAPTERS = {
   tavily: tavilySearch,
   brave: braveSearch,
+  deepseek: deepseekSearch,
   searxng: searxngSearch,
 };
 
@@ -344,8 +380,9 @@ export function formatSearchResults({ provider, query, results } = {}) {
 
 /**
  * Persists search provider credentials under config.yaml → search. Follows the
- * LLM settings convention: keys never appear in getters (hasApiKey flags
- * only) and stay device-local in sync (see syncManager strip/restore).
+ * LLM settings convention: keys never appear in getters (hasApiKey flags only)
+ * and sync with the config so configuring a provider propagates to every
+ * device (see syncManager stripLocalOnlyConfig, which keeps the search subtree).
  */
 const search = {
   getProviderTypes() {

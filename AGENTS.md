@@ -70,7 +70,7 @@ YAML-based config persisted in OPFS. Dot-path access, subscribe/notify, serializ
 
 ### Sync (`src/sync/`)
 
-S3/OSS-backed sync with ETag CAS, sharded manifests with vector clocks, Web Locks coordination, Yjs three-way merges, conflict backups under `files/Sync Conflicts/`, and a scrub journal. Sync credentials stay device-local; LLM API keys, agent tokens, and the E2B key sync with the config so re-authenticating a sandbox or rotating a key propagates to every device.
+S3/OSS-backed sync with ETag CAS, sharded manifests with vector clocks, Web Locks coordination, Yjs three-way merges, conflict backups under `files/Sync Conflicts/`, and a scrub journal. Sync credentials stay device-local; LLM API keys, agent tokens, search provider keys, and the E2B key sync with the config so re-authenticating a sandbox or rotating a key propagates to every device.
 
 ### i18n / PWA
 

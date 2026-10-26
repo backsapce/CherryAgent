@@ -98,12 +98,13 @@
     "provider": "検索プロバイダー",
     "tavilyApiKey": "Tavily API キー",
     "braveApiKey": "Brave Search API キー",
+    "deepseekApiKey": "DeepSeek API キー",
     "apiKeySet": "キー保存済み — 新しいキーを入力すると置き換えます",
     "clearKey": "キーを削除",
     "searxngUrl": "SearXNG インスタンス URL",
     "searxngHint": "インスタンスは JSON 出力形式を有効にする必要があります。CORS が無効な場合、接続済みの agent サーバー経由でプロキシされます。",
     "maxResults": "既定の結果数（1-10）",
-    "keyLocalNote": "API キーはこのブラウザーのストレージにのみ保存され、既定では同期に含まれません。"
+    "keyLocalNote": "API キーは設定と一緒に全デバイスへ同期され、設定済みの検索プロバイダーはどのデバイスでも利用できます。"
   },
   "generalSettings": {
     "title": "一般設定",

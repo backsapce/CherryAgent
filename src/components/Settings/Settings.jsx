@@ -217,6 +217,7 @@ const Settings = ({
     provider: 'tavily',
     tavilyApiKey: '',
     braveApiKey: '',
+    deepseekApiKey: '',
     searxngBaseUrl: '',
     maxResults: '5',
   });
@@ -385,6 +386,7 @@ const Settings = ({
         maxResults: String(settings.maxResults || 5),
         tavilyApiKey: '',
         braveApiKey: '',
+        deepseekApiKey: '',
       }));
     } catch (err) {
       setWebSearchError(err.message);
@@ -397,17 +399,19 @@ const Settings = ({
     try {
       const tavilyApiKey = webSearchForm.tavilyApiKey.trim();
       const braveApiKey = webSearchForm.braveApiKey.trim();
+      const deepseekApiKey = webSearchForm.deepseekApiKey.trim();
       const settings = await search.configure({
         provider: webSearchForm.provider,
         maxResults: Number(webSearchForm.maxResults) || 5,
         providers: {
           ...(tavilyApiKey ? { tavily: { apiKey: tavilyApiKey } } : {}),
           ...(braveApiKey ? { brave: { apiKey: braveApiKey } } : {}),
+          ...(deepseekApiKey ? { deepseek: { apiKey: deepseekApiKey } } : {}),
           searxng: { baseUrl: webSearchForm.searxngBaseUrl.trim() },
         },
       });
       setWebSearchSaved(settings);
-      setWebSearchForm((prev) => ({ ...prev, tavilyApiKey: '', braveApiKey: '' }));
+      setWebSearchForm((prev) => ({ ...prev, tavilyApiKey: '', braveApiKey: '', deepseekApiKey: '' }));
     } catch (err) {
       setWebSearchError(err.message);
     } finally {
@@ -1543,6 +1547,33 @@ const Settings = ({
                         className="settings-secondary"
                         disabled={webSearchSaving}
                         onClick={() => handleClearSearchApiKey('brave')}
+                      >
+                        {t('searchSettings.clearKey')}
+                      </button>
+                    )}
+                  </div>
+                </label>
+              )}
+
+              {webSearchForm.provider === 'deepseek' && (
+                <label>
+                  {t('searchSettings.deepseekApiKey')}
+                  <div className="settings-two-col">
+                    <input
+                      type="password"
+                      autoComplete="off"
+                      placeholder={webSearchSaved?.providers?.deepseek?.hasApiKey
+                        ? t('searchSettings.apiKeySet')
+                        : 'sk-...'}
+                      value={webSearchForm.deepseekApiKey}
+                      onChange={(e) => setWebSearchForm((f) => ({ ...f, deepseekApiKey: e.target.value }))}
+                    />
+                    {webSearchSaved?.providers?.deepseek?.hasApiKey && (
+                      <button
+                        type="button"
+                        className="settings-secondary"
+                        disabled={webSearchSaving}
+                        onClick={() => handleClearSearchApiKey('deepseek')}
                       >
                         {t('searchSettings.clearKey')}
                       </button>

@@ -120,6 +120,55 @@ test('runWebSearch maps Brave results and post-filters domains', async () => {
   }
 });
 
+test('runWebSearch maps DeepSeek results and prefers the summary digest', async () => {
+  const restore = mockFetch(() => jsonResponse({
+    results: [
+      {
+        title: 'DeepSeek One',
+        url: 'https://one.example.com/a',
+        snippet: 'short snippet',
+        summary: 'longer summary digest &amp; detail',
+        rerank_score: 2.1,
+        authority: 3,
+      },
+      { title: 'DeepSeek Two', url: 'https://two.example.com/b', snippet: 'snippet only' },
+    ],
+  }));
+  try {
+    const result = await runWebSearch(
+      { provider: 'deepseek', apiKey: 'sk-x' },
+      { query: 'q'.repeat(200), maxResults: 2 },
+    );
+    assert.equal(result.provider, 'deepseek');
+    assert.deepEqual(result.results, [
+      { title: 'DeepSeek One', url: 'https://one.example.com/a', snippet: 'longer summary digest & detail' },
+      { title: 'DeepSeek Two', url: 'https://two.example.com/b', snippet: 'snippet only' },
+    ]);
+
+    const calls = restore();
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].input, 'https://api.deepseek.com/v1/tools/search');
+    assert.equal(calls[0].init.headers.Authorization, 'Bearer sk-x');
+    const body = JSON.parse(calls[0].init.body);
+    assert.equal(body.query, 'q'.repeat(128));
+    assert.equal(body.count, 2);
+  } finally {
+    restore();
+  }
+});
+
+test('runWebSearch surfaces DeepSeek OpenAI-style error messages', async () => {
+  const restore = mockFetch(() => jsonResponse({ error: { message: 'Insufficient Balance' } }, 402));
+  try {
+    await assert.rejects(
+      () => runWebSearch({ provider: 'deepseek', apiKey: 'sk-broke' }, { query: 'x' }),
+      /402: Insufficient Balance/,
+    );
+  } finally {
+    restore();
+  }
+});
+
 test('runWebSearch maps SearXNG results against the instance baseUrl', async () => {
   const restore = mockFetch(() => jsonResponse({
     results: [
@@ -202,6 +251,6 @@ test('formatSearchResults renders compact blocks and cites guidance', () => {
   );
 });
 
-test('SEARCH_PROVIDERS advertises the three supported backends', () => {
-  assert.deepEqual(SEARCH_PROVIDERS.map((p) => p.id), ['tavily', 'brave', 'searxng']);
+test('SEARCH_PROVIDERS advertises the four supported backends', () => {
+  assert.deepEqual(SEARCH_PROVIDERS.map((p) => p.id), ['tavily', 'brave', 'deepseek', 'searxng']);
 });

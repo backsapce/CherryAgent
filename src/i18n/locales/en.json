@@ -98,12 +98,13 @@
     "provider": "Search provider",
     "tavilyApiKey": "Tavily API key",
     "braveApiKey": "Brave Search API key",
+    "deepseekApiKey": "DeepSeek API key",
     "apiKeySet": "API key saved — enter a new key to replace it",
     "clearKey": "Clear key",
     "searxngUrl": "SearXNG instance URL",
     "searxngHint": "The instance must enable the JSON output format. If it lacks CORS headers, searches are proxied through a connected agent server.",
     "maxResults": "Default result count (1-10)",
-    "keyLocalNote": "API keys stay in this browser's storage and are never included in sync by default."
+    "keyLocalNote": "API keys sync with your configuration, so a configured search provider is available on every device."
   },
   "generalSettings": {
     "title": "General Settings",
