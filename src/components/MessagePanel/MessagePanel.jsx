@@ -101,6 +101,7 @@ const MARKDOWN_REHYPE_PLUGINS = [
 const MARKDOWN_REHYPE_STREAMING_PLUGINS = [rehypeSanitize, rehypeStreamWords];
 const MARKDOWN_COMPONENTS = {
   pre: CodeBlock,
+  a: MarkdownLink,
   img: BlockedMarkdownImage,
 };
 
@@ -187,6 +188,18 @@ function messageHistoryPageSize() {
   } catch {
     return MESSAGE_HISTORY_PAGE_SIZE;
   }
+}
+
+// Links rendered from LLM markdown must never navigate this SPA away (that
+// would unload the agent app), so force every anchor into a new tab. Target
+// and rel are hardcoded here rather than taken from props: rehype-sanitize
+// strips the target attribute, but custom components render their own JSX.
+function MarkdownLink({ children, node: _node, ...props }) {
+  return (
+    <a {...props} target="_blank" rel="noopener noreferrer">
+      {children}
+    </a>
+  );
 }
 
 function BlockedMarkdownImage({ alt }) {
