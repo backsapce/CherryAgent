@@ -152,7 +152,11 @@
   margin-left: 2px;
 }
 
-.settings-section select,
+.settings-section .cherry-select {
+  width: 100%;
+}
+
+.settings-section .cherry-select-trigger,
 .settings-section input[type="text"],
 .settings-section input[type="password"],
 .settings-section input[type="number"],
@@ -169,7 +173,7 @@
   box-sizing: border-box;
 }
 
-.settings-section select:focus,
+.settings-section .cherry-select-trigger:focus,
 .settings-section input:focus,
 .settings-section textarea:focus {
   border-color: var(--color-border-focus);
@@ -503,10 +507,6 @@
   display: flex;
   gap: 6px;
   align-items: center;
-}
-
-.model-select-row select {
-  flex: 1;
 }
 
 /* Model combobox (input-select) */
@@ -1426,7 +1426,11 @@
   margin: 0;
 }
 
-.agent-defaults select {
+.agent-defaults .cherry-select {
+  width: 100%;
+}
+
+.agent-defaults .cherry-select-trigger {
   width: 100%;
   min-width: 0;
   padding: 6px 8px;
@@ -1439,7 +1443,7 @@
   outline: none;
 }
 
-.agent-defaults select:focus {
+.agent-defaults .cherry-select-trigger:focus {
   border-color: var(--color-border-focus);
 }
 
@@ -1552,7 +1556,7 @@
   opacity: 0.6;
 }
 
-.settings-section select:disabled {
+.settings-section .cherry-select-trigger:disabled {
   cursor: not-allowed;
   opacity: 0.6;
 }

@@ -1,4 +1,5 @@
 import ReasoningSelect from './ReasoningSelect';
+import Select from '../Select/Select';
 import { useState, useRef, useEffect } from 'react';
 import { assertSecureAgentUrl, checkAgentAvailable, connectAgent } from '../../models/agent';
 import { exportToZip, getOpfsDataStats, importFromZip } from '../../vfs/opfs';
@@ -717,8 +718,7 @@ const Settings = ({
     }
   };
 
-  const handleLlmProviderChange = (e) => {
-    const providerId = e.target.value;
+  const handleLlmProviderChange = (providerId) => {
     setSettingsForm((form) => ({ ...form, providerId, model: '' }));
     setSelectedModels([]);
     setModelList([]);
@@ -1151,13 +1151,13 @@ const Settings = ({
                   {llmProfiles.length > 0 && (
                     <>
                       <label>{t('llmSettings.llmList')}</label>
-                      <select value={editingLlmId || ''} onChange={(e) => handleEditLlmProfile(e.target.value)}>
+                      <Select value={editingLlmId || ''} onChange={(value) => handleEditLlmProfile(value)}>
                         {llmProfiles.map((profile) => (
                           <option key={profile.id} value={profile.id}>
                             {profile.name || `${profile.providerName || profile.provider} / ${profile.model}`}
                           </option>
                         ))}
-                      </select>
+                      </Select>
                     </>
                   )}
 
@@ -1190,14 +1190,14 @@ const Settings = ({
                       />
 
                       <label>{t('llmSettings.provider')}</label>
-                      <select value={settingsForm.providerId} onChange={handleLlmProviderChange}>
+                      <Select value={settingsForm.providerId} onChange={handleLlmProviderChange}>
                         <option value="">{t('llmSettings.selectConfiguredProvider')}</option>
                         {providerConfigs.map((providerConfig) => (
                           <option key={providerConfig.id} value={providerConfig.id}>
                             {providerConfig.name} · {providers.find((item) => item.id === providerConfig.type)?.name || providerConfig.type}
                           </option>
                         ))}
-                      </select>
+                      </Select>
 
                       <label>
                         {t('llmSettings.model')}
@@ -1278,11 +1278,11 @@ const Settings = ({
                   {providerConfigs.length > 0 && (
                     <>
                       <label>{t('llmSettings.providerList')}</label>
-                      <select value={editingProviderId || ''} onChange={(e) => handleEditProvider(e.target.value)}>
+                      <Select value={editingProviderId || ''} onChange={(value) => handleEditProvider(value)}>
                         {providerConfigs.map((providerConfig) => (
                           <option key={providerConfig.id} value={providerConfig.id}>{providerConfig.name}</option>
                         ))}
-                      </select>
+                      </Select>
                     </>
                   )}
 
@@ -1320,13 +1320,13 @@ const Settings = ({
                   />
 
                   <label>{t('llmSettings.providerType')}</label>
-                  <select
+                  <Select
                     value={providerForm.type}
-                    onChange={(e) => setProviderForm((form) => ({ ...form, type: e.target.value, baseUrl: '' }))}
+                    onChange={(value) => setProviderForm((form) => ({ ...form, type: value, baseUrl: '' }))}
                   >
                     <option value="">{t('llmSettings.selectProvider')}</option>
                     {providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.name}</option>)}
-                  </select>
+                  </Select>
 
                   <label>{t('llmSettings.apiKey')}</label>
                   <input
@@ -1448,12 +1448,12 @@ const Settings = ({
               <p className="settings-hint">{t('generalSettings.autoTitleHint')}</p>
 
               <label>{t('generalSettings.autoTitleModel')}</label>
-              <select
+              <Select
                 value={effectiveAutoTitleProfileId || ''}
                 disabled={!autoTitleForm.enabled || autoTitleProfiles.length === 0}
-                onChange={(e) => setAutoTitleForm((form) => ({
+                onChange={(value) => setAutoTitleForm((form) => ({
                   ...form,
-                  llmProfileId: e.target.value || null,
+                  llmProfileId: value || null,
                 }))}
               >
                 <option value="">
@@ -1464,7 +1464,7 @@ const Settings = ({
                 {autoTitleProfiles.map((profile) => (
                   <option key={profile.id} value={profile.id}>{profile.name}</option>
                 ))}
-              </select>
+              </Select>
               <p className="settings-hint">{t('generalSettings.autoTitleModelHint')}</p>
 
               <label>{t('generalSettings.autoTitlePrompt')}</label>
@@ -1987,10 +1987,9 @@ const Settings = ({
               </label>
 
               <label>{t('syncSettings.provider')}</label>
-              <select
+              <Select
                 value={syncForm.providerPreset}
-                onChange={(e) => {
-                  const preset = e.target.value;
+                onChange={(preset) => {
                   setSyncForm((f) => ({
                     ...f,
                     providerPreset: preset,
@@ -2009,7 +2008,7 @@ const Settings = ({
                 <option value="aliyun-oss">{t('syncSettings.providerOss')}</option>
                 <option value="minio">{t('syncSettings.providerMinio')}</option>
                 <option value="custom">{t('syncSettings.providerCustom')}</option>
-              </select>
+              </Select>
 
               <div className="settings-two-col">
                 <label>
@@ -2181,10 +2180,10 @@ const Settings = ({
               </label>
 
               <label>{t('syncSettings.manifestMode')}</label>
-              <select
+              <Select
                 value={syncForm.providerPreset === 'aliyun-oss' ? 'sharded' : syncForm.manifestMode}
                 disabled={syncForm.providerPreset === 'aliyun-oss'}
-                onChange={(e) => setSyncForm((f) => ({ ...f, manifestMode: e.target.value }))}
+                onChange={(value) => setSyncForm((f) => ({ ...f, manifestMode: value }))}
               >
                 <option
                   value="conditional"
@@ -2198,7 +2197,7 @@ const Settings = ({
                 >
                   {t('syncSettings.manifestSharded')}
                 </option>
-              </select>
+              </Select>
               <p className="settings-hint">{t('syncSettings.manifestModeHint')}</p>
 
               <div className="sync-actions">
@@ -2358,19 +2357,19 @@ const Settings = ({
                           <div className="agent-defaults">
                             <label>
                               {t('agentSettings.runtime')}
-                              <select
+                              <Select
                                 value={agent.runtimeMode || 'browser'}
-                                onChange={(e) => handleAgentDefaultChange(agent.id, { runtimeMode: e.target.value })}
+                                onChange={(value) => handleAgentDefaultChange(agent.id, { runtimeMode: value })}
                               >
                                 <option value="browser">{t('agentSettings.browserRuntime')}</option>
                                 <option value="sandbox">{t('agentSettings.sandboxRuntime')}</option>
-                              </select>
+                              </Select>
                             </label>
                             <label>
                               {t('agentSettings.defaultLlm')}
-                              <select
+                              <Select
                                 value={agent.llmProfileId || ''}
-                                onChange={(e) => handleAgentDefaultChange(agent.id, { llmProfileId: e.target.value || null })}
+                                onChange={(value) => handleAgentDefaultChange(agent.id, { llmProfileId: value || null })}
                               >
                                 <option value="">{t('agentSettings.firstConfiguredLlm')}</option>
                                 {llmProfiles.map((profile) => (
@@ -2378,13 +2377,13 @@ const Settings = ({
                                     {profile.name || `${profile.provider} / ${profile.model}`}
                                   </option>
                                 ))}
-                              </select>
+                              </Select>
                             </label>
                             <label>
                               {t('agentSettings.sandbox')}
-                              <select
+                              <Select
                                 value={agent.sandboxUrl || ''}
-                                onChange={(e) => handleAgentDefaultChange(agent.id, { sandboxUrl: e.target.value || null })}
+                                onChange={(value) => handleAgentDefaultChange(agent.id, { sandboxUrl: value || null })}
                               >
                                 <option value="">{t('agentSettings.noSandbox')}</option>
                                 {agents.map((sandbox) => (
@@ -2396,7 +2395,7 @@ const Settings = ({
                                     {sandbox.name}{sandbox.isE2b && agent.runtimeMode === 'sandbox' ? ` (${t('agentSettings.commandOnly')})` : sandbox.status !== 'connected' ? ` (${sandbox.status})` : ''}
                                   </option>
                                 ))}
-                              </select>
+                              </Select>
                             </label>
                             {agent.runtimeMode === 'sandbox' && !agent.sandboxUrl && (
                               <span className="settings-error">{t('agentSettings.runtimeNeedsSandbox')}</span>

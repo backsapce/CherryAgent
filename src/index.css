@@ -22,22 +22,6 @@ textarea {
   font: inherit;
 }
 
-select {
-  background-color: var(--color-surface);
-  color: var(--color-text-content);
-}
-
-select option,
-select optgroup {
-  background-color: var(--color-surface-modal);
-  color: var(--color-text-content);
-}
-
-select option:checked {
-  background-color: var(--color-accent);
-  color: var(--color-text-heading);
-}
-
 button {
   color: inherit;
 }

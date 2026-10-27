@@ -45,6 +45,7 @@ import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
 import rehypeSanitize from 'rehype-sanitize';
 import './MessagePanel.css';
+import Select from '../Select/Select';
 
 const Settings = lazy(() => import('../Settings/Settings'));
 const LazyToolTerminal = lazy(() => import('./ToolTerminal'));
@@ -580,7 +581,7 @@ const ThinkingBlock = ({ thinking, isThinking, startedAt, finishedAt }) => {
     <div className="thinking-block">
       <div className="thinking-row">
         <button className="thinking-toggle" onClick={() => setExpanded((v) => !v)}>
-          <ChevronRight className={`thinking-chevron ${expanded ? 'expanded' : ''}`} width={14} height={14} />
+          <ChevronRight className={`thinking-chevron ${expanded ? 'expanded' : ''}`} width={11} height={11} />
           <span className="thinking-label">
             {labelText}
             {isThinking && (
@@ -705,13 +706,13 @@ const ToolFileDiff = ({ toolCall, edit }) => {
     () => parseUnifiedDiff(edit.diff || '').length <= TOOL_DIFF_AUTO_EXPAND_ROWS
   );
   return (
-    <div className="tool-block tool-diff-block">
+    <div className={`tool-block tool-diff-block${expanded ? ' expanded' : ''}`}>
       <div className="tool-header" onClick={() => setExpanded((v) => !v)}>
-        <ChevronRight className={expanded ? 'expanded' : ''} width={14} height={14} />
+        <ChevronRight className={expanded ? 'expanded' : ''} width={11} height={11} />
         {edit.created ? (
-          <FilePlus width={16} height={16} className="tool-kind-icon" />
+          <FilePlus width={13} height={13} className="tool-kind-icon" />
         ) : (
-          <FileEdit width={16} height={16} className="tool-kind-icon" />
+          <FileEdit width={13} height={13} className="tool-kind-icon" />
         )}
         <span className="tool-label">{edit.created ? t('message.createFile') : t('message.editFile')}</span>
         <span className="tool-diff-path" title={edit.path}>{edit.path}</span>
@@ -891,9 +892,9 @@ const ToolBlock = ({ toolCall, onStopStreaming, agentId, sandboxUrl }) => {
     const { cmd, result } = toolCall;
     const hasOutput = result && (result.stdout || result.stderr);
     return (
-      <div className="tool-block">
+      <div className={`tool-block${effectiveExpanded ? ' expanded' : ''}`}>
         <div className="tool-header" onClick={() => setExpanded((v) => !v)}>
-          <ChevronRight className={effectiveExpanded ? 'expanded' : ''} width={14} height={14} />
+          <ChevronRight className={effectiveExpanded ? 'expanded' : ''} width={11} height={11} />
           <span className="tool-label">{t('message.execute')}</span>
           <span className="tool-cmd">{cmd}</span>
           {result && (
@@ -901,7 +902,7 @@ const ToolBlock = ({ toolCall, onStopStreaming, agentId, sandboxUrl }) => {
               {t('message.exitCode', { code: result.code })}
             </span>
           )}
-          {!result && <span className="tool-exit-code">{t('message.running')}</span>}
+          {!result && <span className="tool-exit-code running">{t('message.running')}</span>}
         </div>
         {effectiveExpanded && hasOutput && (
           <div className="tool-output terminal-output">
@@ -943,10 +944,10 @@ const ToolBlock = ({ toolCall, onStopStreaming, agentId, sandboxUrl }) => {
   const detailOutput = result || controlInput;
 
   return (
-    <div className={`tool-block ${isImageGeneration ? 'image-generation-tool' : ''}`}>
+    <div className={`tool-block${effectiveExpanded ? ' expanded' : ''}${isImageGeneration ? ' image-generation-tool' : ''}`}>
       <div className="tool-header" onClick={() => setExpanded((v) => !v)}>
-        <ChevronRight className={effectiveExpanded ? 'expanded' : ''} width={14} height={14} />
-        {isImageGeneration && <ImageGenerate width={16} height={16} className="tool-kind-icon" />}
+        <ChevronRight className={effectiveExpanded ? 'expanded' : ''} width={11} height={11} />
+        {isImageGeneration && <ImageGenerate width={13} height={13} className="tool-kind-icon" />}
         {Number.isFinite(wakeupRunAtMs) ? (
           <ScheduleWakeupToolLabel key={wakeupRunAtMs} label={label} runAtMs={wakeupRunAtMs} />
         ) : waitSeconds != null ? (
@@ -956,9 +957,9 @@ const ToolBlock = ({ toolCall, onStopStreaming, agentId, sandboxUrl }) => {
         )}
         {command && <span className="tool-cmd" title={command}>{command}</span>}
         {summary && <span className="tool-summary">{summary}</span>}
-        {status === 'pending' && <span className="tool-exit-code">{t('message.running')}</span>}
+        {status === 'pending' && <span className="tool-exit-code running">{t('message.running')}</span>}
         {status === 'writing' && <span className="tool-exit-code writing">{t('message.writing')}</span>}
-        {status === 'running' && <span className="tool-exit-code">{t('message.running')}</span>}
+        {status === 'running' && <span className="tool-exit-code running">{t('message.running')}</span>}
         {status === 'completed' && exitCode !== undefined && (
           <span className={`tool-exit-code ${exitCode === 0 ? 'success' : 'error'}`}>
             {t('message.exitCode', { code: exitCode })}
@@ -1028,7 +1029,7 @@ const ImageGenerationStatus = () => {
   return (
     <div className="image-generation-status" role="status" aria-live="polite">
       <span className="image-generation-icon" aria-hidden="true">
-        <ImageGenerate width={18} height={18} />
+        <ImageGenerate width={15} height={15} />
       </span>
       <span className="image-generation-label">{t('message.imageGeneration')}</span>
       <span className="image-generation-dots" aria-hidden="true"><span>.</span><span>.</span><span>.</span></span>
@@ -2317,50 +2318,52 @@ const MessagePanel = forwardRef(({
         {agentList.length > 0 && (
           <div className="agent-selector">
             <User width={14} height={14} />
-            <div className="agent-selector-control">
-              <div className="agent-selector-label" aria-hidden="true">
-                <span className="agent-selector-name">{selectedAgent?.name}</span>
-                <span className="agent-selector-id">{selectedAgent?.id}</span>
-              </div>
-              <select
-                value={agentId || ''}
-                onChange={(e) => onAgentChange?.(activeSessionId, e.target.value || null)}
-                title="Select agent"
-                aria-label="Select agent"
-              >
-                {agentList.map((a) => (
-                  <option key={a.id} value={a.id}>{a.name}</option>
-                ))}
-              </select>
-            </div>
+            <Select
+              className="agent-selector-control"
+              value={agentId || ''}
+              onChange={(value) => onAgentChange?.(activeSessionId, value || null)}
+              title="Select agent"
+              ariaLabel="Select agent"
+              renderValue={() => (
+                <span className="agent-selector-label">
+                  <span className="agent-selector-name">{selectedAgent?.name}</span>
+                  <span className="agent-selector-id">{selectedAgent?.id}</span>
+                </span>
+              )}
+            >
+              {agentList.map((a) => (
+                <option key={a.id} value={a.id}>{a.name}</option>
+              ))}
+            </Select>
           </div>
         )}
 
         <div className="llm-selector-group">
           <div className="llm-selector">
             <Cloud width={14} height={14} />
-            <div className="llm-selector-control">
-              <div className="llm-selector-label" aria-hidden="true">
-                <span className="llm-selector-provider">{selectedLlmProviderLabel}</span>
-                <span className="llm-selector-model">{selectedLlmModelLabel}</span>
-              </div>
-              <select
-                value={activeLlmProfileId || ''}
-                onChange={(e) => onSelectLLM?.(e.target.value || null)}
-                title={t('llmSettings.profile')}
-                aria-label={t('llmSettings.profile')}
-              >
-                {llmProfiles?.length ? (
-                  llmProfiles.map((profile) => (
-                    <option key={profile.id} value={profile.id}>
-                      {profile.name || `${profile.providerName || profile.provider} / ${profile.model}`}
-                    </option>
-                  ))
-                ) : (
-                  <option value="">{t('message.noProviderConfigured')}</option>
-                )}
-              </select>
-            </div>
+            <Select
+              className="llm-selector-control"
+              value={activeLlmProfileId || ''}
+              onChange={(value) => onSelectLLM?.(value || null)}
+              title={t('llmSettings.profile')}
+              ariaLabel={t('llmSettings.profile')}
+              renderValue={() => (
+                <span className="llm-selector-label">
+                  <span className="llm-selector-provider">{selectedLlmProviderLabel}</span>
+                  <span className="llm-selector-model">{selectedLlmModelLabel}</span>
+                </span>
+              )}
+            >
+              {llmProfiles?.length ? (
+                llmProfiles.map((profile) => (
+                  <option key={profile.id} value={profile.id}>
+                    {profile.name || `${profile.providerName || profile.provider} / ${profile.model}`}
+                  </option>
+                ))
+              ) : (
+                <option value="">{t('message.noProviderConfigured')}</option>
+              )}
+            </Select>
           </div>
           <ReasoningSelect profile={selectedLlmProfile} onChange={onConfigureLLM} />
         </div>
@@ -2626,16 +2629,17 @@ const MessagePanel = forwardRef(({
                   ) : (
                     <Plug width={14} height={14} />
                   )}
-                  <select
+                  <Select
                     className="sandbox-select-inline"
                     value={selectedAgentUrl || ''}
-                    onChange={(e) => onSelectAgent(e.target.value || null)}
+                    onChange={(value) => onSelectAgent(value || null)}
+                    showChevron={false}
                   >
                     <option value="">{t('message.noSandboxSelected')}</option>
                     {connectedAgents.map((a) => (
                       <option key={a.url} value={a.url}>{a.name}</option>
                     ))}
-                  </select>
+                  </Select>
                 </span>
               );
             })()}

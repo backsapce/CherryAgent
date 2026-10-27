@@ -5,34 +5,33 @@
   font-size: 12px;
 }
 
+/* Toolbar pill — the CherrySelect trigger carries the pill styling */
 .reasoning-selector-toolbar {
-  position: relative;
-  display: inline-flex;
-  flex-direction: column;
-  justify-content: center;
-  gap: 2px;
   flex-shrink: 0;
   min-height: 38px;
-  box-sizing: border-box;
-  padding: 5px 22px 5px 8px;
+}
+
+.reasoning-selector-toolbar .cherry-select-trigger {
+  min-height: 38px;
+  padding: 5px 6px 5px 8px;
   border: 1px solid var(--color-border);
   border-radius: 10px;
   background: color-mix(in srgb, var(--color-surface) 86%, transparent);
   line-height: 1;
   cursor: pointer;
+  gap: 6px;
 }
 
-.reasoning-selector-toolbar::after {
-  content: '';
-  position: absolute;
-  right: 9px;
-  top: 14px;
-  width: 5px;
-  height: 5px;
-  border-right: 1px solid var(--color-text-secondary);
-  border-bottom: 1px solid var(--color-text-secondary);
-  transform: rotate(45deg);
-  pointer-events: none;
+.reasoning-selector-toolbar .cherry-select-trigger:hover:not(:disabled) {
+  border-color: var(--color-border-focus);
+}
+
+.reasoning-selector-label {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  min-width: 0;
 }
 
 .reasoning-selector-toolbar .reasoning-selector-title {
@@ -45,31 +44,17 @@
   font-size: 10px;
 }
 
-.reasoning-selector-toolbar select {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  opacity: 0;
-  cursor: pointer;
-  font: inherit;
-}
-
-.reasoning-selector-toolbar:focus-within {
+.reasoning-selector-toolbar .cherry-select-trigger:focus-visible {
   outline: 2px solid var(--color-text-secondary);
   outline-offset: 2px;
 }
 
-.reasoning-selector-toolbar:has(select:disabled) {
+.reasoning-selector-toolbar .cherry-select-trigger:disabled {
   opacity: 0.6;
 }
 
-.reasoning-selector-toolbar [role='alert'] {
-  position: absolute;
-  top: calc(100% + 4px);
-  right: 0;
-  width: max-content;
-  max-width: 240px;
+.reasoning-selector-default [role='alert'] {
+  margin-top: 4px;
   padding: 8px;
   background: var(--color-surface);
   color: var(--color-text);
