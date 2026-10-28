@@ -1,0 +1,35 @@
+/*
+ * Hotlinked models.dev provider logos.
+ *
+ * The SVGs are monochrome (fill="currentColor"), which resolves to black
+ * inside an <img> regardless of page CSS, so dark themes flip them with a
+ * filter. Light themes keep the native black on their near-white surfaces.
+ */
+
+.model-provider-icon {
+  flex: 0 0 auto;
+  display: inline-block;
+  object-fit: contain;
+  border-radius: 2px;
+  vertical-align: middle;
+}
+
+.model-provider-icon-default {
+  color: var(--color-text-secondary);
+}
+
+/* Monochrome logos resolve to black in <img>; invert for dark surfaces. */
+[data-theme='dark'] .model-provider-icon:not(.model-provider-icon-default) {
+  filter: invert(1) brightness(1.2);
+}
+
+/* Alignment inside custom Select option labels and similar flex rows. */
+.cherry-select-option-label .model-provider-icon {
+  margin-right: 6px;
+  vertical-align: -2px;
+}
+
+.llm-selector .model-provider-icon,
+.llm-selector .cherry-select-value .model-provider-icon {
+  flex: 0 0 auto;
+}

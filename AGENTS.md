@@ -49,7 +49,7 @@ The loop is built on the Vercel AI SDK: `streamText` owns the model → tool →
 ### LLM layer (`src/models/`)
 
 - **`ai.js`** — AI SDK model factory for all providers (Anthropic gets the direct-browser-access header; OpenRouter gets referer headers). `toModelMessages()` converts persisted history; assistant tool history crosses turns as XML blocks embedded in assistant content (App.jsx `expandMessagesForLlm`), not native tool-role messages.
-- **`llm.js`** — profile/connection settings: provider connections own credentials, LLM records select a model. API keys never leave `getRuntimeConfig()`/`getLanguageModel()` except over the authenticated sandbox-run channel. Context windows resolved from models.dev with a static fallback (`contextWindow.js` + tokenlens).
+- **`llm.js`** — profile/connection settings: provider connections own credentials, LLM records select a model. API keys never leave `getRuntimeConfig()`/`getLanguageModel()` except over the authenticated sandbox-run channel. Context windows resolved from models.dev with a static fallback (`contextWindow.js` + tokenlens); provider/model display logos are hotlinked from models.dev (`modelLogos.js` + `ModelProviderIcon.jsx`, monochrome SVGs inverted on dark themes).
 - **`agent.js`** — agent-server client API surface over the shared WebSocket connection from `agentConnection.js`: hello/connect auth, streamed `executeCommand`, managed jobs, file CRUD + binary transfer, web proxies, and durable runs (`start`/`continue`/`state`/`subscribe`/`cancel`). Enforces wss for non-loopback agent URLs (`assertSecureAgentUrl`).
 
 ### Agent server (`server/`)

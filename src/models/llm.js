@@ -21,6 +21,7 @@ import qwen from './providers/qwen.js';
 import deepseek from './providers/deepseek.js';
 import customOpenai from './providers/custom-openai.js';
 import { loadSettings, saveSettings } from './settings.js';
+import { getModelsDevProviderCandidates } from './modelLogos.js';
 import { getStaticContextWindow } from './contextWindow.js';
 import { streamText } from 'ai';
 import { createLanguageModel, toModelMessages } from './ai.js';
@@ -55,15 +56,6 @@ let modelsDevCatalogPromise = null;
 
 const MODELS_DEV_API_URL = 'https://models.dev/api.json';
 const MODELS_DEV_TIMEOUT_MS = 5000;
-const MODELS_DEV_PROVIDER = {
-  openai: 'openai',
-  anthropic: 'anthropic',
-  gemini: 'google',
-  qwen: 'alibaba',
-  deepseek: 'deepseek',
-  openrouter: 'openrouter',
-};
-
 function generateLlmId() {
   return `llm_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -192,19 +184,6 @@ function getModelsDevLimit(modelInfo) {
   const limit = modelInfo?.limit?.context ?? modelInfo?.context ?? modelInfo?.contextWindow;
   const numeric = Number(limit);
   return Number.isFinite(numeric) && numeric > 0 ? numeric : null;
-}
-
-function getModelsDevProviderCandidates(providerId, modelId) {
-  const candidates = [
-    MODELS_DEV_PROVIDER[providerId],
-    providerId,
-  ];
-
-  if ((providerId === 'openrouter' || providerId === 'custom-openai') && modelId?.includes('/')) {
-    candidates.push(modelId.split('/')[0]);
-  }
-
-  return [...new Set(candidates.filter(Boolean))];
 }
 
 function getModelsDevModelCandidates(modelId) {

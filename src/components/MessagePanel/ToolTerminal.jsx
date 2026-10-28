@@ -2,18 +2,29 @@ import { useEffect, useRef } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
+import { isTerminalAtBottom } from './terminalFollow';
 
 const normalizeTerminalOutput = (value) => String(value || '').replace(/\r?\n/g, '\r\n');
 
-function fitAndScrollTerminal(terminal, fitAddon) {
-  if (!terminal?.element || !fitAddon) return;
+function fitTerminal(terminal, fitAddon) {
   try {
-    fitAddon.fit();
-    if (terminal.cols > 0 && terminal.rows > 0) {
-      terminal.scrollToBottom();
-    }
+    fitAddon?.fit();
   } catch {
     // xterm can briefly lack renderer dimensions while mounting or resizing.
+  }
+}
+
+// Follow new output only while the viewport was already at the bottom; once
+// the user scrolls up, streaming output must not yank the view back down.
+function fitAndFollowTerminal(terminal, fitAddon, wasAtBottom) {
+  if (!terminal) return;
+  fitTerminal(terminal, fitAddon);
+  if (wasAtBottom && terminal.cols > 0 && terminal.rows > 0) {
+    try {
+      terminal.scrollToBottom();
+    } catch {
+      // Fitting can race with renderer teardown during unmount.
+    }
   }
 }
 
@@ -53,8 +64,9 @@ const ToolTerminal = ({ output }) => {
     previousOutputRef.current = '';
 
     const resizeObserver = new ResizeObserver(() => {
+      const wasAtBottom = isTerminalAtBottom(terminalRef.current);
       requestAnimationFrame(() => {
-        fitAndScrollTerminal(terminalRef.current, fitAddonRef.current);
+        fitAndFollowTerminal(terminalRef.current, fitAddonRef.current, wasAtBottom);
       });
     });
     resizeObserver.observe(containerRef.current);
@@ -73,16 +85,20 @@ const ToolTerminal = ({ output }) => {
     if (!terminal) return;
     const nextOutput = String(output || '');
     const previousOutput = previousOutputRef.current;
+    const wasAtBottom = isTerminalAtBottom(terminal);
+    const write = (text) => terminal.write(
+      normalizeTerminalOutput(text),
+      // The write callback runs after xterm parsed the chunk, so the fresh
+      // lines exist and scrollToBottom lands on the true tail.
+      () => fitAndFollowTerminal(terminal, fitAddonRef.current, wasAtBottom)
+    );
     if (nextOutput.startsWith(previousOutput)) {
-      terminal.write(normalizeTerminalOutput(nextOutput.slice(previousOutput.length)));
+      write(nextOutput.slice(previousOutput.length));
     } else {
       terminal.reset();
-      terminal.write(normalizeTerminalOutput(nextOutput));
+      write(nextOutput);
     }
     previousOutputRef.current = nextOutput;
-    requestAnimationFrame(() => {
-      fitAndScrollTerminal(terminal, fitAddonRef.current);
-    });
   }, [output]);
 
   return <div className="tool-terminal" ref={containerRef} />;

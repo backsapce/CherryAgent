@@ -1,4 +1,5 @@
 import ReasoningSelect from '../Settings/ReasoningSelect';
+import ModelProviderIcon from '../Icons/ModelProviderIcon';
 import { memo, forwardRef, lazy, Suspense, useImperativeHandle, useState, useRef, useEffect, useLayoutEffect, useMemo } from 'react';
 import { useI18n } from '../../i18n/context';
 import { getAgentDir, getFileBlob, normalizeWorkspaceRelativePath, readAgentFileBlob } from '../../vfs/opfs';
@@ -26,6 +27,8 @@ import {
 } from './sessionScrollRestore';
 import { getScheduleWakeupRunAtMs } from './toolWakeupCountdown';
 import { formatWaitDuration, getWaitCommandStartedAtMs, getWaitCommandWaitSeconds } from './toolWaitCountdown';
+import { jobCommandHint, jobTerminalOutput, parseJobSnapshot } from './jobToolOutput';
+import { resolveToolExpanded, toggleToolExpanded } from './toolExpansion';
 import { stripLegacyContextFileSummary } from '../../contextFiles';
 import { formatBytes, imageMimeFromPath } from '../../utils/misc.js';
 import { hasRenderableTranscript } from './transcriptVisibility';
@@ -882,8 +885,11 @@ const ToolBlock = ({ toolCall, onStopStreaming, agentId, sandboxUrl }) => {
   const isRunningExecute = isLegacyExecute
     ? !toolCall?.result
     : toolCall?.name === 'execute_command' && ['pending', 'running'].includes(toolCall?.status);
-  const [expanded, setExpanded] = useState(false);
-  const effectiveExpanded = expanded || isRunningExecute;
+  // Live execute output auto-opens, but that must never swallow the click:
+  // an explicit user toggle wins even while the command is still running.
+  const [userExpanded, setUserExpanded] = useState(null);
+  const effectiveExpanded = resolveToolExpanded(userExpanded, isRunningExecute);
+  const toggleExpanded = () => setUserExpanded(toggleToolExpanded(userExpanded, isRunningExecute));
 
   if (!toolCall) return null;
 
@@ -893,7 +899,7 @@ const ToolBlock = ({ toolCall, onStopStreaming, agentId, sandboxUrl }) => {
     const hasOutput = result && (result.stdout || result.stderr);
     return (
       <div className={`tool-block${effectiveExpanded ? ' expanded' : ''}`}>
-        <div className="tool-header" onClick={() => setExpanded((v) => !v)}>
+        <div className="tool-header" onClick={toggleExpanded}>
           <ChevronRight className={effectiveExpanded ? 'expanded' : ''} width={11} height={11} />
           <span className="tool-label">{t('message.execute')}</span>
           <span className="tool-cmd">{cmd}</span>
@@ -914,9 +920,19 @@ const ToolBlock = ({ toolCall, onStopStreaming, agentId, sandboxUrl }) => {
   }
 
   // New tool call format: { name, status?, result?, summary? }
-  const { name, status, result, summary, command, exitCode, parsedArgs, rawArgs } = toolCall;
+  const { name, status, result, summary, parsedArgs, rawArgs } = toolCall;
+  const job = parseJobSnapshot(toolCall);
+  // Calls that waited on an existing job_id carry the command only inside the
+  // job snapshot; show it in the header either way.
+  const command = toolCall.command
+    || (typeof job?.command === 'string' ? job.command : undefined)
+    || jobCommandHint(parsedArgs);
+  const exitCode = toolCall.exitCode !== undefined
+    ? toolCall.exitCode
+    : (typeof job?.exit_code === 'number' ? job.exit_code : undefined);
   const showShutdown = name === 'execute_command' && ['pending', 'running'].includes(status) && onStopStreaming;
-  const renderTerminal = name === 'execute_command';
+  const renderJobTerminal = !!job;
+  const renderTerminal = name === 'execute_command' || renderJobTerminal;
   const isImageGeneration = isImageGenerationToolName(name);
   const imageReference = parseImageReference(toolCall);
   // A finished display-image call renders as just the picture — the
@@ -945,7 +961,7 @@ const ToolBlock = ({ toolCall, onStopStreaming, agentId, sandboxUrl }) => {
 
   return (
     <div className={`tool-block${effectiveExpanded ? ' expanded' : ''}${isImageGeneration ? ' image-generation-tool' : ''}`}>
-      <div className="tool-header" onClick={() => setExpanded((v) => !v)}>
+      <div className="tool-header" onClick={toggleExpanded}>
         <ChevronRight className={effectiveExpanded ? 'expanded' : ''} width={11} height={11} />
         {isImageGeneration && <ImageGenerate width={13} height={13} className="tool-kind-icon" />}
         {Number.isFinite(wakeupRunAtMs) ? (
@@ -986,7 +1002,11 @@ const ToolBlock = ({ toolCall, onStopStreaming, agentId, sandboxUrl }) => {
       </div>
       {effectiveExpanded && (detailOutput || (renderTerminal && ['pending', 'running'].includes(status))) && (
         <div className={`tool-output ${renderTerminal ? 'terminal-output' : ''}`}>
-          {renderTerminal ? <ToolTerminal output={executeTerminalOutput(toolCall)} /> : <pre>{detailOutput}</pre>}
+          {renderTerminal ? (
+            <ToolTerminal output={renderJobTerminal ? jobTerminalOutput(job) : executeTerminalOutput(toolCall)} />
+          ) : (
+            <pre>{detailOutput}</pre>
+          )}
         </div>
       )}
     </div>
@@ -2340,7 +2360,11 @@ const MessagePanel = forwardRef(({
 
         <div className="llm-selector-group">
           <div className="llm-selector">
-            <Cloud width={14} height={14} />
+            <ModelProviderIcon
+              providerId={selectedLlmProfile?.provider}
+              modelId={selectedLlmProfile?.model}
+              size={14}
+            />
             <Select
               className="llm-selector-control"
               value={activeLlmProfileId || ''}
@@ -2357,6 +2381,7 @@ const MessagePanel = forwardRef(({
               {llmProfiles?.length ? (
                 llmProfiles.map((profile) => (
                   <option key={profile.id} value={profile.id}>
+                    <ModelProviderIcon providerId={profile.provider} modelId={profile.model} size={13} />
                     {profile.name || `${profile.providerName || profile.provider} / ${profile.model}`}
                   </option>
                 ))
