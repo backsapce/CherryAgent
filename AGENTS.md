@@ -62,7 +62,7 @@ The loop is built on the Vercel AI SDK: `streamText` owns the model → tool →
 
 ### OPFS VFS (`src/vfs/opfs.js`)
 
-Root directory: `cherry-agent/`. Key subdirectories: `config.yaml`, `session.json` + `sessions/<id>.json`, `workspace/<agent-id>/{AGENTS.md, memory/, skills/, files/}`, `skills/` (global). Session persistence is atomic (temp-swap writes, index published last) with a generation-fenced save coordinator and crash-recovery journal. Zip export/import supported.
+Root directory: `cherry-agent/`. Key subdirectories: `config.yaml`, `session.json` + `sessions/<id>.json`, `workspace/<agent-id>/{AGENTS.md, memory/, skills/, files/}`, `skills/` (global). Session persistence is atomic (temp-swap writes, index published last) with a generation-fenced save coordinator and crash-recovery journal. Zip export/import supported. Session bodies beyond the newest 100 messages are archived as append-only gzip chunks (`sessions/<id>/cNNNN.json.gz`, ≤100 messages and ≤2MiB serialized each, native CompressionStream); `sessions/<id>.json` stays plain JSON holding only the hot tail (bare array when nothing is archived). Chunks are written before the envelope that references them; a referenced chunk file that has not landed defers the save instead of re-planning it away. Planning lives in `src/vfs/sessionArchive.js` (`planSessionArchive`), codec in `src/vfs/compression.js`.
 
 ### Config (`src/config/config.js`)
 

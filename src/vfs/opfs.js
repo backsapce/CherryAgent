@@ -7,6 +7,16 @@ import JSZip from 'jszip';
 import yaml from 'js-yaml';
 import { getWorkspaceDirName } from '../agents/agents.js';
 import { reconcileSessionRecoveryJournal } from '../sessionRefresh.js';
+import { gzipSupported, gzipText, gunzipText } from './compression.js';
+import {
+  chunkFileName,
+  fingerprintString,
+  formatHotFileBody,
+  mergeArchivedView,
+  parseChunkFileName,
+  parseHotFileBody,
+  planSessionArchive,
+} from './sessionArchive.js';
 
 const ROOT_DIR = 'cherry-agent';
 const SYNC_DIR = '.sync';
@@ -55,14 +65,7 @@ function withAgentWorkspaceMutation(agentId, scope, operation) {
 // message body duplicated every conversation (including image data URLs) for
 // the lifetime of the tab and made session persistence a major heap consumer.
 function sessionMessageFingerprint(serialized) {
-  let hashA = 0x811c9dc5;
-  let hashB = 0x9e3779b9;
-  for (let index = 0; index < serialized.length; index += 1) {
-    const code = serialized.charCodeAt(index);
-    hashA = Math.imul(hashA ^ code, 0x01000193);
-    hashB = Math.imul(hashB ^ code, 0x85ebca6b);
-  }
-  return `${serialized.length}:${hashA >>> 0}:${hashB >>> 0}`;
+  return fingerprintString(serialized);
 }
 
 async function ensureSessionWriteCacheRoot(root) {
@@ -512,6 +515,22 @@ function mergeData(localValue, incomingValue) {
   return localValue;
 }
 
+function isSessionBodyPath(path) {
+  return /^(sessions|messages)\/[^/]+\.json$/.test(path);
+}
+
+/**
+ * Zip/sync imports may arrive from a device whose session body was split into
+ * an archive envelope. Merge at the message level and emit the historical
+ * bare-array shape; any local chunks become stale and are pruned by the next
+ * save, which re-plans the archive from the merged in-memory history.
+ */
+function sessionBodyMessagesForMerge(value) {
+  if (Array.isArray(value)) return value;
+  const body = value && typeof value === 'object' ? parseHotFileBody(value) : null;
+  return body ? body.hotMessages : null;
+}
+
 function shouldMergeIncomingFile(path) {
   return [
     'config.yaml',
@@ -567,6 +586,17 @@ export function mergeIncomingTextContent(existingText, incomingText, localPath) 
     return { content: incomingText, merged: false };
   }
 
+  if (isSessionBodyPath(normalizedPath)) {
+    const localMessages = sessionBodyMessagesForMerge(localData);
+    const incomingMessages = sessionBodyMessagesForMerge(incomingData);
+    if (localMessages && incomingMessages) {
+      return {
+        content: formatMergedFile(normalizedPath, mergeByIdentity(localMessages, incomingMessages)),
+        merged: true,
+      };
+    }
+  }
+
   return {
     content: formatMergedFile(normalizedPath, mergeData(localData, incomingData)),
     merged: true,
@@ -574,11 +604,37 @@ export function mergeIncomingTextContent(existingText, incomingText, localPath) 
 }
 
 /**
+ * Session-body imports merge against the local file. When that local file is
+ * an archive envelope, its sealed chunks hold history that the envelope text
+ * alone does not carry: expand it to the full message list first so a merge
+ * can never silently drop archived local history.
+ */
+async function expandLocalSessionBodyText(filename, existingText, normalizedPath) {
+  if (!existingText || !isSessionBodyPath(normalizedPath)) return existingText;
+  let parsed;
+  try {
+    parsed = JSON.parse(existingText);
+  } catch {
+    return existingText;
+  }
+  if (Array.isArray(parsed) || !isPlainObject(parsed)) return existingText;
+  const body = parseHotFileBody(parsed);
+  if (!body || !(body.chunks || []).length) return existingText;
+  const id = String(filename).replace(/\.json$/, '');
+  const chunkPayloads = await loadArchiveChunks(id, body.chunks);
+  return JSON.stringify(mergeArchivedView(chunkPayloads, body.hotMessages));
+}
+
+/**
  * Write incoming backup/sync content. Known structured data files are merged
  * instead of overwritten so local config, sessions, and messages are preserved.
  */
 export async function writeIncomingText(dirHandle, filename, content, localPath, options = {}) {
-  const existingText = await readText(dirHandle, filename);
+  const existingText = await expandLocalSessionBodyText(
+    filename,
+    await readText(dirHandle, filename),
+    (localPath || filename || '').replace(/^\/+$|\/+$/g, '')
+  );
   const result = mergeIncomingTextContent(existingText, content, localPath || filename);
   await writeText(dirHandle, filename, result.content, {
     ...options,
@@ -763,22 +819,231 @@ export async function saveSessionFolders(folders) {
   return records;
 }
 
+/**
+ * Read one session's hot file: either the historical bare message array or a
+ * versioned envelope whose chunks list references sealed gzip archives.
+ */
+async function readSessionHotBody(sessionDir, id) {
+  let parsed = await readSessionJSON(sessionDir, `${id}.json`);
+  const loadedPrimaryMessages = parsed !== MISSING_SESSION_JSON;
+  if (parsed === MISSING_SESSION_JSON) {
+    const legacyDir = await getDirectory(LEGACY_MESSAGES_DIR);
+    parsed = await readSessionJSON(legacyDir, `${id}.json`);
+  }
+  return { parsed, loadedPrimaryMessages };
+}
+
+/**
+ * Load the archived chunk payloads referenced by a hot-file envelope. Chunks
+ * are read strictly by envelope reference, never by directory scan, so an
+ * orphaned write from an interrupted save stays invisible. A damaged chunk
+ * skips with a warning instead of bricking the session load: its bytes stay
+ * on disk for manual recovery and the next save re-plans the archive.
+ */
+async function loadArchiveChunks(id, envelopeChunks) {
+  if (!envelopeChunks.length) return [];
+  let archiveDir;
+  try {
+    archiveDir = await getExistingDirectory(SESSIONS_DIR, id);
+  } catch (error) {
+    if (isMissingFileSystemEntry(error)) return [];
+    throw error;
+  }
+  const payloads = [];
+  for (const entry of envelopeChunks) {
+    const name = chunkFileName(entry.index);
+    let bytes;
+    try {
+      const handle = await archiveDir.getFileHandle(name);
+      bytes = new Uint8Array(await (await handle.getFile()).arrayBuffer());
+    } catch (error) {
+      if (isMissingFileSystemEntry(error)) {
+        console.warn(`Session archive chunk ${SESSIONS_DIR}/${id}/${name} is missing; skipping`);
+        continue;
+      }
+      throw error;
+    }
+    try {
+      const chunkMessages = JSON.parse(await gunzipText(bytes));
+      if (!Array.isArray(chunkMessages)) throw new Error('chunk body is not a JSON array');
+      payloads.push(chunkMessages);
+    } catch (error) {
+      console.warn(`Session archive chunk ${SESSIONS_DIR}/${id}/${name} is unreadable; skipping`, error);
+    }
+  }
+  return payloads;
+}
+
+async function readFullSessionMessages(sessionDir, id) {
+  const { parsed, loadedPrimaryMessages } = await readSessionHotBody(sessionDir, id);
+  if (parsed === MISSING_SESSION_JSON) {
+    return { messages: [], loadedPrimaryMessages: false };
+  }
+  const body = parseHotFileBody(parsed);
+  if (!body) {
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && Number.isSafeInteger(parsed.v)) {
+      throw new Error(`Session messages for ${id} use unsupported archive format v${parsed.v}`);
+    }
+    throw new Error(`Session messages for ${id} must contain a JSON array`);
+  }
+  const chunkPayloads = await loadArchiveChunks(id, body.chunks);
+  return {
+    messages: mergeArchivedView(chunkPayloads, body.hotMessages),
+    loadedPrimaryMessages,
+  };
+}
+
+/** Delete every chunk file under sessions/<id>/ and the empty directory. */
+async function removeSessionArchiveDir(id) {
+  let archiveDir;
+  try {
+    archiveDir = await getExistingDirectory(SESSIONS_DIR, id);
+  } catch (error) {
+    if (isMissingFileSystemEntry(error)) return [];
+    throw error;
+  }
+  const removed = [];
+  for (const { name } of await listEntries(archiveDir)) {
+    if (parseChunkFileName(name) == null) continue;
+    if (await deleteEntry(archiveDir, name)) {
+      removed.push(`${SESSIONS_DIR}/${id}/${name}`);
+    }
+  }
+  await deleteEmptyPathTree(`${SESSIONS_DIR}/${id}`, { internal: true });
+  return removed;
+}
+
+/** Names of archive chunk files that currently exist under sessions/<id>/. */
+async function listArchiveChunkNames(id) {
+  let archiveDir;
+  try {
+    archiveDir = await getExistingDirectory(SESSIONS_DIR, id);
+  } catch (error) {
+    if (isMissingFileSystemEntry(error)) return new Set();
+    throw error;
+  }
+  return new Set(
+    (await listEntries(archiveDir))
+      .map(({ name }) => (parseChunkFileName(name) == null ? null : name))
+      .filter((name) => name != null)
+  );
+}
+
+/**
+ * Persist one session's message body: the plain-JSON hot tail in
+ * sessions/<id>.json plus immutable gzip chunks under sessions/<id>/.
+ *
+ * The hot file is written after the chunks it references (the same
+ * publish-ordering rule as the session.json index), so a crash can strand
+ * orphan chunk files but never a reference to a missing one. Chunks whose
+ * envelope entry still matches the planned fingerprint are left untouched,
+ * which keeps appends write-once for sealed history. Returns the written and
+ * deleted paths so callers can notify sync hooks accurately.
+ *
+ * A referenced chunk file that has not landed yet - typically because a pull
+ * is still running or was interrupted - defers the whole write instead of
+ * letting a re-plan orphan it: the save is retried on the next call once the
+ * bytes arrive. Unreadable bytes are a different failure and are pruned by
+ * the re-plan; deferral protects only references without files.
+ */
+async function writeSessionBody(sessionDir, id, messages) {
+  const plan = gzipSupported()
+    ? planSessionArchive(messages)
+    : { hotMessages: messages, chunks: [] };
+  const hotPath = `${SESSIONS_DIR}/${id}.json`;
+  const written = [];
+  const deleted = [];
+
+  // The current envelope identifies chunks that are already durable and
+  // byte-identical. A hot file that cannot be parsed is about to be replaced,
+  // so read failures degrade to "no reusable chunks" instead of blocking.
+  let existingBody = null;
+  try {
+    existingBody = parseHotFileBody(await readSessionJSON(sessionDir, `${id}.json`));
+  } catch (error) {
+    console.warn(`Failed to read the existing body of session ${id} while saving:`, error);
+  }
+  const existingChunks = new Map(
+    (existingBody?.chunks || []).map((entry) => [entry.index, entry])
+  );
+  const diskChunkNames = await listArchiveChunkNames(id);
+
+  const planReuses = (index, fingerprint) => plan.chunks.some(
+    (chunk) => chunk.index === index && chunk.fingerprint === fingerprint
+  );
+  const missingReferenced = [...existingChunks.values()].filter(
+    (entry) => !diskChunkNames.has(chunkFileName(entry.index))
+      && !planReuses(entry.index, entry.fingerprint)
+  );
+  if (missingReferenced.length > 0) {
+    console.warn(
+      `Session ${id} body save deferred: ${missingReferenced.length} referenced archive chunk file(s) have not landed yet`
+    );
+    return { written, deleted, deferred: true };
+  }
+
+  if (plan.chunks.length === 0) {
+    await writeSerializedJSON(
+      sessionDir,
+      `${id}.json`,
+      formatHotFileBody({ chunks: [], hotMessages: plan.hotMessages }),
+      { internal: true }
+    );
+    written.push(hotPath);
+    deleted.push(...(await removeSessionArchiveDir(id)));
+    return { written, deleted };
+  }
+
+  const archiveDir = await getDirectory(SESSIONS_DIR, id);
+  const chunkEntries = [];
+  const wantedNames = new Set();
+  for (const chunk of plan.chunks) {
+    const name = chunkFileName(chunk.index);
+    const existing = existingChunks.get(chunk.index);
+    if (existing && existing.fingerprint === chunk.fingerprint && diskChunkNames.has(name)) {
+      wantedNames.add(name);
+      chunkEntries.push({
+        index: chunk.index,
+        count: chunk.count,
+        bytes: existing.bytes ?? null,
+        fingerprint: chunk.fingerprint,
+      });
+      continue;
+    }
+    const bytes = await gzipText(chunk.serialized);
+    await writeText(archiveDir, name, bytes, { internal: true });
+    written.push(`${SESSIONS_DIR}/${id}/${name}`);
+    wantedNames.add(name);
+    chunkEntries.push({
+      index: chunk.index,
+      count: chunk.count,
+      bytes: bytes.byteLength,
+      fingerprint: chunk.fingerprint,
+    });
+  }
+  for (const name of diskChunkNames) {
+    if (wantedNames.has(name)) continue;
+    if (await deleteEntry(archiveDir, name)) {
+      deleted.push(`${SESSIONS_DIR}/${id}/${name}`);
+    }
+  }
+  await writeSerializedJSON(
+    sessionDir,
+    `${id}.json`,
+    formatHotFileBody({ chunks: chunkEntries, hotMessages: plan.hotMessages }),
+    { internal: true }
+  );
+  written.push(hotPath);
+  return { written, deleted };
+}
+
 /** Load one session's message body on demand. */
 export async function loadSessionMessages(sessionId) {
   const root = await getRootDir();
   await ensureSessionWriteCacheRoot(root);
   const id = String(sessionId);
   const sessionDir = await getDirectory(SESSIONS_DIR);
-  let messages = await readSessionJSON(sessionDir, `${id}.json`);
-  const loadedPrimaryMessages = messages !== MISSING_SESSION_JSON;
-  if (messages === MISSING_SESSION_JSON) {
-    const legacyDir = await getDirectory(LEGACY_MESSAGES_DIR);
-    messages = await readSessionJSON(legacyDir, `${id}.json`);
-  }
-  if (messages === MISSING_SESSION_JSON) messages = [];
-  if (!Array.isArray(messages)) {
-    throw new Error(`Session messages for ${id} must contain a JSON array`);
-  }
+  const { messages, loadedPrimaryMessages } = await readFullSessionMessages(sessionDir, id);
   if (loadedPrimaryMessages) {
     sessionMessageWriteSnapshots.set(id, sessionMessageFingerprint(JSON.stringify(messages)));
   }
@@ -849,7 +1114,6 @@ export async function loadSessions() {
   await ensureSessionWriteCacheRoot(root);
   const { sessions, loadedPrimaryIndex } = await loadSessionIndex(root);
   const sessionDir = await getDirectory(SESSIONS_DIR);
-  let legacyDir = null;
 
   const loaded = new Array(sessions.length);
   let nextSessionIndex = 0;
@@ -865,20 +1129,12 @@ export async function loadSessions() {
         nextSessionIndex += 1;
         const session = sessions[index];
         try {
-          let messages = await readSessionJSON(sessionDir, `${session.id}.json`);
-          const loadedPrimaryMessages = messages !== MISSING_SESSION_JSON;
-          if (messages === MISSING_SESSION_JSON) {
-            legacyDir ||= await getDirectory(LEGACY_MESSAGES_DIR);
-            messages = await readSessionJSON(legacyDir, `${session.id}.json`);
-          }
-          if (messages !== MISSING_SESSION_JSON && !Array.isArray(messages)) {
-            throw new Error(`Session messages for ${session.id} must contain a JSON array`);
-          }
+          const { messages, loadedPrimaryMessages } = await readFullSessionMessages(
+            sessionDir,
+            String(session.id)
+          );
           loaded[index] = {
-            session: {
-              ...session,
-              messages: messages === MISSING_SESSION_JSON ? [] : messages,
-            },
+            session: { ...session, messages },
             loadedPrimaryMessages,
           };
         } catch (error) {
@@ -928,6 +1184,7 @@ export async function saveSessions(sessions) {
   const metadata = [...nextSessionsById.values()];
   const metadataSnapshot = JSON.stringify(metadata);
   const changedPaths = [];
+  const deletedPaths = [];
   const metadataChanged = metadataSnapshot !== sessionMetadataWriteSnapshot;
 
   const messageEntries = [...nextMessagesById];
@@ -944,12 +1201,14 @@ export async function saveSessions(sessions) {
         nextIndex += 1;
         const [id, messages] = messageEntries[index];
         try {
-          const serialized = JSON.stringify(messages);
-          const fingerprint = sessionMessageFingerprint(serialized);
+          const fingerprint = sessionMessageFingerprint(JSON.stringify(messages));
           if (fingerprint === sessionMessageWriteSnapshots.get(id)) continue;
-          await writeSerializedJSON(sessionDir, `${id}.json`, serialized, { internal: true });
-          changedPaths.push(`${SESSIONS_DIR}/${id}.json`);
-          writtenMessageSnapshots.push([id, fingerprint]);
+          const { written, deleted, deferred } = await writeSessionBody(sessionDir, id, messages || []);
+          changedPaths.push(...written);
+          deletedPaths.push(...deleted);
+          // A deferred body keeps its stale snapshot so the next save retries
+          // instead of treating the unwritten messages as durable.
+          if (!deferred) writtenMessageSnapshots.push([id, fingerprint]);
         } catch (err) {
           firstError ||= err;
         }
@@ -967,6 +1226,7 @@ export async function saveSessions(sessions) {
   }
 
   notifyOpfsMutation(changedPaths, 'write');
+  if (deletedPaths.length > 0) notifyOpfsMutation(deletedPaths, 'delete');
   if (changedPaths.includes(SESSION_FILE)) sessionMetadataWriteSnapshot = metadataSnapshot;
   for (const [id, fingerprint] of writtenMessageSnapshots) {
     sessionMessageWriteSnapshots.set(id, fingerprint);
@@ -1026,6 +1286,14 @@ export async function deleteSession(sessions, sessionId) {
     if (!isMissingFileSystemEntry(error)) {
       console.warn(`Failed to clean legacy deleted session body ${sessionId}:`, error);
     }
+  }
+  try {
+    const removedChunkPaths = await removeSessionArchiveDir(sessionId);
+    if (removedChunkPaths.length > 0) {
+      notifyOpfsMutation(removedChunkPaths, 'delete');
+    }
+  } catch (error) {
+    console.warn(`Failed to clean deleted session archive ${sessionId}:`, error);
   }
 
   sessionMetadataWriteSnapshot = JSON.stringify(remaining);
