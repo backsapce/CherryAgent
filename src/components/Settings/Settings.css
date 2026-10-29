@@ -306,6 +306,45 @@
   min-width: 0;
 }
 
+/* Web-search key input with an inline clear button on the right */
+.settings-key-input {
+  position: relative;
+  display: block;
+}
+
+.settings-key-input input {
+  padding-right: 34px;
+}
+
+.settings-clear-key {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  transition: color 0.15s ease, background-color 0.15s ease;
+}
+
+.settings-clear-key:hover {
+  color: var(--color-text-content);
+  background: color-mix(in srgb, var(--color-text-secondary) 18%, transparent);
+}
+
+.settings-clear-key:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .sync-warning {
   display: flex;
   align-items: flex-start;

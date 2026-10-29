@@ -429,6 +429,7 @@ const Settings = ({
     setWebSearchError(null);
     try {
       setWebSearchSaved(await search.configure({ providers: { [providerId]: { clearApiKey: true } } }));
+      setWebSearchForm((prev) => ({ ...prev, [`${providerId}ApiKey`]: '' }));
     } catch (err) {
       setWebSearchError(err.message);
     } finally {
@@ -1520,7 +1521,7 @@ const Settings = ({
               {webSearchForm.provider === 'tavily' && (
                 <label>
                   {t('searchSettings.tavilyApiKey')}
-                  <div className="settings-two-col">
+                  <div className="settings-key-input">
                     <input
                       type="password"
                       autoComplete="off"
@@ -1530,14 +1531,16 @@ const Settings = ({
                       value={webSearchForm.tavilyApiKey}
                       onChange={(e) => setWebSearchForm((f) => ({ ...f, tavilyApiKey: e.target.value }))}
                     />
-                    {webSearchSaved?.providers?.tavily?.hasApiKey && (
+                    {(webSearchForm.tavilyApiKey || webSearchSaved?.providers?.tavily?.hasApiKey) && (
                       <button
                         type="button"
-                        className="settings-secondary"
+                        className="settings-clear-key"
                         disabled={webSearchSaving}
+                        title={t('searchSettings.clearKey')}
+                        aria-label={t('searchSettings.clearKey')}
                         onClick={() => handleClearSearchApiKey('tavily')}
                       >
-                        {t('searchSettings.clearKey')}
+                        <X width={14} height={14} />
                       </button>
                     )}
                   </div>
@@ -1547,7 +1550,7 @@ const Settings = ({
               {webSearchForm.provider === 'brave' && (
                 <label>
                   {t('searchSettings.braveApiKey')}
-                  <div className="settings-two-col">
+                  <div className="settings-key-input">
                     <input
                       type="password"
                       autoComplete="off"
@@ -1557,14 +1560,16 @@ const Settings = ({
                       value={webSearchForm.braveApiKey}
                       onChange={(e) => setWebSearchForm((f) => ({ ...f, braveApiKey: e.target.value }))}
                     />
-                    {webSearchSaved?.providers?.brave?.hasApiKey && (
+                    {(webSearchForm.braveApiKey || webSearchSaved?.providers?.brave?.hasApiKey) && (
                       <button
                         type="button"
-                        className="settings-secondary"
+                        className="settings-clear-key"
                         disabled={webSearchSaving}
+                        title={t('searchSettings.clearKey')}
+                        aria-label={t('searchSettings.clearKey')}
                         onClick={() => handleClearSearchApiKey('brave')}
                       >
-                        {t('searchSettings.clearKey')}
+                        <X width={14} height={14} />
                       </button>
                     )}
                   </div>
@@ -1574,7 +1579,7 @@ const Settings = ({
               {webSearchForm.provider === 'deepseek' && (
                 <label>
                   {t('searchSettings.deepseekApiKey')}
-                  <div className="settings-two-col">
+                  <div className="settings-key-input">
                     <input
                       type="password"
                       autoComplete="off"
@@ -1584,14 +1589,16 @@ const Settings = ({
                       value={webSearchForm.deepseekApiKey}
                       onChange={(e) => setWebSearchForm((f) => ({ ...f, deepseekApiKey: e.target.value }))}
                     />
-                    {webSearchSaved?.providers?.deepseek?.hasApiKey && (
+                    {(webSearchForm.deepseekApiKey || webSearchSaved?.providers?.deepseek?.hasApiKey) && (
                       <button
                         type="button"
-                        className="settings-secondary"
+                        className="settings-clear-key"
                         disabled={webSearchSaving}
+                        title={t('searchSettings.clearKey')}
+                        aria-label={t('searchSettings.clearKey')}
                         onClick={() => handleClearSearchApiKey('deepseek')}
                       >
-                        {t('searchSettings.clearKey')}
+                        <X width={14} height={14} />
                       </button>
                     )}
                   </div>
