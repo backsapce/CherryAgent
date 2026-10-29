@@ -16,6 +16,7 @@ import FileEditor from './FileEditor';
 import ImagePreview from '../ImagePreview/ImagePreview';
 import { directoryImageNames, isImageFile } from './imagePreviewUtils';
 import { isCurrentAgentWorkspace, isOrphanedAgentWorkspace, joinFileManagerPath, normalizeFileManagerPath } from './pathUtils';
+import { getDefaultFileSource } from './fileSource';
 import { createUploadBatch, readDroppedUploadBatch, uploadBatchToDestination } from './uploadUtils';
 import { FILE_MANAGER_DRAG_TYPE, readFileManagerDragItem } from './fileDrag';
 import './FileManage.css';
@@ -35,7 +36,9 @@ function getTreeItemKey(type, parentDir, name) {
 
 const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandboxUrl, agents, activeAgentId }) => {
   const { t } = useI18n();
-  const [fileSource, setFileSource] = useState('local');
+  const [fileSource, setFileSource] = useState(() => getDefaultFileSource(agents, activeAgentId) || 'local');
+  // Once the user picks a source manually, stop re-applying the agent default.
+  const sourcePickedManuallyRef = useRef(false);
   const [isMobile, setIsMobile] = useState(false);
   const [showHiddenFiles, setShowHiddenFiles] = useState(
     () => normalizeShowHiddenFiles(config.get(SHOW_HIDDEN_FILES_CONFIG_PATH))
@@ -82,6 +85,20 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandb
   const agentIds = useMemo(() => (
     Array.isArray(agents) ? new Set(agents.map((agent) => agent.id)) : null
   ), [agents]);
+
+  // Keep the default source aligned with the active agent's sandbox runtime
+  // (the agent list may also load after the panel opens) until the user has
+  // explicitly picked a source.
+  useEffect(() => {
+    if (sourcePickedManuallyRef.current) return;
+    const defaultSource = getDefaultFileSource(agents, activeAgentId);
+    if (defaultSource) setFileSource(defaultSource);
+  }, [agents, activeAgentId]);
+
+  const selectFileSource = useCallback((source) => {
+    sourcePickedManuallyRef.current = true;
+    setFileSource(source);
+  }, []);
 
   // Adapter: local vs remote file operations, eliminates branching in every handler
   const fileOps = useMemo(() => {
@@ -763,8 +780,8 @@ const FileManage = ({ show, onClose, refreshTrigger, width, onWidthChange, sandb
       <div className="filemanage-header">
         <div className="filemanage-header-left">
           <div className="filemanage-source-selector">
-            <button className={`source-btn ${fileSource === 'local' ? 'active' : ''}`} onClick={() => setFileSource('local')} title={t('filemanage.localFiles')}><HardDrive width={16} height={16} /></button>
-            <button className={`source-btn ${fileSource === 'remote' ? 'active' : ''}`} onClick={() => setFileSource('remote')} title={t('filemanage.remoteFiles')}><Cloud width={16} height={16} /></button>
+            <button className={`source-btn ${fileSource === 'local' ? 'active' : ''}`} onClick={() => selectFileSource('local')} title={t('filemanage.localFiles')}><HardDrive width={16} height={16} /></button>
+            <button className={`source-btn ${fileSource === 'remote' ? 'active' : ''}`} onClick={() => selectFileSource('remote')} title={t('filemanage.remoteFiles')}><Cloud width={16} height={16} /></button>
           </div>
         </div>
         <div className="filemanage-header-buttons">
