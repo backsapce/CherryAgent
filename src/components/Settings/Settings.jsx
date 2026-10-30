@@ -31,7 +31,7 @@ import {
 import { useI18n } from '../../i18n/context';
 import { SUPPORTED_LOCALES } from '../../i18n/locales';
 import { downloadBlobFile } from '../../utils/misc.js';
-import { X, Lock, Plug, Sun, Moon, Monitor, UploadCloud, DownloadCloud, AlertTriangle, Globe, ChevronDown, User, Cloud, HardDrive, Layers, Refresh, Upload, Download } from '../Icons/Icons';
+import { X, Activity, Lock, Plug, Sun, Moon, Monitor, UploadCloud, DownloadCloud, AlertTriangle, Globe, ChevronDown, User, Cloud, HardDrive, Layers, Refresh, Upload, Download } from '../Icons/Icons';
 import { listAllSkills, setSkillEnabled } from '../../agent/skills';
 import { listAllTools, setToolEnabled } from '../../agent/tools';
 import search from '../../models/search';
@@ -47,6 +47,7 @@ import {
 import { enqueueStorageOperation } from './storageOperationQueue';
 import { manifestModeChangeLocked } from './syncDestination';
 import './Settings.css';
+import UsageTab from './UsageTab';
 
 const AVATAR_SIZE = 256;
 
@@ -1044,6 +1045,13 @@ const Settings = ({
               {t('settings.llm')}
             </button>
             <button
+              className={`settings-nav-item ${settingsTab === 'usage' ? 'active' : ''}`}
+              onClick={() => setSettingsTab('usage')}
+            >
+              <Activity width={16} height={16} />
+              {t('settings.usage')}
+            </button>
+            <button
               className={`settings-nav-item ${settingsTab === 'general' ? 'active' : ''}`}
               onClick={() => setSettingsTab('general')}
             >
@@ -1381,6 +1389,9 @@ const Settings = ({
                 )}
               </div>
             </div>
+          )}
+          {settingsTab === 'usage' && (
+            <UsageTab agentList={agentList} />
           )}
           {settingsTab === 'general' && (
             <div className="settings-section">

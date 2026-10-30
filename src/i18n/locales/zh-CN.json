@@ -85,6 +85,7 @@
   "settings": {
     "title": "设置",
     "llm": "LLM 设置",
+    "usage": "用量统计",
     "general": "通用",
     "web": "网络搜索",
     "sandboxes": "沙箱",
@@ -434,5 +435,27 @@
     "doomLoop": "Agent 已连续 {count} 次发起完全相同的工具调用，允许再次执行吗？",
     "approve": "允许",
     "deny": "拒绝"
+  },
+  "usageStats": {
+    "title": "用量统计",
+    "desc": "基于本地会话记录汇总的 token 用量。历史轮次按其完成日期归入当天。",
+    "today": "今日用量",
+    "maxDay": "最高日用量",
+    "grandTotal": "历史总用量",
+    "tokensUnit": "tokens",
+    "activity": "本月活跃",
+    "activityHint": "绿色越深，代表当天用量越多。",
+    "less": "少",
+    "more": "多",
+    "pieToday": "今日",
+    "pieTotal": "累计",
+    "pieTitleToday": "今日各 Agent 用量占比",
+    "pieTitleTotal": "累计各 Agent 用量占比",
+    "unassigned": "未分配 Agent",
+    "others": "其他",
+    "empty": "暂无用量数据。",
+    "loadingProgress": "正在统计会话… {done}/{total}",
+    "loadError": "用量数据加载失败。",
+    "retry": "重试"
   }
 }

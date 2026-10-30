@@ -199,3 +199,37 @@
     0 1px 2px color-mix(in srgb, var(--color-shadow-soft) 60%, transparent),
     0 12px 32px -10px var(--color-shadow-soft);
 }
+
+/* Usage statistics tab (settings): heatmap + pie palette */
+:root,
+[data-theme="dark"] {
+  --usage-heat-0: #1d2733;
+  --usage-heat-1: #0e4429;
+  --usage-heat-2: #006d32;
+  --usage-heat-3: #26a641;
+  --usage-heat-4: #39d353;
+  --usage-pie-1: #39d353;
+  --usage-pie-2: #8f86dd;
+  --usage-pie-3: #f0b429;
+  --usage-pie-4: #4493f8;
+  --usage-pie-5: #e5534b;
+  --usage-pie-6: #2ab5a5;
+  --usage-pie-7: #db61a2;
+  --usage-pie-8: #8d96a2;
+}
+
+[data-theme="light"] {
+  --usage-heat-0: #ebedf0;
+  --usage-heat-1: #9be9a8;
+  --usage-heat-2: #40c463;
+  --usage-heat-3: #2da44e;
+  --usage-heat-4: #116329;
+  --usage-pie-1: #1a7f37;
+  --usage-pie-2: #6d63c0;
+  --usage-pie-3: #bf8700;
+  --usage-pie-4: #0969da;
+  --usage-pie-5: #cf222e;
+  --usage-pie-6: #1b7c83;
+  --usage-pie-7: #bf3989;
+  --usage-pie-8: #6e7781;
+}

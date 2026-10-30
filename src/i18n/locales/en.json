@@ -85,6 +85,7 @@
   "settings": {
     "title": "Settings",
     "llm": "LLM Settings",
+    "usage": "Usage",
     "general": "General",
     "web": "Web Search",
     "sandboxes": "Sandboxes",
@@ -434,5 +435,27 @@
     "doomLoop": "The agent repeated the same tool call {count} times with identical input. Allow it to run again?",
     "approve": "Approve",
     "deny": "Deny"
+  },
+  "usageStats": {
+    "title": "Usage statistics",
+    "desc": "Token usage aggregated from local session history. Historical turns are booked on the day they finished.",
+    "today": "Today",
+    "maxDay": "Busiest day",
+    "grandTotal": "All time",
+    "tokensUnit": "tokens",
+    "activity": "This month",
+    "activityHint": "Darker green means more tokens used that day.",
+    "less": "Less",
+    "more": "More",
+    "pieToday": "Today",
+    "pieTotal": "All time",
+    "pieTitleToday": "Token share by agent (today)",
+    "pieTitleTotal": "Token share by agent (all time)",
+    "unassigned": "Unassigned",
+    "others": "Others",
+    "empty": "No usage recorded yet.",
+    "loadingProgress": "Crunching sessions… {done}/{total}",
+    "loadError": "Failed to load usage data.",
+    "retry": "Retry"
   }
 }

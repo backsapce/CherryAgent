@@ -85,6 +85,7 @@
   "settings": {
     "title": "設定",
     "llm": "LLM 設定",
+    "usage": "使用量",
     "general": "一般",
     "web": "ウェブ検索",
     "sandboxes": "サンドボックス",
@@ -434,5 +435,27 @@
     "doomLoop": "エージェントが同じツール呼び出しを {count} 回連続で実行しようとしています。再度実行を許可しますか？",
     "approve": "許可",
     "deny": "拒否"
+  },
+  "usageStats": {
+    "title": "使用量統計",
+    "desc": "ローカルのセッション履歴から集計したトークン使用量。過去のターンは完了した日に計上されます。",
+    "today": "今日",
+    "maxDay": "最多日",
+    "grandTotal": "累計",
+    "tokensUnit": "トークン",
+    "activity": "今月のアクティビティ",
+    "activityHint": "緑が濃いほど、その日の使用量が多いことを示します。",
+    "less": "少ない",
+    "more": "多い",
+    "pieToday": "今日",
+    "pieTotal": "累計",
+    "pieTitleToday": "エージェント別の使用量割合（今日）",
+    "pieTitleTotal": "エージェント別の使用量割合（累計）",
+    "unassigned": "未割り当て",
+    "others": "その他",
+    "empty": "使用量データはまだありません。",
+    "loadingProgress": "セッションを集計中… {done}/{total}",
+    "loadError": "使用量データの読み込みに失敗しました。",
+    "retry": "再試行"
   }
 }
