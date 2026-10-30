@@ -27,7 +27,8 @@
     "test:agent": "node --test src/agent/*.test.js",
     "test:runtime": "node --test server/agent-runtime.test.js server/agent-state.test.js server/command-executor.test.js server/command-jobs.test.js server/file-path-policy.test.js server/ws-frames.test.js server/ws-protocol.test.js server/ws-handlers.test.js server/ws-files.test.js server/ws-integration.test.js",
     "preview": "vite preview",
-    "build:docker": "docker buildx build --platform linux/amd64,linux/arm64 -t backsapce/cherry-agent:$(node -p \"require('./package.json').version\") --push ."
+    "build:docker": "docker buildx build --platform linux/amd64,linux/arm64 -t backsapce/cherry-agent:$(node -p \"require('./package.json').version\") --push .",
+    "build:pages:test": "cross-env VITE_BASE=/CherryAgentTest/ vite build"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.85",
