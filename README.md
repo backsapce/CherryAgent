@@ -54,6 +54,7 @@ npm run dev:front    # Frontend only
 npm run dev:agent    # Agent Node only
 npm run build        # Production build
 npm run build:pages  # GitHub Pages build with /CherryAgent/ base path
+npm run build:pages:test  # Test-site build with /CherryAgent/test/ base path (CI deploys every main commit)
 npm run lint         # ESLint
 npm run test:runtime # Agent runtime and managed command tests
 npm run preview      # Preview dist/ on port 5173

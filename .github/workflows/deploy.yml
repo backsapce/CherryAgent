@@ -1,5 +1,14 @@
 name: Deploy to GitHub Pages
 
+# Every push to main publishes the whole Pages site in one atomic deploy:
+#   /       → the latest "release:" commit (stable build, unchanged behavior)
+#   /test/  → the pushed commit itself (test build, updated on every push)
+#
+# Pages deploys replace the entire site, so each run bundles both builds
+# into one artifact: the stable build is rebuilt from the last "release:"
+# commit (cached by SHA) and the test build comes from HEAD with
+# VITE_BASE=/CherryAgent/test/.
+
 on:
   push:
     branches: [main]
@@ -15,27 +24,71 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
-    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.event.head_commit.message, 'release:') }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-      - run: npm install
-      - run: npm run build:pages
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: dist
-
-  deploy:
-    needs: build
+  build-and-deploy:
     runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - id: deployment
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history: needed to locate the last "release:" commit
+
+      - name: Resolve the release commit to publish
+        id: release
+        env:
+          HEAD_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          if printf '%s' "$HEAD_COMMIT_MESSAGE" | head -n 1 | grep -q '^release:'; then
+            sha="$GITHUB_SHA"
+          else
+            sha=$(git log --format='%H %s' | awk '$2 ~ /^release:/ {print $1; exit}')
+          fi
+          echo "Stable build from: ${sha:-<no release commit found>}"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm install
+
+      # Test build (every commit) → https://backsapce.github.io/CherryAgent/test/
+      - name: Build test site (/test/)
+        run: npm run build:pages:test
+
+      - name: Stage test site
+        run: |
+          mkdir -p site/test
+          cp -r dist/. site/test/
+
+      # Stable build (last "release:" commit) → https://backsapce.github.io/CherryAgent/
+      - name: Restore stable build cache
+        id: stable-cache
+        if: steps.release.outputs.sha != ''
+        uses: actions/cache@v4
+        with:
+          path: stable-dist
+          key: pages-stable-${{ steps.release.outputs.sha }}
+
+      - name: Build stable site (/)
+        if: steps.release.outputs.sha != '' && steps.stable-cache.outputs.cache-hit != 'true'
+        run: |
+          git checkout --detach "${{ steps.release.outputs.sha }}"
+          npm install # old tree may pin different deps than HEAD
+          npm run build:pages
+          rm -rf stable-dist && mkdir -p stable-dist
+          cp -r dist/. stable-dist/
+
+      - name: Stage stable site
+        if: steps.release.outputs.sha != ''
+        run: cp -r stable-dist/. site/
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - name: Deploy
+        id: deployment
         uses: actions/deploy-pages@v4
