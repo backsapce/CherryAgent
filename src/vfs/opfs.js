@@ -17,8 +17,8 @@ import {
   parseHotFileBody,
   planSessionArchive,
 } from './sessionArchive.js';
+import { ROOT_DIR } from './dataRoot.js';
 
-const ROOT_DIR = 'cherry-agent';
 const SYNC_DIR = '.sync';
 
 export const ZIP_IMPORT_MAX_ENTRIES = 10_000;

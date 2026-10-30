@@ -18,8 +18,8 @@
 
 import config from '../config/config.js';
 import { notifyOpfsMutation, writeAgentAgentsFile, readAgentAgentsFile } from '../vfs/opfs.js';
+import { ROOT_DIR } from '../vfs/dataRoot.js';
 
-const ROOT_DIR = 'cherry-agent';
 const WORKSPACE_DIR = 'workspace';
 
 function normalizeAgent(agent) {

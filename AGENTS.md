@@ -13,7 +13,7 @@ CherryAgent is a browser-based AI agent framework. It's a React SPA that connect
 - **Dev agent server only:** `npm run dev:agent`
 - **Build:** `npm run build` — Vite production build + service worker precache injection
 - **Build for GitHub Pages:** `npm run build:pages` — sets `VITE_BASE=/CherryAgent/` base path
-- **Build test site for GitHub Pages:** `npm run build:pages:test` — sets `VITE_BASE=/CherryAgent/test/` base path; CI publishes every main commit to `/test/` alongside the release build
+- **Build test site for GitHub Pages:** `npm run build:pages:test` — sets `VITE_BASE=/CherryAgent/test/` base path; CI publishes every main commit to `/test/` alongside the release build. The `/test/` build roots its OPFS data at `cherry-agent-test` (see `src/vfs/dataRoot.js`), so browser data never mixes with the stable site
 - **Lint:** `npm run lint`
 - **All tests:** `npm test` (= `test:agent` + `test:runtime` + `test:sync`)
 - **Agent-loop tests:** `npm run test:agent`

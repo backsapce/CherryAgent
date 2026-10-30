@@ -26,10 +26,10 @@
 
 import yaml from 'js-yaml';
 import { notifyOpfsMutation } from '../vfs/opfs.js';
+import { ROOT_DIR } from '../vfs/dataRoot.js';
 
 // ─── OPFS helpers ───────────────────────────────────────────────────────────
 
-const ROOT_DIR = 'cherry-agent';
 const CONFIG_FILE = 'config.yaml';
 
 async function getRootDir() {
