@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  DEFAULT_FOLDER_HIDDEN_KEY,
   DEFAULT_FOLDER_ID,
   DEFAULT_FOLDER_NAME,
   FOLDER_PAGE_SIZE,
@@ -78,4 +79,34 @@ test('folders without sessions still produce an empty group', () => {
 
 test('folder page size is 50', () => {
   assert.equal(FOLDER_PAGE_SIZE, 50);
+});
+
+test('default folder hidden flag rides the documented config key', () => {
+  assert.equal(DEFAULT_FOLDER_HIDDEN_KEY, 'general.defaultFolderHidden');
+});
+
+test('a hidden empty default row is omitted while other folders exist', () => {
+  const groups = groupSessionsByFolder(
+    [],
+    [{ id: 'work', name: 'Work', createdAtMs: 1 }],
+    { defaultHidden: true },
+  );
+  assert.deepEqual(groups.map((group) => group.id), ['work']);
+});
+
+test('a hidden default row reappears once it holds sessions again', () => {
+  const groups = groupSessionsByFolder(
+    [{ id: 's1' }, { id: 's2', folderId: 'work' }],
+    [{ id: 'work', name: 'Work', createdAtMs: 1 }],
+    { defaultHidden: true },
+  );
+  assert.deepEqual(groups.map((group) => group.id), [DEFAULT_FOLDER_ID, 'work']);
+  assert.deepEqual(groups[0].sessions.map((s) => s.id), ['s1']);
+});
+
+test('the default row is never hidden when it is the last folder', () => {
+  const groups = groupSessionsByFolder([], [], { defaultHidden: true });
+  assert.deepEqual(groups.map((group) => group.id), [DEFAULT_FOLDER_ID]);
+  assert.deepEqual(groups[0].sessions, []);
+  assert.equal(groups[0].name, DEFAULT_FOLDER_NAME);
 });

@@ -46,6 +46,7 @@ import {
 } from './sessionRefresh';
 import { createSessionSaveCoordinator } from './sessionPersistence';
 import {
+  DEFAULT_FOLDER_HIDDEN_KEY,
   DEFAULT_FOLDER_ID,
   nextFolderName,
   sessionFolderKey,
@@ -1332,19 +1333,39 @@ function App() {
 
   // Deleting a folder deletes its sessions too (the sidebar confirm states the
   // count), then drops the folder record and its collapsed-state bookmark.
+  // The implicit default folder is deletable as well: with other folders left
+  // it disappears from the sidebar; as the last folder it regenerates right
+  // away as a fresh, empty default with none of the previous sessions.
   const handleDeleteSessionFolder = useCallback(async (folderId) => {
-    const folder = sessionFoldersRef.current.find((item) => item.id === folderId);
-    if (!folder) return;
+    const isDefaultFolder = folderId === DEFAULT_FOLDER_ID;
+    const folderExists = isDefaultFolder
+      || sessionFoldersRef.current.some((item) => item.id === folderId);
+    if (!folderExists) return;
     const sessionIds = sessionsRef.current
       .filter((session) => sessionFolderKey(session) === folderId)
       .map((session) => session.id);
     for (const sessionId of sessionIds) {
       await handleDeleteSession(sessionId);
     }
+    if (isDefaultFolder) {
+      // Other folders remain → drop the default row from the sidebar. Any
+      // session that later lands in the default folder (new-session fallback
+      // or a move) makes it reappear, so nothing can become invisible.
+      config.set(DEFAULT_FOLDER_HIDDEN_KEY, sessionFoldersRef.current.length > 0)
+        .catch((error) => console.error('Failed to persist default folder visibility:', error));
+      return;
+    }
+    const remainingFolders = sessionFoldersRef.current.filter((item) => item.id !== folderId);
     try {
-      await persistSessionFolders(sessionFoldersRef.current.filter((item) => item.id !== folderId));
+      await persistSessionFolders(remainingFolders);
     } catch (error) {
       console.error('Failed to save session folders:', error);
+    }
+    // When the last user folder goes, the default folder regenerates as a
+    // fresh empty folder so the sidebar always offers at least one home.
+    if (remainingFolders.length === 0 && config.get(DEFAULT_FOLDER_HIDDEN_KEY)) {
+      config.set(DEFAULT_FOLDER_HIDDEN_KEY, false)
+        .catch((error) => console.error('Failed to persist default folder visibility:', error));
     }
     const collapsedIds = config.get('general.sessionFoldersCollapsed');
     if (Array.isArray(collapsedIds) && collapsedIds.includes(folderId)) {

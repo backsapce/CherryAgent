@@ -10,6 +10,7 @@ import {
 import config from '../../config/config';
 import { sortSessions } from '../../sessionRefresh';
 import {
+  DEFAULT_FOLDER_HIDDEN_KEY,
   DEFAULT_FOLDER_ID,
   DEFAULT_FOLDER_NAME,
   FOLDER_PAGE_SIZE,
@@ -25,6 +26,10 @@ const getSessionSort = () => config.get('general.sessionSortBy') === 'createdAt'
 // Collapsed folder ids persist in config as an array. config.get() returns a
 // fresh clone per call, so the external-store snapshot is the joined string.
 const COLLAPSED_FOLDERS_KEY = 'general.sessionFoldersCollapsed';
+
+// Set while the user has deleted the default folder and other folders remain;
+// an empty default row is then omitted until the folder regenerates.
+const getDefaultFolderHidden = () => config.get(DEFAULT_FOLDER_HIDDEN_KEY) === true;
 
 const getCollapsedFoldersSnapshot = () => {
   const value = config.get(COLLAPSED_FOLDERS_KEY);
@@ -173,8 +178,8 @@ const SessionItem = ({
 };
 
 // Contextual menu for one folder row (rename / delete; the implicit default
-// folder offers clear instead of delete since it always exists). Rendered in a
-// portal like the header sort menu so it can overlay the scrollable list.
+// folder additionally offers clear, which keeps the empty folder around).
+// Rendered in a portal like the header sort menu so it can overlay the list.
 const FolderMenu = ({ folder, name, position, onClose, onRename, onDelete, onClear }) => {
   const { t } = useI18n();
   const menuRef = useRef(null);
@@ -226,7 +231,7 @@ const FolderMenu = ({ folder, name, position, onClose, onRename, onDelete, onCle
           {t('session.renameFolder')}
         </button>
       )}
-      {isDefaultFolder ? (
+      {isDefaultFolder && (
         <button
           type="button"
           className="session-sort-item"
@@ -235,16 +240,15 @@ const FolderMenu = ({ folder, name, position, onClose, onRename, onDelete, onCle
         >
           {t('session.clearFolder')}
         </button>
-      ) : (
-        <button
-          type="button"
-          className="session-sort-item"
-          role="menuitem"
-          onClick={onDelete}
-        >
-          {t('session.deleteFolder')}
-        </button>
       )}
+      <button
+        type="button"
+        className="session-sort-item"
+        role="menuitem"
+        onClick={onDelete}
+      >
+        {t('session.deleteFolder')}
+      </button>
     </div>, document.body,
   );
 };
@@ -340,8 +344,12 @@ const SessionList = ({
 }) => {
   const { t } = useI18n();
   const sortBy = useSyncExternalStore(config.subscribe, getSessionSort);
+  const defaultFolderHidden = useSyncExternalStore(config.subscribe, getDefaultFolderHidden);
   const sortedSessions = useMemo(() => sortSessions(sessions, sortBy), [sessions, sortBy]);
-  const folderGroups = useMemo(() => groupSessionsByFolder(sortedSessions, folders), [sortedSessions, folders]);
+  const folderGroups = useMemo(
+    () => groupSessionsByFolder(sortedSessions, folders, { defaultHidden: defaultFolderHidden }),
+    [sortedSessions, folders, defaultFolderHidden],
+  );
   const [width, setWidth] = useState(280);
   const [isResizing, setIsResizing] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -451,13 +459,14 @@ const SessionList = ({
   }, [onAddFolder, startFolderEdit, t]);
 
   // Both actions are bulk-destructive, so each confirms with the session count
-  // of the group it is about to remove.
+  // of the group it is about to remove. The default group's `folder` record is
+  // null, so the delete request rides on the group id.
   const handleFolderDelete = useCallback((menu) => {
     setFolderMenu(null);
     const count = menu.sessionCount;
     const key = count > 0 ? 'session.confirmDeleteFolder' : 'session.confirmDeleteFolderEmpty';
     if (!window.confirm(t(key, { name: menu.name, count }))) return;
-    onDeleteFolder?.(menu.folder.id);
+    onDeleteFolder?.(menu.id);
   }, [t, onDeleteFolder]);
 
   const handleFolderClear = useCallback((menu) => {

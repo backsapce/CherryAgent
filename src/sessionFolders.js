@@ -7,6 +7,13 @@ export const DEFAULT_FOLDER_ID = 'default';
 export const DEFAULT_FOLDER_NAME = 'default';
 export const FOLDER_PAGE_SIZE = 50;
 
+/**
+ * Config key for the "user deleted the default folder" flag. While it is set
+ * the sidebar omits an empty default row once other folders exist; the flag is
+ * cleared whenever the default folder regenerates (last folder standing).
+ */
+export const DEFAULT_FOLDER_HIDDEN_KEY = 'general.defaultFolderHidden';
+
 /** Normalize a folder reference; anything unsafe means the default folder. */
 export function sessionFolderKey(session) {
   const value = session?.folderId;
@@ -41,8 +48,13 @@ export function nextFolderName(folders, baseName) {
  * Split ordered sessions into folder groups: the default folder first, then
  * each stored folder in creation order. Sessions referencing a missing folder
  * land in the default group so they can never disappear from the sidebar.
+ *
+ * `options.defaultHidden` suppresses the default row after the user deleted
+ * the default folder while other folders still exist. It is never suppressed
+ * while it still holds sessions (they must stay visible) nor when no other
+ * folder remains — the default folder regenerates in that case instead.
  */
-export function groupSessionsByFolder(sessions, folders) {
+export function groupSessionsByFolder(sessions, folders, options = {}) {
   const knownFolderIds = new Set(
     sortSessionFolders(folders).map((folder) => folder.id),
   );
@@ -61,5 +73,9 @@ export function groupSessionsByFolder(sessions, folders) {
     const group = knownFolderIds.has(key) ? groupsById.get(key) : groups[0];
     group.sessions.push(session);
   }
-  return groups;
+  const { defaultHidden = false } = options;
+  const suppressDefault = defaultHidden
+    && knownFolderIds.size > 0
+    && groups[0].sessions.length === 0;
+  return suppressDefault ? groups.slice(1) : groups;
 }
