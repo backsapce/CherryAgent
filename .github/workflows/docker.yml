@@ -1,16 +1,38 @@
 name: Build and Push Docker Images
 
+# Docker images are published only for release commits: a push to main whose
+# head commit message starts with "release:" — the same convention the Pages
+# deploy workflow uses to resolve the stable build. Regular pushes skip this
+# workflow entirely. workflow_dispatch forces a manual build.
+
 on:
   push:
     branches: [main]
-    tags: ['v*']
   workflow_dispatch:
 
 env:
   DOCKER_USER: backsapce
 
 jobs:
+  release-check:
+    runs-on: ubuntu-latest
+    outputs:
+      is-release: ${{ steps.check.outputs.is-release }}
+    steps:
+      - name: Detect release commit
+        id: check
+        env:
+          HEAD_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          if printf '%s' "$HEAD_COMMIT_MESSAGE" | head -n 1 | grep -q '^release:'; then
+            echo "is-release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is-release=false" >> "$GITHUB_OUTPUT"
+          fi
+
   build-push:
+    needs: release-check
+    if: needs.release-check.outputs.is-release == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     strategy:
       matrix:
