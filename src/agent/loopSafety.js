@@ -6,7 +6,7 @@
  * deterministic and keeps a bounded history for one agent run.
  */
 
-export const DOOM_LOOP_THRESHOLD = 3;
+export const DOOM_LOOP_THRESHOLD = 5;
 const DEFAULT_HISTORY_LIMIT = 80;
 
 export function createToolLoopGuard({

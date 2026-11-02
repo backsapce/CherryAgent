@@ -9,24 +9,30 @@ test('stableToolInput treats equivalent object key order as the same input', () 
   );
 });
 
-test('tool loop guard flags the third consecutive identical tool call', () => {
+test(`tool loop guard flags the ${DOOM_LOOP_THRESHOLD}th consecutive identical tool call`, () => {
   const guard = createToolLoopGuard();
 
-  assert.equal(guard.check({ toolName: 'execute_command', input: { command: 'pwd' } }).repeated, false);
-  assert.equal(guard.check({ toolName: 'execute_command', input: { command: 'pwd' } }).repeated, false);
-  const third = guard.check({ toolName: 'execute_command', input: { command: 'pwd' } });
+  for (let index = 1; index < DOOM_LOOP_THRESHOLD; index += 1) {
+    assert.equal(guard.check({ toolName: 'execute_command', input: { command: 'pwd' } }).repeated, false);
+  }
+  const flagged = guard.check({ toolName: 'execute_command', input: { command: 'pwd' } });
 
-  assert.equal(third.repeated, true);
-  assert.equal(third.threshold, DOOM_LOOP_THRESHOLD);
-  assert.equal(third.occurrences, DOOM_LOOP_THRESHOLD);
+  assert.equal(flagged.repeated, true);
+  assert.equal(flagged.threshold, DOOM_LOOP_THRESHOLD);
+  assert.equal(flagged.occurrences, DOOM_LOOP_THRESHOLD);
 });
 
 test('tool loop guard resets the consecutive sequence when tool or input changes', () => {
   const guard = createToolLoopGuard();
 
-  guard.check({ toolName: 'execute_command', input: { command: 'pwd' } });
-  guard.check({ toolName: 'execute_command', input: { command: 'pwd' } });
+  for (let index = 1; index < DOOM_LOOP_THRESHOLD; index += 1) {
+    assert.equal(guard.check({ toolName: 'execute_command', input: { command: 'pwd' } }).repeated, false);
+  }
   assert.equal(guard.check({ toolName: 'execute_command', input: { command: 'ls' } }).repeated, false);
   assert.equal(guard.check({ toolName: 'read_browser_file', input: { path: 'a.txt' } }).repeated, false);
-  assert.equal(guard.check({ toolName: 'execute_command', input: { command: 'pwd' } }).repeated, false);
+  assert.equal(
+    guard.check({ toolName: 'execute_command', input: { command: 'pwd' } }).repeated,
+    false,
+    'an intervening different call must reset the consecutive count'
+  );
 });

@@ -261,7 +261,7 @@ phases, tool state changes, permission decisions, and context compaction
 telemetry. Its reducer builds the message snapshot used by the UI, so the same
 event stream can also be replayed by debugging or persistence code.
 
-The loop blocks a third consecutive identical tool call by default. Hosts that
+The loop blocks a fifth consecutive identical tool call by default. Hosts that
 want an approval UI can provide `runAgentLoop({ onPermissionRequest })`; only a
 callback resolving to `true` permits that repeated call.
 
