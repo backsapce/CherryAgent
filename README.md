@@ -118,7 +118,9 @@ npm install -g github:backsapce/CherryAgent
 cherry-sandbox
 ```
 
-Or run the Docker image:
+Or run both containers with Docker Compose — see
+[Self-Hosted Front](#self-hosted-front) for the full setup. The Agent Node
+image alone:
 
 ```bash
 mkdir -p ./cherry-workspace ./cherry-state
@@ -136,24 +138,24 @@ docker run -d \
 The sandbox container uses `/home/cherry` as its Docker `WORKDIR` and
 `AGENT_WORKING_DIR`. Runtime control state is kept separately under
 `/var/lib/cherry-sandbox`, so workspace cleanup commands cannot delete another
-session's run, job log, or auth token. Persist both directories:
+session's run, job log, or auth token. Persist both directories (absolute host
+paths with plain `docker run`; Compose users get this from
+`docker-compose.yml`).
 
-```bash
-docker run -d \
-  --name cherry-sandbox \
-  --restart unless-stopped \
-  -p 3099:3099 \
-  -e AGENT_ALLOWED_ORIGINS=https://your-frontend-origin \
-  -v "/absolute/path/to/workspace:/home/cherry" \
-  -v "/absolute/path/to/cherry-state:/var/lib/cherry-sandbox" \
-  backsapce/cherry-sandbox:latest
-```
+Agent commands run as the container user `node` (uid/gid 1000), not root, so
+bind-mounted files keep sane ownership on the host. On Linux, make sure the
+mounted host directories are writable by uid 1000 (`chown -R 1000:1000`), or
+start with `--user "$(id -u):$(id -g)"` and a writable pair of directories.
 
 > **Docker upgrade:** add the `/var/lib/cherry-sandbox` bind mount or a stable
 > named volume before starting the upgraded image. Docker may create an
 > anonymous volume when this mount is omitted, and a later `docker run` does
 > not automatically reuse that anonymous volume. Existing workspace-owned
 > `.cherry-*` state is copied on the first upgraded start.
+
+The temporary pairing token is printed in the **`cherry-sandbox`** container's
+logs on first start (`docker logs cherry-sandbox`) — not in the frontend
+container's logs.
 
 ### Agent runtime modes
 
@@ -186,27 +188,60 @@ Node restart, jobs whose completion was not observed are reported as
 
 ## Self-Hosted Front
 
+The `cherry-agent` image serves the built frontend on port 80 and proxies
+`/agent/` to an Agent Node, so the browser talks to one origin. The
+recommended setup is the two containers from `docker-compose.yml`:
+
 ```bash
-npm run dev:agent
+git clone https://github.com/backsapce/CherryAgent
+cd CherryAgent
+docker compose up -d
 ```
 
-or
+Open `http://localhost:3098`, then Settings → Agent Node: leave the URL empty
+(it collapses to the page origin, which the image proxies) and paste the
+temporary pairing token printed by the **sandbox** container:
 
 ```bash
-docker run -d \
-  --name cherry-agent \
-  --restart unless-stopped \
-  -p 3098:80 \
+docker compose logs cherry-sandbox
+```
+
+Without Compose, put both containers on one Docker network so the frontend can
+reach the Agent Node by name:
+
+```bash
+docker network create cherry
+
+docker run -d --name cherry-sandbox --restart unless-stopped \
+  --network cherry -p 3099:3099 \
+  -e AGENT_ALLOWED_ORIGINS=http://localhost:3098 \
+  backsapce/cherry-sandbox:latest
+
+docker run -d --name cherry-agent --restart unless-stopped \
+  --network cherry -p 3098:80 \
   backsapce/cherry-agent:latest
 ```
 
-The server prints a temporary pairing token on startup. Paste that token into CherryAgent Settings to exchange it for a long-lived token.
+When the Agent Node is not a container on the same network, point the proxy at
+it explicitly with `-e AGENT_UPSTREAM=<host>:<port>`, e.g.
+`host.docker.internal:3099` for an Agent Node on the Docker host or
+`127.0.0.1:3099` with `--network host`.
+
+Frontend image environment variables:
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `AGENT_UPSTREAM` | `cherry-sandbox:3099` | Agent Node upstream for the same-origin `/agent/` proxy (WebSocket-capable). Resolved per request, so the frontend also starts fine while no Agent Node exists. |
+
+The pairing token printed on Agent Node startup is exchanged for a long-lived
+token when pasted into Settings; the frontend container itself prints no
+token.
 
 Agent Node environment variables:
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `AGENT_PORT` | `3099` | Port for the WebSocket agent protocol (`/agent/ws`) and the bundled frontend |
+| `AGENT_PORT` | `3099` | Port for the WebSocket agent protocol (`/agent/ws`). Also serves a built frontend from `dist/` when one is present (local checkout, npm install). The Docker `cherry-sandbox` image ships no frontend. |
 | `AGENT_WORKING_DIR` | Server process cwd | Agent workspace root. Commands run here, and file APIs use this same directory by default. |
 | `AGENT_FILES_DIR` | `AGENT_WORKING_DIR` | Optional separate root for file APIs. Set this only when you intentionally want managed files isolated from the command cwd. |
 | `AGENT_STATE_DIR` | Sibling `.cherry-sandbox-state/<workspace-id>` | Control-plane root kept outside the executable workspace. The installer uses `~/.local/state/cherry-sandbox`; Docker uses `/var/lib/cherry-sandbox`. |
@@ -215,7 +250,7 @@ Agent Node environment variables:
 | `AGENT_JOBS_DIR` | `<state>/jobs` | Optional override for persistent metadata and bounded logs for managed background commands. Keep it outside `AGENT_WORKING_DIR`. |
 | `AGENT_TOKEN_FILE` | `<state>/tokens` | Optional override for the long-lived auth-token file. Keep it outside `AGENT_WORKING_DIR`. |
 | `AGENT_DISABLE_AUTH` | unset | Set to `true` only when the sandbox is already protected by another trusted boundary. When enabled, the `hello` exchange reports `needsAuth: false` and command/file APIs do not require a token. |
-| `AGENT_ALLOWED_ORIGINS` | `http://localhost:5173` | Comma-separated CORS allowlist |
+| `AGENT_ALLOWED_ORIGINS` | `http://localhost:5173` (Docker image: `http://localhost:3098,https://localhost:3098,http://localhost:5173,https://localhost:5173`) | Comma-separated CORS allowlist of browser origins allowed to open the agent WebSocket |
 | `AGENT_SHELL` | Windows: `%ComSpec%`; other platforms: Node default | Shell used to execute commands. Set to `powershell.exe` or `pwsh.exe` when you want PowerShell syntax. |
 
 PowerShell examples:

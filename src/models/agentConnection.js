@@ -66,14 +66,17 @@ function isLoopbackAgentUrl(url) {
     const page = new URL(window.location.href);
     const isLoopback = ['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname);
     const isAgentPath = parsed.pathname === '/agent' || parsed.pathname.startsWith('/agent/');
-    // Port 3099 is the one endpoint deliberately routed through the page's
-    // Vite proxy. An explicit localhost URL on any other port must remain
-    // explicit; treating every `/agent` pathname as proxied silently sends
-    // custom AGENT_PORT installations to the wrong server.
-    return isLoopback && (
-      parsed.port === '3099'
-      || (parsed.origin === page.origin && isAgentPath)
-    );
+    if (parsed.origin === page.origin && isAgentPath) return true;
+    if (!isLoopback || parsed.port !== '3099') return false;
+    // An explicit localhost:3099 endpoint collapses onto the page origin only
+    // when the page itself is a secure loopback origin — the Vite dev server
+    // (https://localhost:5173), which proxies /agent because an https page
+    // cannot open ws://localhost:3099 directly in every browser (mixed
+    // content). From any other page — a self-hosted front over plain http, or
+    // the hosted GitHub Pages build — the direct loopback endpoint is
+    // reachable, and collapsing would route the WebSocket to a page origin
+    // that serves no /agent route (nginx 404, forever-reconnecting).
+    return isLoopbackHostname(page.hostname) && page.protocol === 'https:';
   } catch {
     return false;
   }
@@ -81,7 +84,9 @@ function isLoopbackAgentUrl(url) {
 
 /**
  * Resolve an agent host URL (or relative path) into the WebSocket endpoint.
- * Loopback endpoints collapse to the page origin so they ride the Vite proxy.
+ * Loopback endpoints collapse to the page origin only where that origin
+ * actually proxies /agent (the https dev server); everywhere else they
+ * connect directly so explicit URLs are honored as typed.
  */
 export function resolveAgentWsUrl(url) {
   if (isLoopbackAgentUrl(url)) {

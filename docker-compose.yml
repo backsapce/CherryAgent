@@ -1,0 +1,41 @@
+# Two-container self-host: CherryAgent frontend + Agent Node.
+#
+#   docker compose up -d
+#   docker compose logs cherry-sandbox   # pairing token is printed here
+#
+# Open http://localhost:3098 — the frontend proxies /agent to the Agent Node
+# container, so the default Agent Node URL in Settings connects as-is.
+services:
+  cherry-agent:
+    image: backsapce/cherry-agent:latest
+    restart: unless-stopped
+    ports:
+      - "3098:80"
+    environment:
+      # Upstream for the frontend's same-origin /agent proxy. The default
+      # cherry-sandbox:3099 resolves on the compose network this file creates.
+      # Point it at host.docker.internal:3099 when the Agent Node runs on the
+      # Docker host instead of as a container.
+      AGENT_UPSTREAM: cherry-sandbox:3099
+    depends_on:
+      - cherry-sandbox
+
+  cherry-sandbox:
+    image: backsapce/cherry-sandbox:latest
+    restart: unless-stopped
+    ports:
+      # Optional: direct WebSocket access (http://<host>:3099), e.g. for a
+      # frontend hosted on another origin. The compose front above does not
+      # need this port; it reaches the Agent Node over the internal network.
+      - "3099:3099"
+    environment:
+      # Browser origins allowed to open the agent WebSocket. The image default
+      # already covers http(s)://localhost:3098 and the Vite dev server; set
+      # this when the frontend is served from any other origin.
+      AGENT_ALLOWED_ORIGINS: http://localhost:3098,https://localhost:3098
+    volumes:
+      # Agent commands run as uid/gid 1000 (container user `node`). On Linux,
+      # make sure both host directories are writable by that uid, e.g.
+      #   mkdir -p cherry-workspace cherry-state && sudo chown -R 1000:1000 .
+      - ./cherry-workspace:/home/cherry
+      - ./cherry-state:/var/lib/cherry-sandbox

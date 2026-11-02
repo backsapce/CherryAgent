@@ -15,17 +15,15 @@ FROM nginx:alpine
 # We replace default.conf anyway, so the script has nothing to do.
 RUN rm -f /docker-entrypoint.d/10-listen-on-ipv6-by-default.sh
 
-RUN echo '\
-server {\
-  listen 80;\
-  server_name _;\
-  root /usr/share/nginx/html;\
-  index index.html;\
-  location / {\
-    try_files $uri $uri/ /index.html;\
-  }\
-}\
-' > /etc/nginx/conf.d/default.conf
+# Upstream for the same-origin /agent proxy in the template below. The docker
+# entrypoint (20-envsubst-on-templates.sh) substitutes it into default.conf at
+# container start. Override with -e AGENT_UPSTREAM=host:port when the Agent
+# Node is not a `cherry-sandbox` container on the same docker network — e.g.
+# host.docker.internal:3099 for an Agent Node on the Docker host, or
+# 127.0.0.1:3099 when running with --network host.
+ENV AGENT_UPSTREAM=cherry-sandbox:3099
+
+COPY docker/nginx-default.conf.template /etc/nginx/templates/default.conf.template
 
 COPY --from=build /app/dist /usr/share/nginx/html
 
