@@ -430,3 +430,45 @@ test('resolveAgentWsUrl maps remote origins onto the served endpoint', async () 
     restoreBrowserMocks();
   }
 });
+
+test('resolveAgentWsUrl collapses loopback:3099 only when the page origin proxies /agent', async () => {
+  installBrowserMocks();
+  try {
+    const { resolveAgentWsUrl } = await import('../models/agentConnection.js');
+    const at = (pageHref) => {
+      globalThis.window = { location: { href: pageHref } };
+    };
+
+    // Dev server: https loopback page must ride its /agent proxy (an https
+    // page cannot open ws://localhost:3099 directly in every browser).
+    at('https://localhost:5173/');
+    assert.equal(resolveAgentWsUrl('http://localhost:3099'), 'wss://localhost:5173/agent/ws');
+    assert.equal(resolveAgentWsUrl('http://127.0.0.1:3099'), 'wss://localhost:5173/agent/ws');
+    assert.equal(resolveAgentWsUrl(''), 'wss://localhost:5173/agent/ws');
+
+    // Self-hosted front over plain http (e.g. the docker cherry-agent image
+    // on :3098): the browser can reach the loopback directly, so an explicit
+    // URL must be honored instead of collapsing onto an origin that has no
+    // /agent route.
+    at('http://localhost:3098/');
+    assert.equal(resolveAgentWsUrl('http://localhost:3099'), 'ws://localhost:3099/agent/ws');
+    assert.equal(resolveAgentWsUrl('http://127.0.0.1:3099/agent'), 'ws://127.0.0.1:3099/agent/ws');
+    // Empty or same-origin /agent URLs still resolve to the page origin; that
+    // origin is expected to proxy /agent (the image ships the proxy).
+    assert.equal(resolveAgentWsUrl(''), 'ws://localhost:3098/agent/ws');
+    assert.equal(resolveAgentWsUrl('/agent'), 'ws://localhost:3098/agent/ws');
+    assert.equal(resolveAgentWsUrl('http://localhost:3098/agent'), 'ws://localhost:3098/agent/ws');
+
+    // Hosted build (GitHub Pages): no same-origin proxy exists at all, so the
+    // only endpoint that can work is the direct loopback connection.
+    at('https://backsapce.github.io/CherryAgent/');
+    assert.equal(resolveAgentWsUrl('http://localhost:3099'), 'ws://localhost:3099/agent/ws');
+    assert.equal(resolveAgentWsUrl('http://localhost:3099/agent'), 'ws://localhost:3099/agent/ws');
+
+    // An http loopback page on the dev port also connects directly.
+    at('http://localhost:5173/');
+    assert.equal(resolveAgentWsUrl('http://localhost:3099'), 'ws://localhost:3099/agent/ws');
+  } finally {
+    restoreBrowserMocks();
+  }
+});
