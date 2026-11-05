@@ -96,6 +96,7 @@
     "agents": "エージェント",
     "skills": "スキル",
     "tools": "ツール",
+    "about": "について",
     "cancel": "キャンセル",
     "save": "保存"
   },
@@ -457,5 +458,20 @@
     "loadingProgress": "セッションを集計中… {done}/{total}",
     "loadError": "使用量データの読み込みに失敗しました。",
     "retry": "再試行"
+  },
+  "aboutSettings": {
+    "title": "について",
+    "desc": "CherryAgent のバージョン情報、プロジェクトリンク、アップデート状態。",
+    "version": "バージョン",
+    "github": "GitHub",
+    "checkUpdate": "更新を確認",
+    "checking": "更新を確認中…",
+    "upToDate": "最新バージョンです",
+    "updateAvailable": "更新があります",
+    "newVersion": "更新が利用可能：{version}",
+    "updateFailed": "更新の確認に失敗しました",
+    "viewOnGithub": "GitHub で見る",
+    "updateHint": "ページを再読み込みするか再デプロイすると新しいリリースを取得できます。",
+    "lastChecked": "最終確認：{time}"
   }
 }

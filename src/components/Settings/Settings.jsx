@@ -31,7 +31,7 @@ import {
 import { useI18n } from '../../i18n/context';
 import { SUPPORTED_LOCALES } from '../../i18n/locales';
 import { downloadBlobFile } from '../../utils/misc.js';
-import { X, Activity, Lock, Plug, Sun, Moon, Monitor, UploadCloud, DownloadCloud, AlertTriangle, Globe, ChevronDown, User, Cloud, HardDrive, Layers, Refresh, Upload, Download } from '../Icons/Icons';
+import { X, Activity, Lock, Plug, Sun, Moon, Monitor, UploadCloud, DownloadCloud, AlertTriangle, Globe, ChevronDown, User, Cloud, HardDrive, Layers, Refresh, Upload, Download, Info, Github, MessageSquare } from '../Icons/Icons';
 import { listAllSkills, setSkillEnabled } from '../../agent/skills';
 import { listAllTools, setToolEnabled } from '../../agent/tools';
 import search from '../../models/search';
@@ -45,6 +45,13 @@ import {
   SHOW_HIDDEN_FILES_CONFIG_PATH,
 } from '../../config/fileVisibility';
 import { enqueueStorageOperation } from './storageOperationQueue';
+import {
+  APP_VERSION,
+  checkForUpdates,
+  getUpdateStatus,
+  GITHUB_URL,
+  subscribeUpdateStatus,
+} from '../../utils/updateCheck';
 import { manifestModeChangeLocked } from './syncDestination';
 import './Settings.css';
 import UsageTab from './UsageTab';
@@ -259,6 +266,25 @@ const Settings = ({
   const [syncStatus, setSyncStatus] = useState(() => getSyncStatus());
   const [storagePersistence, setStoragePersistence] = useState(null);
   const [storagePersistenceBusy, setStoragePersistenceBusy] = useState(false);
+  const [updateStatus, setUpdateStatus] = useState(() => getUpdateStatus());
+  const [updateChecking, setUpdateChecking] = useState(false);
+
+  // Background update check: badges the main settings button (subscribed in
+  // MessagePanel) and this panel's About entry when a newer release exists.
+  useEffect(() => {
+    const unsubscribe = subscribeUpdateStatus(setUpdateStatus);
+    checkForUpdates().catch(() => {});
+    return unsubscribe;
+  }, []);
+
+  const handleCheckUpdate = async () => {
+    setUpdateChecking(true);
+    try {
+      await checkForUpdates({ force: true });
+    } finally {
+      setUpdateChecking(false);
+    }
+  };
 
   useEffect(() => {
     setAgentsTabList(agentList);
@@ -1126,6 +1152,16 @@ const Settings = ({
             >
               <Plug width={16} height={16} />
               {t('settings.tools')}
+            </button>
+            <button
+              className={`settings-nav-item ${settingsTab === 'about' ? 'active' : ''}`}
+              onClick={() => setSettingsTab('about')}
+            >
+              <Info width={16} height={16} />
+              {t('settings.about')}
+              {updateStatus.updateAvailable && (
+                <span className="settings-nav-alert" title={t('aboutSettings.updateAvailable')}>!</span>
+              )}
             </button>
           </nav>
         </div>
@@ -2539,6 +2575,94 @@ const Settings = ({
                   </div>
                 </>
               )}
+            </div>
+          )}
+          {settingsTab === 'about' && (
+            <div className="settings-section">
+              <h3>{t('aboutSettings.title')}</h3>
+              <p className="settings-desc">{t('aboutSettings.desc')}</p>
+
+              <div className="about-card">
+                <div className="about-brand">
+                  <div className="about-brand-icon">
+                    <MessageSquare width={22} height={22} />
+                  </div>
+                  <div>
+                    <div className="about-brand-name">CherryAgent</div>
+                    <div className="about-brand-tagline">{t('app.tagline')}</div>
+                  </div>
+                </div>
+
+                <div className="about-rows">
+                  <div className="about-row">
+                    <span className="about-label">{t('aboutSettings.version')}</span>
+                    <span className="about-value">v{APP_VERSION}</span>
+                  </div>
+                  <div className="about-row">
+                    <span className="about-label">{t('aboutSettings.github')}</span>
+                    <a className="about-link" href={GITHUB_URL} target="_blank" rel="noreferrer noopener">
+                      <Github width={14} height={14} />
+                      {GITHUB_URL.replace(/^https:\/\//, '')}
+                    </a>
+                  </div>
+                </div>
+
+                <div className={`about-update ${updateStatus.updateAvailable ? 'available' : ''}`}>
+                  {updateStatus.updateAvailable ? (
+                    <>
+                      <span className="about-update-badge">!</span>
+                      <div className="about-update-text">
+                        <div className="about-update-title">
+                          {t('aboutSettings.newVersion', { version: `v${updateStatus.latestVersion}` })}
+                        </div>
+                        <div className="about-update-hint">{t('aboutSettings.updateHint')}</div>
+                      </div>
+                      <a
+                        className="about-update-action"
+                        href={GITHUB_URL}
+                        target="_blank"
+                        rel="noreferrer noopener"
+                      >
+                        {t('aboutSettings.viewOnGithub')}
+                      </a>
+                    </>
+                  ) : (
+                    <>
+                      <span className={`about-update-badge ${updateStatus.status === 'error' ? 'error' : 'ok'}`}>
+                        {updateStatus.status === 'error' ? '!' : '✓'}
+                      </span>
+                      <div className="about-update-text">
+                        <div className="about-update-title">
+                          {updateStatus.status === 'checking'
+                            ? t('aboutSettings.checking')
+                            : updateStatus.status === 'error'
+                              ? t('aboutSettings.updateFailed')
+                              : t('aboutSettings.upToDate')}
+                        </div>
+                        {updateStatus.status === 'error' && updateStatus.error && (
+                          <div className="about-update-hint">{updateStatus.error}</div>
+                        )}
+                      </div>
+                    </>
+                  )}
+                  <button
+                    className="about-recheck-btn"
+                    onClick={handleCheckUpdate}
+                    disabled={updateChecking || updateStatus.status === 'checking'}
+                  >
+                    <Refresh width={14} height={14} />
+                    {t('aboutSettings.checkUpdate')}
+                  </button>
+                </div>
+
+                {updateStatus.checkedAtMs && (
+                  <div className="about-last-checked">
+                    {t('aboutSettings.lastChecked', {
+                      time: new Date(updateStatus.checkedAtMs).toLocaleString(locale),
+                    })}
+                  </div>
+                )}
+              </div>
             </div>
           )}
         </div>

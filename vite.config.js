@@ -6,6 +6,10 @@ import { resolve, join, relative } from 'path'
 
 const { VITE_BASE } = process.env
 
+// Single source of truth for the client-side version (Settings → About /
+// update check). Injected as a define so package.json stays authoritative.
+const pkg = JSON.parse(readFileSync(resolve('package.json'), 'utf-8'))
+
 // GitHub Pages base path — set via VITE_BASE env var.
 //   VITE_BASE=/CherryAgent/ npm run build:pages → GitHub Pages
 //   npm run build                                  → normal (no prefix)
@@ -75,6 +79,9 @@ const agentProxy = {
 export default defineConfig(() => {
   return {
     base: GH_PAGES_BASE,
+    define: {
+      __APP_VERSION__: JSON.stringify(pkg.version),
+    },
     plugins: [basicSsl(), react(), swPrecachePlugin()],
     server: {
       port: 5173,

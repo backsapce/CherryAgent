@@ -96,6 +96,7 @@
     "agents": "代理",
     "skills": "技能",
     "tools": "工具",
+    "about": "关于",
     "cancel": "取消",
     "save": "保存"
   },
@@ -457,5 +458,20 @@
     "loadingProgress": "正在统计会话… {done}/{total}",
     "loadError": "用量数据加载失败。",
     "retry": "重试"
+  },
+  "aboutSettings": {
+    "title": "关于",
+    "desc": "CherryAgent 的版本信息、项目链接与更新状态。",
+    "version": "版本",
+    "github": "GitHub",
+    "checkUpdate": "检查更新",
+    "checking": "正在检查更新…",
+    "upToDate": "已是最新版本",
+    "updateAvailable": "有可用更新",
+    "newVersion": "更新可用：{version}",
+    "updateFailed": "检查更新失败",
+    "viewOnGithub": "在 GitHub 上查看",
+    "updateHint": "刷新页面或重新部署即可获取新版本。",
+    "lastChecked": "上次检查：{time}"
   }
 }
