@@ -717,6 +717,21 @@
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-primary) 12%, transparent);
 }
 
+/* Nav item update-alert badge (settings → about) */
+.settings-nav-alert {
+  margin-left: auto;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--color-warning, #f6b84b);
+  color: #20180a;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+  flex: none;
+}
+
 /* Nav item count badge */
 .settings-nav-count {
   margin-left: auto;
@@ -1979,4 +1994,200 @@
     flex-direction: column;
     align-items: flex-start;
   }
+}
+
+/* About tab */
+.about-card {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 20px;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 12px;
+  background: var(--color-surface);
+}
+
+.about-brand {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.about-brand-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--color-accent-strong) 18%, transparent);
+  color: var(--color-accent-strong);
+  flex: none;
+}
+
+.about-brand-name {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--color-text-heading);
+}
+
+.about-brand-tagline {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  margin-top: 2px;
+}
+
+.about-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.about-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+
+.about-row:last-child {
+  border-bottom: none;
+}
+
+.about-label {
+  width: 90px;
+  flex: none;
+  font-size: 13px;
+  color: var(--color-text-tertiary);
+}
+
+.about-value {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-heading);
+  font-variant-numeric: tabular-nums;
+}
+
+.about-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--color-accent-strong);
+  text-decoration: none;
+  word-break: break-all;
+}
+
+.about-link:hover {
+  text-decoration: underline;
+}
+
+.about-update {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--color-border-subtle);
+  background: var(--color-surface-alt);
+}
+
+.about-update.available {
+  border-color: color-mix(in srgb, var(--color-warning) 45%, transparent);
+  background: color-mix(in srgb, var(--color-warning) 10%, transparent);
+}
+
+.about-update-badge {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  background: color-mix(in srgb, var(--color-warning) 22%, transparent);
+  color: var(--color-warning);
+}
+
+.about-update-badge.ok {
+  background: color-mix(in srgb, var(--color-success) 18%, transparent);
+  color: var(--color-success);
+}
+
+.about-update-badge.error {
+  background: color-mix(in srgb, var(--color-error) 18%, transparent);
+  color: var(--color-error);
+}
+
+.about-update-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.about-update-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-heading);
+}
+
+.about-update.available .about-update-title {
+  color: var(--color-warning);
+}
+
+.about-update-hint {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  margin-top: 2px;
+  word-break: break-word;
+}
+
+.about-update-action {
+  flex: none;
+  font-size: 12px;
+  font-weight: 600;
+  text-decoration: none;
+  padding: 6px 10px;
+  border-radius: 8px;
+  color: #20180a;
+  background: var(--color-warning, #f6b84b);
+  border: none;
+  cursor: pointer;
+}
+
+.about-update-action:hover {
+  filter: brightness(1.05);
+}
+
+.about-recheck-btn {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-family: inherit;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--color-border-subtle);
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+.about-recheck-btn:hover:not(:disabled) {
+  color: var(--color-text-heading);
+  border-color: var(--color-border-focus);
+}
+
+.about-recheck-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.about-last-checked {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
 }

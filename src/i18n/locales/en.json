@@ -96,6 +96,7 @@
     "agents": "Agents",
     "skills": "Skills",
     "tools": "Tools",
+    "about": "About",
     "cancel": "Cancel",
     "save": "Save"
   },
@@ -457,5 +458,20 @@
     "loadingProgress": "Crunching sessions… {done}/{total}",
     "loadError": "Failed to load usage data.",
     "retry": "Retry"
+  },
+  "aboutSettings": {
+    "title": "About",
+    "desc": "Version info, project links and update status for CherryAgent.",
+    "version": "Version",
+    "github": "GitHub",
+    "checkUpdate": "Check for updates",
+    "checking": "Checking for updates…",
+    "upToDate": "You are on the latest version",
+    "updateAvailable": "Update available",
+    "newVersion": "Update available: {version}",
+    "updateFailed": "Update check failed",
+    "viewOnGithub": "View on GitHub",
+    "updateHint": "Refresh the page or redeploy to pick up the new release.",
+    "lastChecked": "Last checked {time}"
   }
 }

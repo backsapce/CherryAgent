@@ -31,6 +31,7 @@ import { jobCommandHint, jobTerminalOutput, parseJobSnapshot } from './jobToolOu
 import { resolveToolExpanded, toggleToolExpanded } from './toolExpansion';
 import { stripLegacyContextFileSummary } from '../../contextFiles';
 import { formatBytes, imageMimeFromPath } from '../../utils/misc.js';
+import { checkForUpdates, getUpdateStatus, subscribeUpdateStatus } from '../../utils/updateCheck';
 import { hasRenderableTranscript } from './transcriptVisibility';
 import { rehypeStreamWords } from './streamBlur';
 import { resolveThinkingElapsed, timestampOf } from './thinkingElapsed';
@@ -1397,6 +1398,7 @@ const MessagePanel = forwardRef(({
     () => normalizeShowHiddenFiles(config.get(SHOW_HIDDEN_FILES_CONFIG_PATH))
   );
   const [syncStatus, setSyncStatus] = useState(() => getSyncStatus());
+  const [updateStatus, setUpdateStatus] = useState(() => getUpdateStatus());
   const [visibleMessageCount, setVisibleMessageCount] = useState(messageHistoryPageSize);
   const messageListRef = useRef(null);
   const shouldAutoScrollRef = useRef(true);
@@ -1536,6 +1538,15 @@ const MessagePanel = forwardRef(({
   }, [draftKey, input]);
 
   useEffect(() => subscribeSyncStatus(setSyncStatus), []);
+
+  // Update check runs on mount (MessagePanel is always mounted) so the badge
+  // below shows before the settings panel is ever opened. Results are cached
+  // and throttled inside updateCheck, so re-mounts stay cheap.
+  useEffect(() => {
+    const unsubscribe = subscribeUpdateStatus(setUpdateStatus);
+    checkForUpdates().catch(() => {});
+    return unsubscribe;
+  }, []);
 
   useEffect(() => {
     if (!shouldAutoScrollRef.current) return;
@@ -2396,6 +2407,9 @@ const MessagePanel = forwardRef(({
         <div className="header-buttons">
           <button className="settings-btn" onClick={() => setShowSettings(true)} title={t('settings.title')}>
             <SettingsIcon width={18} height={18} />
+            {updateStatus.updateAvailable && (
+              <span className="update-badge" title={t('aboutSettings.updateAvailable')}>!</span>
+            )}
           </button>
           <button className={`filemanage-btn ${showFileManage ? 'active' : ''}`} onClick={() => onToggleFileManage?.()} title={t('filemanage.title')}>
             <Folder width={18} height={18} />

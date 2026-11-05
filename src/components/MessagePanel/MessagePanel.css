@@ -296,6 +296,25 @@
   justify-content: center;
   cursor: pointer;
   transition: color 0.2s, border-color 0.2s, background 0.2s, transform 0.2s;
+  position: relative;
+}
+
+/* Update-available badge on the main settings button */
+.settings-btn .update-badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--color-warning, #f6b84b);
+  color: #20180a;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 14px;
+  text-align: center;
+  pointer-events: none;
+  box-shadow: 0 0 0 2px var(--color-surface);
 }
 
 .settings-btn:hover {
