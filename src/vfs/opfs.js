@@ -933,9 +933,10 @@ async function listArchiveChunkNames(id) {
  * Persist one session's message body: the plain-JSON hot tail in
  * sessions/<id>.json plus immutable gzip chunks under sessions/<id>/.
  *
- * The hot file is written after the chunks it references (the same
- * publish-ordering rule as the session.json index), so a crash can strand
- * orphan chunk files but never a reference to a missing one. Chunks whose
+ * The hot file is written after the chunks it references, and stale chunks
+ * are deleted only after the envelope that stopped referencing them (the
+ * same publish-ordering rule as the session.json index), so a crash can
+ * strand orphan chunk files but never a reference to a missing one. Chunks whose
  * envelope entry still matches the planned fingerprint are left untouched,
  * which keeps appends write-once for sealed history. Returns the written and
  * deleted paths so callers can notify sync hooks accurately.
@@ -1021,12 +1022,6 @@ async function writeSessionBody(sessionDir, id, messages) {
       fingerprint: chunk.fingerprint,
     });
   }
-  for (const name of diskChunkNames) {
-    if (wantedNames.has(name)) continue;
-    if (await deleteEntry(archiveDir, name)) {
-      deleted.push(`${SESSIONS_DIR}/${id}/${name}`);
-    }
-  }
   await writeSerializedJSON(
     sessionDir,
     `${id}.json`,
@@ -1034,6 +1029,15 @@ async function writeSessionBody(sessionDir, id, messages) {
     { internal: true }
   );
   written.push(hotPath);
+  // Delete stale chunks only now that the published envelope no longer
+  // references them; deleting earlier would leave the old hot file pointing
+  // at removed chunks if the envelope write crashed mid-save.
+  for (const name of diskChunkNames) {
+    if (wantedNames.has(name)) continue;
+    if (await deleteEntry(archiveDir, name)) {
+      deleted.push(`${SESSIONS_DIR}/${id}/${name}`);
+    }
+  }
   return { written, deleted };
 }
 

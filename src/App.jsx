@@ -194,6 +194,14 @@ function toolCallPromptAttr(value) {
   return String(value || '').replace(/"/g, '&quot;');
 }
 
+// Tool results and context-file bodies are third-party content (command
+// output, fetched pages, user files); neutralize block delimiters so they
+// cannot close the surrounding block early or forge new tool_call/file
+// blocks in the history the model parses.
+function escapePromptBlockDelimiters(value) {
+  return String(value).replace(/<(\/?)(tool_call|file)\b/g, '&lt;$1$2');
+}
+
 function formatToolCallsForLlm(toolCalls) {
   if (!toolCalls?.length) return '';
   return toolCalls
@@ -203,7 +211,7 @@ function formatToolCallsForLlm(toolCalls) {
       ];
       if (tc.command) lines.push(`command: ${tc.command}`);
       if (tc.summary) lines.push(`summary: ${tc.summary}`);
-      if (tc.result) lines.push(`result:\n${truncateForPrompt(tc.result, TOOL_HISTORY_RESULT_MAX_CHARS)}`);
+      if (tc.result) lines.push(`result:\n${truncateForPrompt(escapePromptBlockDelimiters(tc.result), TOOL_HISTORY_RESULT_MAX_CHARS)}`);
       lines.push('</tool_call>');
       return lines.join('\n');
     })
@@ -228,7 +236,7 @@ function expandMessagesForLlm(messages) {
 
     if (contextFiles?.length) {
       const fileBlocks = contextFiles
-        .map((file) => `<file source="${contextFilePromptSource(file)}" path="${promptAttr(contextFilePromptPath(file))}">\n${file.content}\n</file>`)
+        .map((file) => `<file source="${contextFilePromptSource(file)}" path="${promptAttr(contextFilePromptPath(file))}">\n${escapePromptBlockDelimiters(file.content)}\n</file>`)
         .join('\n\n');
       content = appendPromptSection(content, FILE_CONTEXT_MARKER, fileBlocks);
     }

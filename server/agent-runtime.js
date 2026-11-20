@@ -158,6 +158,7 @@ export function createAgentRunManager({
   readFile,
   writeFile,
   fileExists,
+  validateCommand,
   runAgent = runAgentLoop,
   createModel = createLanguageModel,
   waitUntilWakeup = waitForWakeup,
@@ -401,6 +402,7 @@ export function createAgentRunManager({
     listFiles,
     readFile,
     writeFile,
+    validateCommand,
   });
 
   // The subset of the original run request needed to continue a durable run
@@ -1297,9 +1299,19 @@ export function createRuntimeToolDispatcher({
   writeFile,
   webSearch = runWebSearch,
   webFetch = fetchWebPage,
+  validateCommand = () => ({ blocked: false }),
 }) {
+  // Durable runs have no approval channel: the server blocklist is their only
+  // guard, so every command-carrying tool goes through it before the executor.
+  const assertCommandAllowed = (command) => {
+    const validation = validateCommand(command);
+    if (validation.blocked) {
+      throw new Error(`Command blocked by sandbox policy: ${validation.reason || 'blocked pattern'}`);
+    }
+  };
   return async (name, input, context) => {
     if (name === 'execute_command') {
+      assertCommandAllowed(input.command);
       const result = await execCommand(input.command, {
         signal: context?.signal,
         onStdout: (chunk) => context?.onToolUpdate?.({ stdout: chunk }),
@@ -1316,6 +1328,7 @@ export function createRuntimeToolDispatcher({
     }
     if (name === 'start_command') {
       if (!startCommand) throw new Error('Managed background commands are unavailable.');
+      assertCommandAllowed(input.command);
       return JSON.stringify(await startCommand(input.command), null, 2);
     }
     if (name === 'get_command') {
@@ -1331,6 +1344,7 @@ export function createRuntimeToolDispatcher({
       }
       if (command) {
         if (!startCommand) throw new Error('Managed background commands are unavailable.');
+        assertCommandAllowed(command);
         const job = await startCommand(command);
         const result = await waitCommandInSlices(waitCommand, {
           job_id: job.job_id,

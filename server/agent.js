@@ -368,6 +368,7 @@ const fileOperations = createFileOperations({
 const agentRunManager = createAgentRunManager({
   runsDir: RUNS_DIR,
   idleTimeoutMs: RUN_IDLE_TIMEOUT_MS,
+  validateCommand,
   execCommand,
   startCommand: (command) => commandJobManager.start(command),
   getCommand: (id, cursor) => commandJobManager.get(id, cursor),
