@@ -247,7 +247,14 @@ function contentChars(content) {
 
 function cloneContent(content) {
   if (content == null || typeof content === 'string') return content || '';
-  return JSON.parse(JSON.stringify(content));
+  // ModelMessage image parts carry base64 under `image` rather than the
+  // session's redacted `images` field; don't leak them in debug exports.
+  const safe = Array.isArray(content) ? content.map((part) => {
+    if (part?.type !== 'image') return part;
+    const { image, ...metadata } = part;
+    return { ...metadata, imageChars: typeof image === 'string' ? image.length : 0 };
+  }) : content;
+  return JSON.parse(JSON.stringify(safe));
 }
 
 function estimateDebugTokens(messages, systemPrompt = '') {

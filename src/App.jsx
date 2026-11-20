@@ -20,10 +20,12 @@ import {
 } from './vfs/storagePersistence';
 import config from './config/config';
 import llm from './models/llm';
+import { toModelMessages } from './models/ai';
 import search from './models/search';
 import { executeCommand, initAgents, enableE2b, E2B_AGENT_ID, getSandboxStatus, stopE2bSandbox, assertRemoteAgentRunProtocol, startRemoteAgentRun, continueRemoteAgentRun, getRemoteAgentRun, subscribeRemoteAgentRun, listRemoteAgentRuns, abortRemoteAgentRun } from './models/agent';
 import { prepareAgentRuntimeContext, runAgentLoop } from './agent/loop';
 import { applyAgentEvent, createAgentEventState } from './agent/events';
+import { assistantReplayFields } from './agent/sessionHistory';
 import { buildChatDebugExport, createChatDebugFilename } from './agent/debug';
 import { ensureDefaultSkills } from './agent/skills';
 import { ensureDefaultAgent, listAgents, updateAgentConfig } from './agents/agents';
@@ -58,7 +60,7 @@ import { WifiOff, Refresh, ChevronRight } from './components/Icons/Icons';
 import { boundContextFilesForPrompt, stripLegacyContextFileSummary } from './contextFiles';
 import { canSupersedeRemoteRun, formatRunFailureContent } from './remoteRunPresentation';
 import { attachRemoteRunStream } from './remoteRunReconnect';
-import { downloadBlobFile, truncateText as truncateForPrompt, waitForSettlement } from './utils/misc.js';
+import { downloadBlobFile, waitForSettlement } from './utils/misc.js';
 import {
   assertRemoteRunSnapshot,
   captureRemoteReplyFields,
@@ -137,8 +139,6 @@ Work rules:
 const SANDBOX_AGENT_SYSTEM_PROMPT = `You are running fully inside the selected sandbox. Browser operations, browser OPFS, browser files, browser memory mutation, and sub-agent delegation are unavailable. Enabled OPFS global and workspace skills are synchronized into sandbox skills/ without replacing skills that already exist there. The skill tool reads and writes only sandbox skills/, so skills created during this runtime remain in the sandbox and are not written back to OPFS. Images attached to user messages are copied into the sandbox under attachments/; each image message includes its exact local path, which can be passed to curl and other command-line tools. Use command tools, sandbox file tools, the skill tool, and schedule_wakeup. For long-running CLI work, call wait_command with the command to start the job and wait in one call; when the turn should end now instead, start the work with start_command and schedule a future continuation containing its job_id and latest log cursor. The agent server keeps both the run and managed command alive while the browser is disconnected. To show an image, always call display_sandbox_image with its real sandbox path; never emit Markdown/HTML image tags for local paths and never put image bytes, binary data, base64, or data URLs in the conversation. The browser may disconnect without stopping this run.`;
 
 const FILE_CONTEXT_MARKER = 'Selected file context:';
-const TOOL_HISTORY_MARKER = 'Tool calls performed during this assistant turn:';
-const TOOL_HISTORY_RESULT_MAX_CHARS = 4000;
 const REMOTE_ABORT_TIMEOUT_MS = 5000;
 const REMOTE_ABORT_RETRY_MS = 1500;
 const REMOTE_RESUME_RETRY_MS = 1500;
@@ -190,32 +190,9 @@ function appendPromptSection(content, marker, body) {
   return `${content || ''}\n\n${marker}\n${body}`.trim();
 }
 
-function toolCallPromptAttr(value) {
-  return String(value || '').replace(/"/g, '&quot;');
-}
-
-// Tool results and context-file bodies are third-party content (command
-// output, fetched pages, user files); neutralize block delimiters so they
-// cannot close the surrounding block early or forge new tool_call/file
-// blocks in the history the model parses.
+// File bodies can contain markup; don't let them forge context-file blocks.
 function escapePromptBlockDelimiters(value) {
-  return String(value).replace(/<(\/?)(tool_call|file)\b/g, '&lt;$1$2');
-}
-
-function formatToolCallsForLlm(toolCalls) {
-  if (!toolCalls?.length) return '';
-  return toolCalls
-    .map((tc, index) => {
-      const lines = [
-        `<tool_call index="${index + 1}" name="${toolCallPromptAttr(tc.name)}" status="${toolCallPromptAttr(tc.status || 'unknown')}">`,
-      ];
-      if (tc.command) lines.push(`command: ${tc.command}`);
-      if (tc.summary) lines.push(`summary: ${tc.summary}`);
-      if (tc.result) lines.push(`result:\n${truncateForPrompt(escapePromptBlockDelimiters(tc.result), TOOL_HISTORY_RESULT_MAX_CHARS)}`);
-      lines.push('</tool_call>');
-      return lines.join('\n');
-    })
-    .join('\n\n');
+  return String(value).replace(/<(\/?)(file)\b/g, '&lt;$1$2');
 }
 
 function expandMessagesForLlm(messages) {
@@ -223,7 +200,7 @@ function expandMessagesForLlm(messages) {
     const {
       contextFiles,
       toolCalls,
-      transcript: _transcript,
+      transcript,
       usage: _usage,
       summaryState: _summaryState,
       runStartedAt: _runStartedAt,
@@ -241,13 +218,9 @@ function expandMessagesForLlm(messages) {
       content = appendPromptSection(content, FILE_CONTEXT_MARKER, fileBlocks);
     }
 
-    const toolHistory = formatToolCallsForLlm(toolCalls);
-    if (toolHistory) {
-      content = appendPromptSection(content, TOOL_HISTORY_MARKER, toolHistory);
-    }
-
     return {
       ...rest,
+      ...(message.role === 'assistant' ? assistantReplayFields({ toolCalls, transcript }) : {}),
       content,
     };
   });
@@ -1412,7 +1385,7 @@ function App() {
     const payload = buildChatDebugExport({
       session,
       messages: session.messages,
-      llmMessages: expandMessagesForLlm(session.messages),
+      llmMessages: toModelMessages(expandMessagesForLlm(session.messages), { contextWindow: llmProfile?.contextWindow }),
       systemPrompt: hasToolContext ? AGENT_SYSTEM_PROMPT : '',
       llmProfile,
       provider,
@@ -1817,7 +1790,7 @@ function App() {
               ...(expandedLast?.images?.length ? { images: expandedLast.images } : {}),
               // Stable attachment paths across retries and restarts.
               ...(lastMessage?.id ? { messageId: lastMessage.id } : {}),
-              userMessageCount: expandMessagesForSandboxRuntime(sessionMessages)
+              userMessageCount: sessionMessages
                 .filter((message) => message.role === 'user').length,
               modelConfig: remoteModelConfig,
               ...(remoteSearchConfig ? { searchConfig: remoteSearchConfig } : {}),

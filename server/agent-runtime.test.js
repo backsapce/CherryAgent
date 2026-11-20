@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { simulateReadableStream } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
+import { toModelMessages } from '../src/models/ai.js';
 import { createAgentRunManager, createRuntimeToolDispatcher, materializeMessageImages, materializeRuntimeFiles, REMOTE_TOOL_SCHEMAS } from './agent-runtime.js';
 
 function createManager(runsDir, overrides = {}) {
@@ -495,21 +496,26 @@ test('sandbox run enters waiting and resumes after a real agent-loop wake-up', a
   let releaseWakeup;
   const wakeupGate = new Promise((resolve) => { releaseWakeup = resolve; });
   let modelCallCount = 0;
+  const prompts = [];
+  const skillBody = `---\nname: demo\ndescription: Demo skill\n---\n${'Skill instruction '.repeat(320)}\nSKILL_TAIL`;
   const usage = {
     inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
     outputTokens: { total: 1, text: 1, reasoning: 0 },
   };
   const model = new MockLanguageModelV3({
-    doStream: async () => {
+    doStream: async ({ prompt }) => {
+      prompts.push(prompt);
       modelCallCount += 1;
-      const chunks = modelCallCount === 1
+      const chunks = modelCallCount <= 2
         ? [
             { type: 'stream-start', warnings: [] },
             {
               type: 'tool-call',
-              toolCallId: 'call-wakeup',
-              toolName: 'schedule_wakeup',
-              input: JSON.stringify({ delay: 30, unit: 'seconds', prompt: 'continue the task' }),
+              toolCallId: modelCallCount === 1 ? 'call-skill' : 'call-wakeup',
+              toolName: modelCallCount === 1 ? 'skill' : 'schedule_wakeup',
+              input: JSON.stringify(modelCallCount === 1
+                ? { action: 'read', name: 'demo' }
+                : { delay: 30, unit: 'seconds', prompt: 'continue the task' }),
             },
             { type: 'finish', finishReason: { unified: 'tool-calls' }, usage },
           ]
@@ -534,6 +540,7 @@ test('sandbox run enters waiting and resumes after a real agent-loop wake-up', a
     const manager = createManager(runsDir, {
       createModel: () => model,
       waitUntilWakeup: () => wakeupGate,
+      readFile: async (path) => path === 'skills/demo/SKILL.md' ? skillBody : '',
     });
     const started = await manager.start({
       runId: 'run-wakeup-resume',
@@ -545,7 +552,7 @@ test('sandbox run enters waiting and resumes after a real agent-loop wake-up', a
     });
 
     const waiting = await waitForRunStatus(manager, started.id, 'waiting');
-    assert.equal(modelCallCount, 1);
+    assert.equal(modelCallCount, 2);
     assert.equal(waiting.wakeup.prompt, 'continue the task');
     assert.equal(
       manager.get(started.id).events.find((event) => event.type === 'tool-result')?.status,
@@ -554,7 +561,7 @@ test('sandbox run enters waiting and resumes after a real agent-loop wake-up', a
 
     releaseWakeup();
     const completed = await waitForRunStatus(manager, started.id, 'idle');
-    assert.equal(modelCallCount, 2);
+    assert.equal(modelCallCount, 3);
     assert.equal(completed.result.content, 'awake');
     assert.equal(completed.wakeup, null);
     const events = manager.get(started.id).events;
@@ -573,13 +580,29 @@ test('sandbox run enters waiting and resumes after a real agent-loop wake-up', a
       .filter((event) => event.type === 'step-start')
       .map((event) => event.stepId);
     assert.equal(new Set(stepIds).size, stepIds.length);
+
+    // The skill the model saw immediately after reading remains byte-for-byte
+    // present after waking and after the next user message, as a tool result.
+    await manager.continue({ runId: started.id, replyId: 'reply-follow-up', message: 'use that skill again' });
+    await waitForRunStatus(manager, started.id, 'idle');
+    assert.equal(prompts.length, 4);
+    for (const prompt of prompts.slice(1)) {
+      const invocation = prompt.filter((message) => message.role === 'assistant')
+        .flatMap((message) => message.content).find((part) => part.type === 'tool-call' && part.toolName === 'skill');
+      const observation = prompt.filter((message) => message.role === 'tool')
+        .flatMap((message) => message.content).find((part) => part.toolCallId === invocation?.toolCallId);
+      assert.deepEqual(invocation?.input, { action: 'read', name: 'demo' });
+      assert.deepEqual(observation?.output, { type: 'text', value: skillBody });
+    }
+    assert.ok(prompts[2].some((message) => message.role === 'tool'
+      && message.content.some((part) => part.toolName === 'schedule_wakeup')));
   } finally {
     releaseWakeup?.();
     rmSync(runsDir, { recursive: true, force: true });
   }
 });
 
-test('a second session cannot disturb a waiting run and wake-up keeps compact tool history', async () => {
+test('a second session cannot disturb a waiting run and wake-up keeps native job history', async () => {
   const runsDir = mkdtempSync(join(tmpdir(), 'cherry-runs-'));
   const wakeupGate = deferred();
   let firstSessionTurns = 0;
@@ -668,13 +691,19 @@ test('a second session cannot disturb a waiting run and wake-up keeps compact to
     wakeupGate.resolve();
     const firstCompleted = await waitForRunStatus(manager, first.id, 'idle');
     assert.equal(firstCompleted.result.content, 'session A finished');
-    const continuation = resumedMessages.at(-2).content;
-    assert.match(continuation, /Tool history from the turn/);
-    assert.match(continuation, /job-one/);
-    assert.match(continuation, /"nextCursor": 42/);
-    assert.match(continuation, /"logCursor": 17/);
-    assert.doesNotMatch(continuation, /old-result-0/);
-    assert.ok(continuation.length < 5_000);
+    const continuation = resumedMessages.at(-2);
+    assert.equal(continuation.content, 'The background command is still running.');
+    const history = toModelMessages([continuation], { contextWindow: 8_000 });
+    const calls = history[0].content;
+    const jobCall = calls.find((part) => part.toolName === 'get_command');
+    const jobResult = history[1].content.find((part) => part.toolCallId === jobCall.toolCallId);
+    assert.deepEqual(jobCall.input, { job_id: 'job-one', cursor: 17 });
+    const state = JSON.parse(jobResult.output.value);
+    assert.equal(state.job_id, 'job-one');
+    assert.equal(state.nextCursor, 42);
+    assert.equal(state.logCursor, 17);
+    assert.match(state.log, /command log compacted/);
+    assert.ok(jobResult.output.value.length < 4_000);
   } finally {
     wakeupGate.resolve();
     rmSync(runsDir, { recursive: true, force: true });
@@ -1585,7 +1614,7 @@ test('a server restart re-arms a waiting run and it resumes after the wake-up', 
 
     // The resumed turn replays the saved conversation plus the continuation.
     assert.equal(resumedMessages[0].content, 'start the long task');
-    assert.match(resumedMessages.at(-2).content, /Tool history from the turn|Sleeping until the job finishes\./);
+    assert.equal(resumedMessages.at(-2).content, 'Sleeping until the job finishes.');
     assert.match(resumedMessages.at(-1).content, /continue the long task/);
 
     // A restarted manager must not resurrect the run a second time.

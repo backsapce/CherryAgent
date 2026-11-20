@@ -11,6 +11,7 @@ import llm from '../models/llm.js';
 import { buildMemorySection } from './memory.js';
 import { COMMAND_EXECUTION_GUIDANCE } from './commandGuidance.js';
 import { estimateTextTokens } from './tokenEstimate.js';
+import { projectAssistantHistory } from './sessionHistory.js';
 import { clampNumber, truncateText } from '../utils/misc.js';
 
 const CONTEXT_WINDOW_FALLBACK = 128_000;
@@ -44,6 +45,7 @@ Operating rules:
 - Use memory only for durable facts, preferences, and project conventions that are likely to matter in future sessions.
 - Use skills as just-in-time procedures: list with a query when discovery is needed, read the relevant skill before relying on it, and avoid loading unrelated references.
 - A user message beginning with /<skill-name> explicitly selects that enabled skill. Read the named skill before acting, follow it for this turn, and treat the text after the command as the user's task. If the named skill does not exist or is disabled, explain that briefly instead of silently substituting another skill.
+- Reuse a skill read already visible in the conversation when it still applies; reload if it changed or is no longer visible. This does not replace an explicit /<skill-name> request.
 - Treat tool output as authoritative over assumptions. If context is summarized, rely on the live tail for the latest state.`;
 
 const AGENT_RUNTIME_PROMPT_WITH_COMMANDS = `${AGENT_RUNTIME_PROMPT}\n\n${COMMAND_EXECUTION_GUIDANCE}`;
@@ -61,6 +63,7 @@ Runtime isolation:
 
 Operating rules:
 - Work from evidence and continue until the request is handled or a real blocker requires user input.
+- Reuse a skill read already visible in the conversation when it still applies; reload if it changed or is no longer visible. This does not replace an explicit /<skill-name> request.
 - Do not promise future tool work; call an available tool in the same response.
 - Prefer small, reversible edits, verify important changes, and report failures honestly.
 - A user message beginning with /<skill-name> explicitly selects that enabled skill. Read it with the skill tool before acting, follow it for this turn, and treat the text after the command as the user's task. If the named skill is unavailable, explain that briefly instead of silently substituting another skill.
@@ -95,6 +98,7 @@ export async function assembleApiMessages(opts) {
     llmProfileId,
     signal,
     autoSummarize = true,
+    completeSummary,
     runtimeMode = 'browser',
   } = opts;
 
@@ -106,24 +110,31 @@ export async function assembleApiMessages(opts) {
     runtimeMode,
   });
   let summaryState = normalizeSummaryState(opts.summaryState, opts.summary);
-  let packed = packMessages(messages, fullSystemPrompt, contextWindow, summaryState);
+  // Keep the source reply as the atomic unit for stored summary anchors. Count
+  // what it will expand to, not just the visible assistant text.
+  const projected = messages.map((message) => message?.role === 'assistant' && message.toolCalls?.length
+    ? projectAssistantHistory(message, { contextWindow })
+    : [message]);
+  const messageCosts = projected.map((group) => group.reduce((total, message) => total + estimateMessageTokens(message), 0));
+  let packed = packMessages(messages, fullSystemPrompt, contextWindow, summaryState, messageCosts);
 
   let summaryPasses = 0;
   while (autoSummarize && packed.needsSummary && summaryPasses < 3) {
     summaryPasses += 1;
     const start = Math.max(packed.summaryStart, summaryState.coveredUntil || packed.summaryStart);
     const end = packed.summaryEnd;
-    const newMessages = messages.slice(start, end);
+    const newMessages = projected.slice(start, end).flat();
     if (newMessages.length === 0) break;
     const summary = await summarizeMiddle(newMessages, summaryState.content, {
       llmProfileId,
       signal,
+      completeSummary,
     });
     summaryState = {
       content: summary,
       coveredUntil: end,
     };
-    packed = packMessages(messages, fullSystemPrompt, contextWindow, summaryState);
+    packed = packMessages(messages, fullSystemPrompt, contextWindow, summaryState, messageCosts);
   }
   summaryState = stampSummaryAnchor(summaryState, messages);
 
@@ -151,7 +162,7 @@ export async function summarizeMiddle(middleMessages, existingSummary = '', opts
   const prompt = existingSummary
     ? [
       'Update the running conversation summary for an autonomous agent.',
-      'Preserve only durable state: user requests, completed work, files touched, tool findings, decisions, blockers, and remaining TODOs.',
+      'Preserve only durable state: user requests, completed work, files touched, tool findings, relevant skill instructions, decisions, blockers, and remaining TODOs.',
       'Do not include generic chit-chat. Keep it concise but specific enough to resume work.',
       '',
       '<existing_summary>',
@@ -164,7 +175,7 @@ export async function summarizeMiddle(middleMessages, existingSummary = '', opts
     ].join('\n')
     : [
       'Summarize these earlier conversation turns for an autonomous agent.',
-      'Include: the active task, completed actions, important files/commands/results, decisions, blockers, and pending work.',
+      'Include: the active task, completed actions, important files/commands/results, relevant skill instructions, decisions, blockers, and pending work.',
       'Keep it concise, factual, and ordered from oldest to newest where useful.',
       '',
       '<turns>',
@@ -173,7 +184,7 @@ export async function summarizeMiddle(middleMessages, existingSummary = '', opts
     ].join('\n');
 
   try {
-    const summary = await llm.completeSession(
+    const summary = await (opts.completeSummary || llm.completeSession)(
       [{ role: 'user', content: prompt }],
       {
         llmProfileId: opts.llmProfileId,
@@ -192,10 +203,12 @@ export async function summarizeMiddle(middleMessages, existingSummary = '', opts
 
 // ─── Packing ────────────────────────────────────────────────────────────────
 
-function packMessages(messages, systemPrompt, contextWindow, summaryState) {
-  const estimatedTokens = estimateTokens(messages, systemPrompt);
+function packMessages(messages, systemPrompt, contextWindow, summaryState, messageCosts) {
+  const systemTokens = estimateTextTokens(systemPrompt);
+  const estimatedTokens = systemTokens + sum(messageCosts);
+  const hasCompaction = summaryState.content && summaryState.coveredUntil > HEAD_PROTECT;
   const threshold = Math.floor((contextWindow || CONTEXT_WINDOW_FALLBACK) * PACKING_THRESHOLD_RATIO);
-  if (estimatedTokens <= threshold) {
+  if (estimatedTokens <= threshold && !hasCompaction) {
     return {
       apiMessages: [...messages],
       compressed: false,
@@ -216,10 +229,12 @@ function packMessages(messages, systemPrompt, contextWindow, summaryState) {
   );
   const targetBudget = Math.max(
     2048,
-    threshold - responseReserve - estimateTokens(head, systemPrompt) - estimateTokens(summaryMessage ? [summaryMessage] : [], '')
+    threshold - responseReserve - systemTokens - sum(messageCosts.slice(0, headCount)) - (summaryMessage ? estimateMessageTokens(summaryMessage) : 0)
   );
 
-  let tailStart = chooseTailStart(messages, headCount, targetBudget);
+  let tailStart = estimatedTokens <= threshold
+    ? summaryState.coveredUntil
+    : chooseTailStart(messageCosts, headCount, targetBudget);
   if (summaryState.content && summaryState.coveredUntil > tailStart) {
     tailStart = Math.min(messages.length, summaryState.coveredUntil);
   }
@@ -240,17 +255,18 @@ function packMessages(messages, systemPrompt, contextWindow, summaryState) {
     needsSummary: summaryEnd > Math.max(summaryStart, summaryState.coveredUntil || 0),
     summaryStart,
     summaryEnd,
-    estimatedTokens: estimateTokens(apiMessages, systemPrompt),
+    estimatedTokens: systemTokens + sum(messageCosts.slice(0, headCount))
+      + sum(messageCosts.slice(tailStart)) + (summaryMessage ? estimateMessageTokens(summaryMessage) : 0),
   };
 }
 
-function chooseTailStart(messages, headCount, tokenBudget) {
+function chooseTailStart(messageCosts, headCount, tokenBudget) {
   let tokens = 0;
   let kept = 0;
-  let tailStart = messages.length;
+  let tailStart = messageCosts.length;
 
-  for (let index = messages.length - 1; index >= headCount; index -= 1) {
-    const messageTokens = estimateMessageTokens(messages[index]);
+  for (let index = messageCosts.length - 1; index >= headCount; index -= 1) {
+    const messageTokens = messageCosts[index];
     const mustKeep = kept < MIN_TAIL_KEEP;
     const preferred = kept < PREFERRED_TAIL_KEEP;
     if (!mustKeep && (!preferred || tokens + messageTokens > tokenBudget)) break;
@@ -260,6 +276,10 @@ function chooseTailStart(messages, headCount, tokenBudget) {
   }
 
   return tailStart;
+}
+
+function sum(values) {
+  return values.reduce((total, value) => total + value, 0);
 }
 
 function buildSummaryMessage(summary) {

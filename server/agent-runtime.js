@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createLanguageModel } from '../src/models/ai.js';
 import { runAgentLoop } from '../src/agent/loop.js';
+import { assistantReplayFields } from '../src/agent/sessionHistory.js';
 import { buildWakeupMessage, createOrReplaceTurnWakeup, wakeupDelayToSeconds } from '../src/agent/wakeup.js';
 import {
   MAX_SKILL_CONTENT_CHARS,
@@ -59,15 +60,6 @@ const CANCELLED_RUN_ID_TTL_MS = 10 * 60_000;
 // still become terminal so it cannot lock the conversation forever.
 const RUN_ABORT_WAIT_MS = 3_000;
 const SANDBOX_ATTACHMENTS_MARKER = 'Sandbox attachment files (available to shell commands and sandbox file tools):';
-const MAX_WAKEUP_CONTINUATION_TOOL_CHARS = 4_000;
-const MAX_WAKEUP_CONTINUATION_TOOL_INPUT_CHARS = 700;
-const MAX_WAKEUP_CONTINUATION_TOOL_RESULT_CHARS = 1_600;
-const COMMAND_CONTINUATION_TOOL_NAMES = new Set([
-  'get_command',
-  'start_command',
-  'stop_command',
-  'wait_command',
-]);
 // A durable sandbox run races tool execution against the model-stream timeouts
 // (see DEFAULT_SANDBOX_MODEL_TIMEOUT in loop.js: 90s inter-chunk, 5min per step)
 // and the run idle watchdog. A long blocking wait is therefore served in
@@ -478,7 +470,7 @@ export function createAgentRunManager({
           notifyStatus(run);
           runtimeMessages = [
             ...runtimeMessages,
-            { role: 'assistant', content: scheduledTurnContinuation(result) },
+            assistantHistoryMessage(result, { scheduled: true }),
             override ?? { role: 'user', content: buildWakeupMessage(pendingWakeup) },
           ];
           if (runtimeMessages.length > MAX_MESSAGES) throw new Error('Scheduled run exceeded the message limit.');
@@ -532,7 +524,7 @@ export function createAgentRunManager({
                 });
                 return scheduledWakeup;
               },
-              autoSummarize: false,
+              summaryState: result?.summaryState,
               runtimeMode: 'sandbox',
               onEvent: (event) => {
                 // A provider or tool may ignore the per-turn abort and report
@@ -810,7 +802,7 @@ export function createAgentRunManager({
     const continuedMessage = await materializeContinuedMessage();
     const runtimeMessages = [
       ...resume.runtimeMessages,
-      { role: 'assistant', content: scheduledTurnContinuation(resume.result) },
+      assistantHistoryMessage(resume.result),
       continuedMessage,
     ];
     if (runtimeMessages.length > MAX_MESSAGES) {
@@ -1027,127 +1019,12 @@ function namespaceRuntimeId(value, scope) {
   return text.startsWith(prefix) ? text : `${prefix}${text}`;
 }
 
-function scheduledTurnContinuation(result = {}) {
-  const content = String(result?.content || '').trim()
-    || 'A future continuation was scheduled.';
-  const toolCalls = Array.isArray(result?.toolCalls)
-    ? result.toolCalls.filter((toolCall) => toolCall?.name !== 'schedule_wakeup')
-    : [];
-  if (toolCalls.length === 0) return content;
-
-  // Retain the newest calls first: command job ids and nextCursor values near
-  // the wake-up are more useful than an early, bulky lookup. Keeping each
-  // continuation small also prevents repeated wake-ups from crowding a 32k
-  // model context solely with copied tool results.
-  const latestCommand = latestCommandContinuation(toolCalls);
-  let compactTools = [];
-  for (let index = toolCalls.length - 1; index >= 0; index -= 1) {
-    const toolCall = toolCalls[index];
-    const candidate = {
-      name: truncateRuntimeContinuationValue(toolCall?.name || 'unknown_tool', 128),
-      status: truncateRuntimeContinuationValue(toolCall?.status || '', 64) || null,
-      input: truncateRuntimeContinuationValue(
-        safeJsonStringify(toolCall?.parsedArgs ?? safeParsedToolInput(toolCall?.rawArgs)),
-        MAX_WAKEUP_CONTINUATION_TOOL_INPUT_CHARS
-      ),
-      result: truncateRuntimeContinuationValue(
-        toolCall?.result ?? toolCall?.terminalOutput ?? '',
-        MAX_WAKEUP_CONTINUATION_TOOL_RESULT_CHARS
-      ),
-    };
-    const nextTools = [candidate, ...compactTools];
-    const nextPayload = {
-      ...(latestCommand ? { latestCommand } : {}),
-      omittedEarlierToolCalls: index,
-      toolCalls: nextTools,
-    };
-    if (safeJsonStringify(nextPayload).length > MAX_WAKEUP_CONTINUATION_TOOL_CHARS) break;
-    compactTools = nextTools;
-  }
-  const serialized = safeJsonStringify({
-    ...(latestCommand ? { latestCommand } : {}),
-    omittedEarlierToolCalls: toolCalls.length - compactTools.length,
-    toolCalls: compactTools,
-  });
-  return [
-    content,
-    'Tool history from the turn that scheduled this continuation:',
-    serialized,
-  ].join('\n\n');
-}
-
-function latestCommandContinuation(toolCalls) {
-  const toolCall = toolCalls.findLast((candidate) => (
-    COMMAND_CONTINUATION_TOOL_NAMES.has(candidate?.name)
-  ));
-  if (!toolCall) return null;
-  const state = commandContinuationState(toolCall).commandState;
+function assistantHistoryMessage(result, { scheduled = false } = {}) {
   return {
-    name: truncateRuntimeContinuationValue(toolCall.name, 128),
-    input: truncateRuntimeContinuationValue(
-      safeJsonStringify(toolCall?.parsedArgs ?? safeParsedToolInput(toolCall?.rawArgs)),
-      MAX_WAKEUP_CONTINUATION_TOOL_INPUT_CHARS
-    ),
-    ...(state ? { state } : {}),
+    role: 'assistant',
+    content: String(result?.content || '') || (scheduled ? 'A future continuation was scheduled.' : ''),
+    ...assistantReplayFields(result),
   };
-}
-
-function commandContinuationState(toolCall) {
-  if (!COMMAND_CONTINUATION_TOOL_NAMES.has(toolCall?.name)) return {};
-  const rawResult = toolCall?.result ?? toolCall?.terminalOutput;
-  let result = rawResult;
-  if (typeof rawResult === 'string') {
-    try {
-      result = JSON.parse(rawResult);
-    } catch {
-      return {};
-    }
-  }
-  if (!result || typeof result !== 'object' || Array.isArray(result)) return {};
-
-  const state = {};
-  for (const key of [
-    'job_id',
-    'status',
-    'nextCursor',
-    'logCursor',
-    'logSize',
-    'hasMore',
-    'exit_code',
-    'signal',
-    'error',
-  ]) {
-    const value = result[key];
-    if (value == null) continue;
-    state[key] = typeof value === 'string'
-      ? truncateRuntimeContinuationValue(value, key === 'error' ? 500 : 256)
-      : value;
-  }
-  return Object.keys(state).length > 0 ? { commandState: state } : {};
-}
-
-function safeParsedToolInput(rawArgs) {
-  if (!rawArgs) return {};
-  try {
-    return JSON.parse(rawArgs);
-  } catch {
-    return String(rawArgs);
-  }
-}
-
-function safeJsonStringify(value) {
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return '[Tool history could not be serialized]';
-  }
-}
-
-function truncateRuntimeContinuationValue(value, maxChars) {
-  const text = String(value || '');
-  if (text.length <= maxChars) return text;
-  const marker = '\n...[truncated]';
-  return `${text.slice(0, Math.max(0, maxChars - marker.length))}${marker}`;
 }
 
 function sandboxImageExtension(mimeType) {
@@ -1597,7 +1474,9 @@ function validateRunInput(input) {
     if (typeof message?.content !== 'string') {
       invalid(`messages[${index}].content must be a string.`);
     }
-    const messageBytes = Buffer.byteLength(message.content);
+    const messageBytes = Buffer.byteLength(message.content)
+      + (message.toolCalls == null ? 0 : Buffer.byteLength(JSON.stringify(message.toolCalls)))
+      + (message.transcript == null ? 0 : Buffer.byteLength(JSON.stringify(message.transcript)));
     if (messageBytes > MAX_MESSAGE_CONTENT_BYTES) {
       invalid(`messages[${index}].content exceeds ${MAX_MESSAGE_CONTENT_BYTES} bytes.`);
     }

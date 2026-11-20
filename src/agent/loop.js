@@ -6,7 +6,7 @@
  * policy, and a UI-safe event stream derived from AI SDK's `fullStream`.
  */
 
-import { jsonSchema, stepCountIs, streamText, tool } from 'ai';
+import { generateText, jsonSchema, stepCountIs, streamText, tool } from 'ai';
 import llm from '../models/llm.js';
 import { normalizeAiUsage, toModelMessages } from '../models/ai.js';
 import { getEnabledToolSchemas, registry } from './tools.js';
@@ -116,6 +116,17 @@ export async function runAgentLoop(opts) {
     llmProfileId: opts.llmProfileId,
     signal,
     autoSummarize: opts.autoSummarize !== false,
+    // Sandbox runs have the configured model but no browser/OPFS profiles.
+    ...(opts.runtimeMode === 'sandbox' && opts.languageModel ? {
+      completeSummary: async (messages, { maxTokens, signal }) => (await generateText({
+        model: opts.languageModel,
+        messages,
+        maxOutputTokens: maxTokens,
+        maxRetries: 0,
+        abortSignal: signal,
+        timeout: { totalMs: 60_000 },
+      })).text,
+    } : {}),
     runtimeMode: opts.runtimeMode || 'browser',
   });
 
@@ -194,9 +205,10 @@ export async function runAgentLoop(opts) {
     });
     const model = await (opts.languageModel || llm.getLanguageModel(opts.llmProfileId));
     const tools = createAgentTools(schemas, toolContext, emit);
+    const modelHistory = toModelMessages(packed.apiMessages, { contextWindow });
     const initial = await consumeAgentStream({
       model,
-      messages: toModelMessages(packed.apiMessages),
+      messages: modelHistory,
       system: packed.systemPrompt,
       tools,
       maxRounds,
@@ -240,7 +252,7 @@ export async function runAgentLoop(opts) {
       const recovery = await consumeAgentStream({
         model,
         messages: [
-          ...toModelMessages(packed.apiMessages),
+          ...modelHistory,
           { role: 'user', content: EMPTY_RESPONSE_RETRY_PROMPT },
         ],
         system: packed.systemPrompt,
@@ -268,7 +280,7 @@ export async function runAgentLoop(opts) {
       const finalizer = await consumeAgentStream({
         model,
         messages: [
-          ...toModelMessages(packed.apiMessages),
+          ...modelHistory,
           ...responseMessages,
           { role: 'user', content: FINALIZE_PROMPT },
         ],
@@ -702,6 +714,7 @@ async function consumeAgentStream({
           toolCallId: part.toolCallId,
           toolName: part.toolName,
           input: part.input,
+          googleThoughtSignature: part.providerMetadata?.google?.thoughtSignature,
           summary: formatToolCallSummary(part.toolName, part.input),
           stepId: lifecycle?.currentStepId,
         });
@@ -763,7 +776,8 @@ async function consumeAgentStream({
     usage: normalizeAiUsage(usage),
     totalUsage: normalizeAiUsage(totalUsage),
     timing: { ...timing, duration_ms: Date.now() - streamStartedAt },
-    responseMessages: steps.flatMap((step) => step.response.messages),
+    // Each SDK step contains the cumulative response, not just its delta.
+    responseMessages: steps.at(-1)?.response.messages || [],
     modelCallCount: steps.length,
   };
 }
@@ -926,6 +940,7 @@ function buildAgentLoopResult({ state, runId, usage, summaryState }) {
     content: state.content,
     thinking: state.thinking,
     toolCalls: state.toolCalls,
+    transcript: state.transcript,
     usage,
     // Conversation summary to persist on the assistant reply so the next turn
     // resumes from it instead of re-summarizing the same middle turns.
@@ -997,9 +1012,8 @@ function groupAiMessageBlocks(messages) {
   const blocks = [];
   for (let index = 0; index < messages.length; index += 1) {
     const block = [messages[index]];
-    if (hasNativeToolCall(messages[index]) && messages[index + 1]?.role === 'tool') {
-      block.push(messages[index + 1]);
-      index += 1;
+    if (hasNativeToolCall(messages[index])) {
+      while (messages[index + 1]?.role === 'tool') block.push(messages[++index]);
     }
     blocks.push(block);
   }

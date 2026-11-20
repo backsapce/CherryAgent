@@ -1,4 +1,5 @@
 import { wrapLanguageModel } from 'ai';
+import { projectAssistantHistory } from '../agent/sessionHistory.js';
 import {
   normalizeReasoningEffort,
   resolveReasoningLevels,
@@ -143,34 +144,26 @@ export function normalizeAiUsage(usage) {
 }
 
 /** Convert CherryAgent's persisted message shape into AI SDK ModelMessages. */
-export function toModelMessages(messages = []) {
-  return messages
-    .filter((message) => message?.role === 'system' || message?.role === 'user' || message?.role === 'assistant')
-    .map((message) => {
-      if (message.role === 'system') {
-        return { role: 'system', content: String(message.content || '') };
-      }
+export function toModelMessages(messages = [], { contextWindow } = {}) {
+  const usedCallIds = new Set();
+  return messages.flatMap((message) => {
+    if (message?.role === 'assistant') return projectAssistantHistory(message, { contextWindow, usedCallIds });
+    if (message?.role === 'system') return [{ role: 'system', content: String(message.content || '') }];
+    if (message?.role !== 'user') return [];
 
-      if (message.role === 'assistant') {
-        return { role: 'assistant', content: String(message.content || '') };
-      }
-
-      const images = Array.isArray(message.images) ? message.images : [];
-      if (images.length === 0) {
-        return { role: 'user', content: String(message.content || '') };
-      }
-
-      const parts = images
-        .filter((image) => image?.dataUrl)
-        .map((image) => ({
-          type: 'image',
-          // AI SDK image parts accept base64 data, not a complete data URL.
-          image: imageData(image.dataUrl),
-          mediaType: imageMediaType(image.dataUrl, image.type),
-        }));
-      if (message.content) parts.push({ type: 'text', text: String(message.content) });
-      return { role: 'user', content: parts.length ? parts : String(message.content || '') };
-    });
+    const parts = (Array.isArray(message.images) ? message.images : [])
+      .filter((image) => image?.dataUrl)
+      .map((image) => ({
+        type: 'image',
+        // AI SDK image parts accept base64 data, not a complete data URL.
+        image: imageData(image.dataUrl),
+        mediaType: imageMediaType(image.dataUrl, image.type),
+      }));
+    const content = String(message.content || '');
+    if (!parts.length) return [{ role: 'user', content }];
+    if (content) parts.push({ type: 'text', text: content });
+    return [{ role: 'user', content: parts }];
+  });
 }
 
 async function createCompatibleModel({ provider, apiKey, baseUrl, model, headers }) {

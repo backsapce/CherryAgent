@@ -290,6 +290,7 @@ function registerToolCall(state, event) {
   const existing = findTool(state, event);
   return withTool(state, event, {
     parsedArgs: event.input ?? {},
+    ...(event.googleThoughtSignature ? { googleThoughtSignature: event.googleThoughtSignature } : {}),
     rawArgs: serializeInput(event.input),
     command: commandFor(event.toolName, event.input),
     summary: event.summary,
