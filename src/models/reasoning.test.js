@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { reasoningLevels, reasoningProviderOptions, resolveReasoningLevels, resetReasoningCatalog } from './reasoning.js';
+import { reasoningLevels, reasoningProviderOptions, summaryProviderOptions, resolveReasoningLevels, resetReasoningCatalog } from './reasoning.js';
 import { normalizeLlmConfig } from './llmSettingsSchema.js';
 import { createLanguageModel } from './ai.js';
 
@@ -21,19 +21,109 @@ test('provider options use the native effort shape', () => {
   assert.deepEqual(reasoningProviderOptions('openrouter', 'low'), { openrouter: { reasoning: { effort: 'low' } } });
 });
 
-test('model factory passes configured effort to the API request', async () => {
-  const originalFetch = globalThis.fetch;
-  let body;
-  globalThis.fetch = async (url, init) => {
-    if (String(url).includes('models.dev')) return Response.json({ openai: { models: { 'gpt-5': { reasoning: true } } } });
-    body = JSON.parse(init.body);
-    return Response.json({ id: 'test', created: 1, model: 'gpt-5', choices: [{ index: 0, message: { role: 'assistant', content: 'OK' }, finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } });
+/** Responses-API shaped generate result with a single assistant text message. */
+function responsesGeneratePayload(model) {
+  return {
+    id: 'resp_test',
+    object: 'response',
+    created_at: 1,
+    status: 'completed',
+    model,
+    output: [{
+      type: 'message',
+      id: 'msg_1',
+      role: 'assistant',
+      status: 'completed',
+      content: [{ type: 'output_text', text: 'OK', annotations: [] }],
+    }],
+    usage: { input_tokens: 1, output_tokens: 1, output_tokens_details: { reasoning_tokens: 0 }, total_tokens: 2 },
   };
+}
+
+/**
+ * Stub fetch with a models.dev catalog and capture the API request.
+ * Returns the captured { url, body } of the first non-catalog request.
+ */
+async function stubFetchAndGenerate({ catalog, config }) {
+  const originalFetch = globalThis.fetch;
+  let request;
+  globalThis.fetch = async (url, init) => {
+    if (String(url).includes('models.dev')) return Response.json(catalog);
+    request = { url: String(url), body: JSON.parse(init.body) };
+    return Response.json(responsesGeneratePayload(config.model));
+  };
+  resetReasoningCatalog();
   try {
-    const model = await createLanguageModel({ provider: 'openai', apiKey: 'test', model: 'gpt-5', reasoningEffort: 'high' });
+    const model = await createLanguageModel(config);
     await model.doGenerate({ prompt: [{ role: 'user', content: [{ type: 'text', text: 'Hello' }] }] });
-    assert.equal(body.reasoning_effort, 'high');
-  } finally { globalThis.fetch = originalFetch; }
+  } finally {
+    globalThis.fetch = originalFetch;
+    resetReasoningCatalog();
+  }
+  return request;
+}
+
+test('model factory passes configured effort and summary request to the Responses API', async () => {
+  const request = await stubFetchAndGenerate({
+    catalog: { openai: { models: { 'gpt-5': { reasoning: true } } } },
+    config: { provider: 'openai', apiKey: 'test', model: 'gpt-5', reasoningEffort: 'high' },
+  });
+  assert.ok(request.url.endsWith('/responses'), `expected /responses, got ${request.url}`);
+  assert.deepEqual(request.body.reasoning, { effort: 'high', summary: 'auto' });
+});
+
+test('reasoning summaries are requested for reasoning models without a configured effort', async () => {
+  // gpt-sol is absent from the SDK's built-in reasoning-model allowlist, so
+  // this also proves forceReasoning keeps the reasoning block in the body.
+  const request = await stubFetchAndGenerate({
+    catalog: { openai: { models: { 'gpt-5.6-sol': { reasoning: true, reasoning_options: [{ type: 'effort', values: ['low', 'medium', 'high'] }] } } } },
+    config: { provider: 'openai', apiKey: 'test', model: 'gpt-5.6-sol' },
+  });
+  assert.ok(request.url.endsWith('/responses'), `expected /responses, got ${request.url}`);
+  assert.deepEqual(request.body.reasoning, { summary: 'auto' });
+});
+
+test('non-reasoning OpenAI models send no reasoning block', async () => {
+  const request = await stubFetchAndGenerate({
+    catalog: { openai: { models: { 'gpt-4o': { reasoning: false } } } },
+    config: { provider: 'openai', apiKey: 'test', model: 'gpt-4o' },
+  });
+  assert.equal(request.body.reasoning, undefined);
+});
+
+test('custom OpenAI base URLs keep the Chat Completions protocol', async () => {
+  const originalFetch = globalThis.fetch;
+  let request;
+  globalThis.fetch = async (url, init) => {
+    if (String(url).includes('models.dev')) {
+      return Response.json({ openai: { models: { 'gpt-5': { reasoning: true } } } });
+    }
+    request = { url: String(url), body: JSON.parse(init.body) };
+    return Response.json({
+      id: 'chatcmpl_test', object: 'chat.completion', created: 1, model: 'gpt-5',
+      choices: [{ index: 0, message: { role: 'assistant', content: 'OK' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    });
+  };
+  resetReasoningCatalog();
+  try {
+    const model = await createLanguageModel({
+      provider: 'openai', apiKey: 'test', model: 'gpt-5',
+      baseUrl: 'https://proxy.example/v1', reasoningEffort: 'high',
+    });
+    await model.doGenerate({ prompt: [{ role: 'user', content: [{ type: 'text', text: 'Hello' }] }] });
+  } finally {
+    globalThis.fetch = originalFetch;
+    resetReasoningCatalog();
+  }
+  assert.ok(request.url.endsWith('/chat/completions'), `expected /chat/completions, got ${request.url}`);
+  assert.equal(request.body.reasoning_effort, 'high');
+});
+
+test('summary provider options only apply to the OpenAI provider', () => {
+  assert.deepEqual(summaryProviderOptions('openai'), { openai: { reasoningSummary: 'auto', forceReasoning: true } });
+  assert.deepEqual(summaryProviderOptions('openrouter'), {});
+  assert.deepEqual(summaryProviderOptions('custom-openai'), {});
 });
 
 test('reasoning levels come from models.dev reasoning_options when available', () => {
@@ -65,7 +155,10 @@ test('effort normalization accepts the full models.dev effort range', () => {
 });
 
 test('extended efforts reach native provider options', () => {
-  assert.deepEqual(reasoningProviderOptions('openai', 'xhigh'), { openai: { reasoningEffort: 'xhigh' } });
+  assert.deepEqual(
+    reasoningProviderOptions('openai', 'xhigh'),
+    { openai: { reasoningEffort: 'xhigh', reasoningSummary: 'auto', forceReasoning: true } },
+  );
   assert.deepEqual(reasoningProviderOptions('anthropic', 'max'), { anthropic: { thinking: { type: 'adaptive' }, effort: 'max' } });
   assert.deepEqual(reasoningProviderOptions('gemini', 'minimal'), { google: { thinkingConfig: { thinkingLevel: 'minimal', includeThoughts: true } } });
 });

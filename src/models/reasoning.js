@@ -79,5 +79,23 @@ export function reasoningProviderOptions(provider, effort) {
   if (provider === 'anthropic') return { anthropic: { thinking: { type: 'adaptive' }, effort } };
   if (provider === 'gemini') return { google: { thinkingConfig: { thinkingLevel: effort, includeThoughts: true } } };
   if (provider === 'openrouter') return { openrouter: { reasoning: { effort } } };
+  if (provider === 'openai') {
+    return { openai: { reasoningEffort: effort, ...reasoningSummaryOptions.openai } };
+  }
   return { [provider]: { reasoningEffort: effort } };
+}
+
+// Hosted OpenAI reasoning models (gpt-5.x, gpt-sol, o-series) hide the raw
+// chain of thought; the Responses API can instead stream a summarized
+// "thinking overview" (the bold-headed summaries the ChatGPT UI shows).
+// `summary: 'auto'` asks for those summaries, and `forceReasoning` bypasses
+// the SDK's built-in model-id allowlist (o1/o3/o4-mini/gpt-5), which does not
+// know newer families like gpt-sol and would silently drop the reasoning
+// parameters from the request body.
+const reasoningSummaryOptions = { openai: { reasoningSummary: 'auto', forceReasoning: true } };
+
+/** Provider options that request reasoning summaries without an effort level. */
+export function summaryProviderOptions(provider) {
+  if (provider !== 'openai') return {};
+  return reasoningSummaryOptions;
 }

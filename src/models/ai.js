@@ -1,5 +1,10 @@
 import { wrapLanguageModel } from 'ai';
-import { resolveReasoningLevels, reasoningProviderOptions } from './reasoning.js';
+import {
+  normalizeReasoningEffort,
+  resolveReasoningLevels,
+  reasoningProviderOptions,
+  summaryProviderOptions,
+} from './reasoning.js';
 /**
  * AI SDK model factory.
  *
@@ -26,13 +31,27 @@ const DEFAULT_BASE_URLS = {
 export async function createLanguageModel(config = {}) {
   config = { ...config };
   const model = await createBaseLanguageModel(config);
-  if (!config.reasoningEffort) return model;
+  const effort = normalizeReasoningEffort(config.reasoningEffort);
+  // OpenAI models get middleware even without a configured effort so that
+  // reasoning summaries ("thinking overview") are always requested.
+  if (!effort && config.provider !== 'openai') return model;
   return wrapLanguageModel({ model, middleware: {
     specificationVersion: 'v3',
     async transformParams({ params }) {
       const levels = await resolveReasoningLevels(config.provider, config.model);
-      if (!levels.includes(config.reasoningEffort)) return params;
-      const options = reasoningProviderOptions(config.provider, config.reasoningEffort);
+      const sources = [
+        ...(effort && levels.includes(effort) ? [reasoningProviderOptions(config.provider, effort)] : []),
+        ...(levels.length > 0 ? [summaryProviderOptions(config.provider)] : []),
+      ];
+      // Both option sets are keyed by provider name; merge them per key so
+      // summary options do not overwrite the effort options.
+      const options = {};
+      for (const source of sources) {
+        for (const [key, value] of Object.entries(source)) {
+          options[key] = { ...options[key], ...value };
+        }
+      }
+      if (Object.keys(options).length === 0) return params;
       const providerOptions = { ...params.providerOptions };
       for (const [key, value] of Object.entries(options)) {
         providerOptions[key] = { ...value, ...providerOptions[key] };
@@ -40,6 +59,21 @@ export async function createLanguageModel(config = {}) {
       return { ...params, providerOptions };
     },
   } });
+}
+
+/**
+ * Hosted OpenAI reasoning models (gpt-5.x, gpt-sol, o-series) never expose
+ * their chain of thought through Chat Completions; only the Responses API
+ * streams reasoning summaries. Custom base URLs usually point at chat-only
+ * proxies, so they keep the Chat Completions protocol.
+ */
+function isOfficialOpenAiEndpoint(baseUrl) {
+  if (!baseUrl) return true;
+  try {
+    return new URL(baseUrl).hostname === 'api.openai.com';
+  } catch {
+    return false;
+  }
 }
 
 async function createBaseLanguageModel(config = {}) {
@@ -53,8 +87,10 @@ async function createBaseLanguageModel(config = {}) {
   }
 
   switch (provider) {
-    case 'openai':
-      return (await import('@ai-sdk/openai')).createOpenAI({ apiKey, ...(baseUrl ? { baseURL: baseUrl } : {}) }).chat(model);
+    case 'openai': {
+      const openai = (await import('@ai-sdk/openai')).createOpenAI({ apiKey, ...(baseUrl ? { baseURL: baseUrl } : {}) });
+      return isOfficialOpenAiEndpoint(baseUrl) ? openai.responses(model) : openai.chat(model);
+    }
     case 'anthropic':
       return (await import('@ai-sdk/anthropic')).createAnthropic({
         apiKey,
