@@ -1153,6 +1153,7 @@ const MessageRow = memo(function MessageRow({
   previousMessage,
   isLastMessage,
   streaming,
+  stopping,
   avatar,
   userInitial,
   assistantInitial,
@@ -1268,7 +1269,7 @@ const MessageRow = memo(function MessageRow({
                 type="button"
                 className="message-edit-submit"
                 onClick={submitEditMessage}
-                disabled={!editingText.trim() || streaming}
+                disabled={!editingText.trim() || streaming || stopping}
               >
                 {t('message.submitEdit')}
               </button>
@@ -1279,7 +1280,7 @@ const MessageRow = memo(function MessageRow({
             {isLiveStreamingMessage
               ? renderMarkdownElement(displayContent, { streamBlur: true })
               : cachedMarkdown(displayContent)}
-            {msg.role === 'assistant' && displayContent.startsWith('Error:') && !streaming && onRetry && (
+            {msg.role === 'assistant' && displayContent.startsWith('Error:') && !streaming && !stopping && onRetry && (
               <button className="retry-btn" onClick={() => onRetry()} title={t('message.retry')}>Retry</button>
             )}
           </>
@@ -1292,7 +1293,7 @@ const MessageRow = memo(function MessageRow({
               type="button"
               className="message-action-btn message-edit-btn"
               onClick={() => startEditMessage(msg)}
-              disabled={streaming}
+              disabled={streaming || stopping}
               title={t('message.edit')}
               aria-label={t('message.edit')}
             >
@@ -1307,7 +1308,7 @@ const MessageRow = memo(function MessageRow({
               type="button"
               className="message-action-btn message-fork-btn"
               onClick={() => onForkMessage(msg.id)}
-              disabled={streaming}
+              disabled={streaming || stopping}
               title={t('message.fork')}
               aria-label={t('message.fork')}
             >
@@ -1351,6 +1352,7 @@ const MessagePanel = forwardRef(({
   onForkMessage,
   onRetry,
   streaming,
+  stopping = false,
   inputDisabled = false,
   onStopStreaming,
   llmConfig,
@@ -1920,7 +1922,7 @@ const MessagePanel = forwardRef(({
   };
 
   const startEditMessage = (msg) => {
-    if (streaming || msg.role !== 'user') return;
+    if (streaming || stopping || msg.role !== 'user') return;
     setEditingMessageId(msg.id);
     setEditingText(stripLegacyContextFileSummary(msg.content, msg.contextFiles));
   };
@@ -1932,7 +1934,7 @@ const MessagePanel = forwardRef(({
 
   const submitEditMessage = () => {
     const text = editingText.trim();
-    if (!text || streaming || !editingMessageId) return;
+    if (!text || streaming || stopping || !editingMessageId) return;
     onEditMessage?.(editingMessageId, text);
     cancelEditMessage();
   };
@@ -2439,6 +2441,7 @@ const MessagePanel = forwardRef(({
               previousMessage={visibleMessages[index - 1]}
               isLastMessage={msg === messages[messages.length - 1]}
               streaming={streaming}
+              stopping={stopping}
               avatar={avatar}
               userInitial={userInitial}
               assistantInitial={assistantInitial}
@@ -2457,7 +2460,7 @@ const MessagePanel = forwardRef(({
               handleCopyMessage={rowActions.handleCopyMessage}
               onForkMessage={onForkMessage ? rowActions.onForkMessage : null}
               onRetry={onRetry ? rowActions.onRetry : null}
-              onStopStreaming={onStopStreaming ? rowActions.onStopStreaming : null}
+              onStopStreaming={onStopStreaming && !stopping ? rowActions.onStopStreaming : null}
             />
           ))}
           </>
@@ -2639,10 +2642,10 @@ const MessagePanel = forwardRef(({
           <button
             className="send-btn"
             onClick={streaming ? onStopStreaming : handleSend}
-            disabled={!streaming && (inputDisabled || (!input.trim() && pendingImages.length === 0 && pendingContextFiles.length === 0))}
-            title={streaming ? t('message.stop') : t('message.send')}
+            disabled={stopping || (!streaming && (inputDisabled || (!input.trim() && pendingImages.length === 0 && pendingContextFiles.length === 0)))}
+            title={t(stopping ? 'message.stopping' : streaming ? 'message.stop' : 'message.send')}
           >
-            {streaming ? (
+            {streaming || stopping ? (
               <Stop width={20} height={20} />
             ) : (
               <Send width={20} height={20} />
@@ -2650,7 +2653,11 @@ const MessagePanel = forwardRef(({
           </button>
         </div>
         <div className="message-input-hint">
-          <span>{t('message.inputHint', { modifier: /Mac|iPhone|iPad/.test(navigator.userAgent) ? '⌘' : 'Ctrl' })}</span>
+          {stopping ? (
+            <span role="status">{t('message.stopping')}</span>
+          ) : (
+            <span>{t('message.inputHint', { modifier: /Mac|iPhone|iPad/.test(navigator.userAgent) ? '⌘' : 'Ctrl' })}</span>
+          )}
           <div className="hint-right">
             {agents.filter((a) => a.status === 'connected').length > 0 && (() => {
               const connectedAgents = agents.filter((a) => a.status === 'connected');

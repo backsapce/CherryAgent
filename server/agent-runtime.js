@@ -23,7 +23,7 @@ import { TOOL_PARAMETER_SCHEMAS, formatCommandResult } from '../src/agent/toolSc
 import { buildFileEditResult } from '../src/agent/fileEdit.js';
 import { fetchWebPage, formatWebPageForModel } from '../src/agent/webFetch.js';
 import { formatSearchResults, runWebSearch } from '../src/models/search.js';
-import { imageMimeFromPath, splitFilePath, waitForSettlement } from '../src/utils/misc.js';
+import { imageMimeFromPath, splitFilePath } from '../src/utils/misc.js';
 
 const MAX_MESSAGES = 2_000;
 const MAX_EVENT_BYTES = 20 * 1024 * 1024;
@@ -55,10 +55,6 @@ const MAX_MESSAGES_CONTENT_BYTES = 12 * 1024 * 1024;
 const MAX_CONTINUE_IMAGES = 32;
 const MAX_CONTINUE_IMAGES_CHARS = 64 * 1024 * 1024;
 const CANCELLED_RUN_ID_TTL_MS = 10 * 60_000;
-// Keep the server grace period below the browser's 5 second cancellation
-// deadline. If an upstream provider ignores AbortSignal, the durable run must
-// still become terminal so it cannot lock the conversation forever.
-const RUN_ABORT_WAIT_MS = 3_000;
 const SANDBOX_ATTACHMENTS_MARKER = 'Sandbox attachment files (available to shell commands and sandbox file tools):';
 // A durable sandbox run races tool execution against the model-stream timeouts
 // (see DEFAULT_SANDBOX_MODEL_TIMEOUT in loop.js: 90s inter-chunk, 5min per step)
@@ -154,7 +150,6 @@ export function createAgentRunManager({
   runAgent = runAgentLoop,
   createModel = createLanguageModel,
   waitUntilWakeup = waitForWakeup,
-  abortWaitMs = RUN_ABORT_WAIT_MS,
   idleTimeoutMs = 0,
   maxEventBytes = MAX_EVENT_BYTES,
   runRetentionMs = DEFAULT_RUN_RETENTION_MS,
@@ -168,6 +163,7 @@ export function createAgentRunManager({
   const runs = new Map();
   const cancelledRunIds = new Map();
   const snapshotWrites = new WeakMap();
+  const cancellations = new WeakMap();
   loadPersistedRuns(runsDir, runs, { retentionMs: runRetentionMs });
   for (const run of runs.values()) run.durableStatus = run.status;
 
@@ -445,6 +441,7 @@ export function createAgentRunManager({
           run.wakeup = pendingWakeup;
           run.updatedAt = new Date().toISOString();
           await persist(run);
+          throwIfRunCancelled(run);
           notifyStatus(run);
           // A superseding continue() resolves this race early and replaces
           // the wake-up prompt with the caller's message.
@@ -467,6 +464,7 @@ export function createAgentRunManager({
           run.resume = null;
           run.updatedAt = new Date().toISOString();
           await persist(run);
+          throwIfRunCancelled(run);
           notifyStatus(run);
           runtimeMessages = [
             ...runtimeMessages,
@@ -537,7 +535,6 @@ export function createAgentRunManager({
                 if (
                   activeTurnToken !== turnToken
                   || run.status !== 'running'
-                  || run.cancelRequested
                   || !run.controller
                   || run.controller.signal.aborted
                 ) return;
@@ -597,7 +594,7 @@ export function createAgentRunManager({
       run.status = 'idle';
     } catch (error) {
       if (!run.forceTerminated) {
-        run.status = run.cancelRequested ? 'aborted' : 'error';
+        run.status = 'error';
         run.error = error?.message || String(error);
         run.resume = null;
       }
@@ -616,9 +613,8 @@ export function createAgentRunManager({
           }
           console.error(`Failed to persist terminal agent run ${run.id}:`, error);
         }
+        if (!run.forceTerminated) notifyStatus(run);
       }
-      notifyStatus(run);
-      run.resolveCompletion();
     }
   };
 
@@ -635,11 +631,7 @@ export function createAgentRunManager({
       };
       const input = run.resume.input;
       run.controller = new AbortController();
-      run.cancelRequested = false;
       run.forceTerminated = false;
-      let resolveCompletion;
-      run.completion = new Promise((resolve) => { resolveCompletion = resolve; });
-      run.resolveCompletion = resolveCompletion;
       Promise.resolve().then(() => executeRunLoop(run, input, resume));
     }
   };
@@ -667,7 +659,7 @@ export function createAgentRunManager({
     }
     const activeRun = [...runs.values()].find((candidate) => (
       candidate.sessionId === sessionId
-      && ['running', 'waiting'].includes(candidate.status)
+      && (['running', 'waiting'].includes(candidate.status) || cancellations.has(candidate))
     ));
     if (activeRun) {
       const error = new Error(`Session ${sessionId} already has an active agent run (${activeRun.id}).`);
@@ -686,8 +678,6 @@ export function createAgentRunManager({
         console.error(`Failed to persist superseded agent run ${candidate.id}:`, error);
       });
     }
-    let resolveCompletion;
-    const completion = new Promise((resolve) => { resolveCompletion = resolve; });
     const run = {
       id,
       sessionId,
@@ -701,19 +691,16 @@ export function createAgentRunManager({
       result: null,
       error: null,
       controller: new AbortController(),
-      cancelRequested: false,
       forceTerminated: false,
-      completion,
-      resolveCompletion,
       eventBytes: 0,
     };
     runs.set(id, run);
-    run.starting = persist(run).then(() => {
-      if (!run.forceTerminated) Promise.resolve().then(() => executeRunLoop(run, input, null));
+    run.starting = persist(run).then(async () => {
+      if (run.forceTerminated) await cancellations.get(run);
+      else Promise.resolve().then(() => executeRunLoop(run, input, null));
       return serializeRun(run);
     }, (error) => {
-      runs.delete(id);
-      run.resolveCompletion();
+      if (!run.forceTerminated) runs.delete(id);
       throw error;
     });
     run.starting.finally(() => { run.starting = null; }).catch(() => {});
@@ -773,8 +760,10 @@ export function createAgentRunManager({
       // Materialize before flipping the wake-early switch: the loop consumes
       // wakeupOverrideMessage as soon as the race resolves, so the attachment
       // files must already be in place.
+      const resume = run.resume;
       const overrideMessage = await materializeContinuedMessage();
-      applyContinueOverrides(run.resume.input, input);
+      assertContinuationCurrent(run, 'waiting', resume);
+      applyContinueOverrides(resume.input, input);
       run.replyId = input.replyId ? String(input.replyId) : run.replyId;
       run.wakeupOverride = message;
       run.wakeupOverrideMessage = overrideMessage;
@@ -797,9 +786,10 @@ export function createAgentRunManager({
       error.code = 'HISTORY_DIVERGED';
       throw error;
     }
-    applyContinueOverrides(resume.input, input);
-
+    const continuedInput = { ...resume.input };
+    applyContinueOverrides(continuedInput, input);
     const continuedMessage = await materializeContinuedMessage();
+    assertContinuationCurrent(run, 'idle', resume);
     const runtimeMessages = [
       ...resume.runtimeMessages,
       assistantHistoryMessage(resume.result),
@@ -812,7 +802,6 @@ export function createAgentRunManager({
     }
 
     run.replyId = input.replyId ? String(input.replyId) : run.replyId;
-    run.cancelRequested = false;
     run.forceTerminated = false;
     run.status = 'running';
     run.durableStatus = 'running';
@@ -820,13 +809,14 @@ export function createAgentRunManager({
     run.result = null;
     run.wakeup = null;
     run.updatedAt = new Date().toISOString();
-    let resolveCompletion;
-    run.completion = new Promise((resolve) => { resolveCompletion = resolve; });
-    run.resolveCompletion = resolveCompletion;
     run.controller = new AbortController();
     await persist(run);
+    if (run.forceTerminated) {
+      await cancellations.get(run);
+      return serializeRun(run);
+    }
     notifyStatus(run);
-    Promise.resolve().then(() => executeRunLoop(run, resume.input, {
+    Promise.resolve().then(() => executeRunLoop(run, continuedInput, {
       runtimeMessages,
       turnNumber: resume.turnNumber,
       result: resume.result,
@@ -903,32 +893,37 @@ export function createAgentRunManager({
           wakeup: null,
         });
       }
-      run.cancelRequested = true;
-      run.controller?.abort();
-      // Providers and external tools are expected to honor AbortSignal, but an
-      // unhealthy implementation must neither hold DELETE open nor keep this
-      // session permanently locked. Late callbacks are already fenced by
-      // cancelRequested/status/controller checks in onEvent, and tool dispatch
-      // checks the aborted signal before starting new work.
-      return waitForSettlement(run.completion, abortWaitMs).then(async (settled) => {
-        if (!settled && ['running', 'waiting'].includes(run.status)) {
-          // Make the forced terminal snapshot immutable. The detached provider
-          // may eventually settle, but it no longer owns this durable state.
-          run.forceTerminated = true;
-          run.status = 'aborted';
-          run.error = 'Agent run aborted after the cancellation grace period.';
-          run.wakeup = null;
-          run.updatedAt = new Date().toISOString();
-          run.controller = null;
-          try {
-            await persist(run);
-          } catch (error) {
-            console.error(`Failed to persist force-aborted agent run ${run.id}:`, error);
-          }
-          run.resolveCompletion?.();
-        }
+      const pending = cancellations.get(run);
+      if (pending) return pending;
+      const canCancel = ['running', 'waiting', 'idle'].includes(run.status);
+      const needsPersist = run.forceTerminated && run.durableStatus !== 'aborted';
+      if (!canCancel && !needsPersist) {
+        // The loop may have finished just as Stop arrived; report its actual
+        // terminal status, not the previous snapshot still visible on disk.
+        const writes = snapshotWrites.get(run);
+        return writes?.pending ? writes.tail.then(() => serializeRun(run)) : serializeRun(run);
+      }
+
+      // Revoke the turn's ownership before signalling abort. Initialization,
+      // providers and the event log may still be blocked; none of them should
+      // hold cancellation open or get to publish a different terminal state.
+      run.forceTerminated = true;
+      run.status = 'aborted';
+      run.error = 'Agent run aborted';
+      run.wakeup = null;
+      run.resume = null;
+      run.wakeEarly = null;
+      run.wakeupOverride = run.wakeupOverrideMessage = null;
+      run.updatedAt = new Date().toISOString();
+      const controller = run.controller;
+      run.controller = null;
+      const cancellation = persist(run).then(() => {
+        notifyStatus(run);
         return serializeRun(run);
-      });
+      }).finally(() => cancellations.delete(run));
+      cancellations.set(run, cancellation);
+      controller?.abort();
+      return cancellation;
     },
   };
 }
@@ -980,8 +975,15 @@ function createActivityWatchdog(timeoutMs, onTimeout) {
   };
 }
 
+function assertContinuationCurrent(run, status, resume) {
+  if (run.status === status && run.resume === resume) return;
+  const error = new Error(`Agent run is ${run.status} and cannot continue.`);
+  error.statusCode = 409;
+  throw error;
+}
+
 function throwIfRunCancelled(run) {
-  if (!run.cancelRequested && run.controller && !run.controller.signal.aborted) return;
+  if (run.controller && !run.controller.signal.aborted) return;
   throw createRunAbortError();
 }
 
@@ -1689,7 +1691,6 @@ function loadPersistedRuns(runsDir, runs, { retentionMs = DEFAULT_RUN_RETENTION_
         events,
         eventBytes: eventLog?.byteLength ?? 0,
         controller: null,
-        completion: Promise.resolve(),
       });
     } catch {
       // Ignore a damaged individual run record; other runs remain recoverable.

@@ -783,17 +783,18 @@ function App() {
 
   const activeSession = sessions.find((c) => c.id === activeSessionId);
   const messages = activeSession?.messages || [];
+  const activeSessionStopping = stoppingSessionIds.has(activeSessionId);
   const activeSessionStreaming = Boolean(
-    activeSessionId
+    activeSessionId && !activeSessionStopping
     && (
       runningSessionIds.has(activeSessionId)
       || pendingSessionIds.has(activeSessionId)
-      || stoppingSessionIds.has(activeSessionId)
       || activeSession?.remoteRun?.status === 'running'
     )
   );
+  const activeSessionBusy = activeSessionStreaming || activeSessionStopping;
   const activeSessionLoading = Boolean(activeSessionId && loadingSessionIds.has(activeSessionId));
-  const activeSessionReconnect = activeSessionId ? remoteReconnects[activeSessionId] : null;
+  const activeSessionReconnect = activeSessionId && !activeSessionStopping ? remoteReconnects[activeSessionId] : null;
   const activeSessionAgentLoading = Boolean(
     !agentListReady && (!activeSessionId || activeSession?.agentId)
   );
@@ -1834,16 +1835,15 @@ function App() {
             remoteRun = { id: opts.resumeRunId, status: 'running' };
           } else {
             const requestedRunId = `run-${globalThis.crypto?.randomUUID?.() || generateId()}`;
-            // Keep the id locally before POST resolves so Stop/Delete/Reset can
-            // address a run that the server accepted while the response is still
-            // in flight.
-            run.remoteRun = { id: requestedRunId, url: sandboxUrl };
             const runtimeContext = await prepareAgentRuntimeContext(sessionAgentId, {
               runtimeMode: 'sandbox',
               agentUrl: sandboxUrl,
               signal: run.controller.signal,
             });
             assertRunActive();
+            // During local preparation there is no server run to cancel. Once
+            // the request can be sent, keep its id even before the reply arrives.
+            run.remoteRun = { id: requestedRunId, url: sandboxUrl };
             try {
               remoteRun = await startRemoteAgentRun(sandboxUrl, {
                 runId: requestedRunId,
@@ -2792,7 +2792,7 @@ function App() {
   }, [runningSessionIds, pendingSessionIds, stoppingSessionIds, messageQueue, sendMessageNow, sessions]);
 
   const handleEditMessage = useCallback((messageId, text) => {
-    if (activeSessionAgentLoading || factoryResetInProgressRef.current || activeSessionStreaming || !activeSessionId) return;
+    if (activeSessionAgentLoading || factoryResetInProgressRef.current || activeSessionBusy || !activeSessionId) return;
     const sessionId = activeSessionId;
     const session = sessions.find((c) => c.id === sessionId);
     if (!session) return;
@@ -2826,14 +2826,14 @@ function App() {
     );
 
     scheduleStreamResponse(sessionId, trimmedMessages);
-  }, [activeSessionId, activeSessionStreaming, activeSessionAgentLoading, sessions, scheduleStreamResponse]);
+  }, [activeSessionId, activeSessionBusy, activeSessionAgentLoading, sessions, scheduleStreamResponse]);
 
   // Copy the conversation up to and including the picked message into a new
   // session and switch to it. Message ids are preserved so anchored summary
   // states carried by the copied messages stay valid; run-scoped session
   // fields (wakeups, remoteRun) deliberately do not carry over.
   const handleForkMessage = useCallback(async (messageId) => {
-    if (activeSessionAgentLoading || factoryResetInProgressRef.current || activeSessionStreaming || !activeSessionId) return;
+    if (activeSessionAgentLoading || factoryResetInProgressRef.current || activeSessionBusy || !activeSessionId) return;
     const sessionId = activeSessionId;
     const session = sessions.find((c) => c.id === sessionId);
     if (!session) return;
@@ -2886,7 +2886,7 @@ function App() {
     if (session.llmProfileId) {
       setSessionLlmProfiles((prev) => ({ ...prev, [newSession.id]: session.llmProfileId }));
     }
-  }, [activeSessionId, activeSessionStreaming, activeSessionAgentLoading, sessions, flushPendingSessionSave, messageQueue]);
+  }, [activeSessionId, activeSessionBusy, activeSessionAgentLoading, sessions, flushPendingSessionSave, messageQueue]);
 
   const handleSelectLLM = useCallback(async (profileId) => {
     const nextProfileId = profileId || null;
@@ -3151,7 +3151,7 @@ function App() {
         onEditMessage={handleEditMessage}
         onForkMessage={handleForkMessage}
         onRetry={() => {
-          if (activeSessionAgentLoading || factoryResetInProgressRef.current || activeSessionStreaming) return;
+          if (activeSessionAgentLoading || factoryResetInProgressRef.current || activeSessionBusy) return;
           const sessionId = activeSessionId;
           const session = sessions.find((c) => c.id === sessionId);
           if (!session) return;
@@ -3173,6 +3173,7 @@ function App() {
           scheduleStreamResponse(sessionId, trimmed, startAfter ? { startAfter } : {});
         }}
         streaming={activeSessionStreaming}
+        stopping={activeSessionStopping}
         inputDisabled={activeSessionLoading || activeSessionAgentLoading}
         onStopStreaming={handleStopStreaming}
         llmConfig={llm.getActiveConfig(activeLlmProfileId)}

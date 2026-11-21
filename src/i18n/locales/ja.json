@@ -66,6 +66,7 @@
     "submitEdit": "送信",
     "placeholder": "メッセージを入力...",
     "stop": "停止",
+    "stopping": "停止中…",
     "runInterrupted": "エージェントサーバーがこの実行中に再起動したため（例：デプロイによる更新）、実行は完了前に中断されました。",
     "send": "送信",
     "inputHint": "Enter で送信、{modifier}+Enter で改行、/ でスキル選択",

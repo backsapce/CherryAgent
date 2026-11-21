@@ -55,6 +55,22 @@ export function splitFilePath(path) {
   return { parent: normalized.startsWith('/') ? `/${parent}` : parent, name };
 }
 
+/** Stop waiting on shared or non-cancellable work without cancelling its other callers. */
+export async function waitWithAbort(promise, signal) {
+  if (!signal) return promise;
+  let onAbort;
+  const aborted = new Promise((_resolve, reject) => {
+    onAbort = () => reject(signal.reason);
+    if (signal.aborted) onAbort();
+    else signal.addEventListener('abort', onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([aborted, promise]);
+  } finally {
+    signal.removeEventListener('abort', onAbort);
+  }
+}
+
 /** Race a promise against a timeout; true when it settled, false on timeout. */
 export async function waitForSettlement(promise, timeoutMs) {
   let timerId;

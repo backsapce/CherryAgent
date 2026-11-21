@@ -15,6 +15,8 @@
  * their own resume policies (the durable-run reattach flow already does).
  */
 
+import { waitWithAbort } from '../utils/misc.js';
+
 const LOOPBACK_HOSTNAMES = new Set(['localhost', '127.0.0.1', '::1']);
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
@@ -487,7 +489,8 @@ export class AgentWsConnection {
    */
   async request(type, payload = {}, options = {}) {
     const { timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS, signal } = options;
-    await this.ready();
+    signal?.throwIfAborted();
+    await waitWithAbort(this.ready(), signal);
     if (signal?.aborted) {
       throw signal.reason instanceof Error ? signal.reason : new DOMException('Request aborted', 'AbortError');
     }

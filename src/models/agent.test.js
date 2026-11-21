@@ -5,6 +5,7 @@ import {
   abortRemoteAgentRun,
   assertRemoteAgentRunProtocol,
   checkAgentAvailable,
+  continueRemoteAgentRun,
   executeCommand,
   getCommand,
   getRemoteAgentRun,
@@ -434,6 +435,29 @@ test('remote run cancel and state address the run by id', async () => {
     const state = AgentServerMock.instances[0].sentRequest('run.state');
     assert.equal(state.payload.runId, 'run-one');
     assert.equal(state.payload.after, 34);
+  } finally {
+    restore();
+  }
+});
+
+test('stopping an in-flight run continuation does not wait for the server reply', async () => {
+  let receive;
+  const received = new Promise((resolve) => { receive = resolve; });
+  AgentServerMock.reset({
+    'run.continue': (payload) => {
+      receive(payload);
+      return new Promise(() => {});
+    },
+  });
+  const restore = installBrowserMocks(AgentServerMock, async () => { throw new Error('no http'); });
+  try {
+    const controller = new AbortController();
+    const continuing = continueRemoteAgentRun('https://sandbox.example', {
+      runId: 'run-continuing', message: 'next turn',
+    }, controller.signal);
+    assert.equal((await received).runId, 'run-continuing');
+    controller.abort();
+    await assert.rejects(continuing, { name: 'AbortError' });
   } finally {
     restore();
   }

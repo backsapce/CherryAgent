@@ -1321,7 +1321,6 @@ test('sandbox abort unlocks a session when a provider ignores cancellation', asy
   try {
     let receivedSignal;
     const manager = createManager(runsDir, {
-      abortWaitMs: 10,
       runAgent({ signal }) {
         receivedSignal = signal;
         return new Promise(() => {});
@@ -1430,7 +1429,6 @@ test('a cancelled sandbox run drops detached late events and cannot become compl
   try {
     let activeRun;
     const manager = createManager(runsDir, {
-      abortWaitMs: 10,
       runAgent(options) {
         return new Promise((resolve) => {
           activeRun = { ...options, resolve };
@@ -2275,14 +2273,13 @@ test('a failed async append prevents later publication and idle success', async 
   }
 });
 
-test('forced cancellation stays bounded while an event write is stalled', async () => {
+test('cancellation is confirmed without waiting for a stalled event write', async () => {
   const runsDir = mkdtempSync(join(tmpdir(), 'cherry-stalled-events-'));
   const gate = deferred();
   const entered = deferred();
   const appended = deferred();
   try {
     const manager = createManager(runsDir, {
-      abortWaitMs: 5,
       createModel: () => ({}),
       appendEventLog: async () => {
         entered.resolve();
@@ -2332,7 +2329,6 @@ test('initial async snapshot gates model execution and cancellation wins the que
   const written = [];
   try {
     const manager = createManager(runsDir, {
-      abortWaitMs: 5,
       createModel: () => ({}),
       runAgent: async () => { calls += 1; return { content: 'should not run' }; },
       writeSnapshot: async (path, json, options) => {
@@ -2358,8 +2354,8 @@ test('initial async snapshot gates model execution and cancellation wins the que
     await entered.promise;
     assert.equal(calls, 0);
     const aborting = manager.abort(input.runId);
-    // The event loop stays available while the disk write is blocked.
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    // Cancellation is queued behind the initial snapshot, but ownership is
+    // revoked before it commits, so the model must not start.
     gate.resolve();
     await starting;
     const aborted = await aborting;
@@ -2416,7 +2412,6 @@ test('cancellation releases a run promptly even when the agent ignores abort', a
   const gate = deferred();
   let lateEmit;
   const manager = createManager(runsDir, {
-    abortWaitMs: 10_000,
     createModel: () => ({}),
     runAgent: async ({ onEvent }) => {
       lateEmit = onEvent;
@@ -2450,6 +2445,101 @@ test('cancellation releases a run promptly even when the agent ignores abort', a
   } finally {
     clearTimeout(timer);
     gate.resolve();
+    rmSync(runsDir, { recursive: true, force: true });
+  }
+});
+
+test('stop during model initialization releases the session before the model is ready', async () => {
+  const runsDir = mkdtempSync(join(tmpdir(), 'cherry-startup-abort-'));
+  const initializing = deferred();
+  const model = deferred();
+  const replacementEntered = deferred();
+  let modelCalls = 0;
+  let agentCalls = 0;
+  const manager = createManager(runsDir, {
+    createModel() {
+      if (++modelCalls !== 1) return {};
+      initializing.resolve();
+      return model.promise;
+    },
+    runAgent: async () => {
+      agentCalls += 1;
+      replacementEntered.resolve();
+      return { content: 'replacement' };
+    },
+  });
+  const input = {
+    sessionId: 'session-startup-abort',
+    messages: [{ role: 'user', content: 'hello' }],
+    modelConfig: { provider: 'openai', model: 'test', apiKey: 'test' },
+  };
+  let timer;
+  try {
+    const run = await manager.start(input);
+    const statuses = [];
+    manager.subscribe(run.id, 0, ({ run: snapshot }) => {
+      if (snapshot) statuses.push(snapshot.status);
+    });
+    await initializing.promise;
+    const stopping = manager.abort(run.id);
+    assert.strictEqual(manager.abort(run.id), stopping);
+    const stopped = await Promise.race([
+      stopping,
+      new Promise((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error('stop waited for model initialization')), 500);
+      }),
+    ]);
+    assert.equal(stopped.status, 'aborted');
+    assert.deepEqual(statuses, ['running', 'aborted']);
+    const replacement = await manager.start(input);
+    await replacementEntered.promise;
+    model.resolve({});
+    await waitForRunStatus(manager, replacement.id, 'idle');
+    assert.equal(agentCalls, 1);
+    assert.equal(manager.get(run.id).status, 'aborted');
+    assert.deepEqual(statuses, ['running', 'aborted']);
+  } finally {
+    clearTimeout(timer);
+    model.resolve({});
+    rmSync(runsDir, { recursive: true, force: true });
+  }
+});
+
+test('stop during continuation attachment preparation cannot resurrect the run', async () => {
+  const runsDir = mkdtempSync(join(tmpdir(), 'cherry-continue-abort-'));
+  const writing = deferred();
+  const attachment = deferred();
+  let calls = 0;
+  const manager = createManager(runsDir, {
+    createModel: () => ({}),
+    runAgent: async () => { calls += 1; return { content: 'first reply' }; },
+    writeFile: async () => {
+      writing.resolve();
+      await attachment.promise;
+    },
+  });
+  try {
+    const run = await manager.start({
+      sessionId: 'session-continue-abort',
+      messages: [{ role: 'user', content: 'first message' }],
+      modelConfig: { provider: 'openai', model: 'test', apiKey: 'test' },
+    });
+    await waitForRunStatus(manager, run.id, 'idle');
+    const continuing = manager.continue({
+      runId: run.id,
+      replyId: 'second-reply',
+      message: 'second message',
+      images: [{ name: 'test.png', dataUrl: 'data:image/png;base64,AA==' }],
+    });
+    await writing.promise;
+    const stopped = await manager.abort(run.id);
+    assert.equal(stopped.status, 'aborted');
+    attachment.resolve();
+    await assert.rejects(continuing, /aborted and cannot continue/);
+    assert.equal(calls, 1);
+    assert.equal(manager.get(run.id).status, 'aborted');
+  } finally {
+    attachment.resolve();
     rmSync(runsDir, { recursive: true, force: true });
   }
 });

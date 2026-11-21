@@ -317,9 +317,10 @@ export async function startRemoteAgentRun(url, input, signalOrOptions) {
  * conversation. Rejects with HISTORY_DIVERGED when the server's copy no
  * longer matches; callers fall back to a full startRemoteAgentRun.
  */
-export function continueRemoteAgentRun(url, payload, options = {}) {
+export function continueRemoteAgentRun(url, payload, signalOrOptions) {
   assertRemoteAgentRuntime(url);
-  return connFor(url).request('run.continue', payload, options);
+  const controls = requestControls(signalOrOptions, AGENT_RUN_REQUEST_TIMEOUT_MS);
+  return connFor(url).request('run.continue', payload, controls);
 }
 
 /** Read new events and the current durable result for a background run. */
