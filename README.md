@@ -78,6 +78,15 @@ Supported provider types:
 - DeepSeek
 - Custom OpenAI-compatible endpoint
 
+For **Custom OpenAI-compatible**, enter the full endpoint (for example,
+`https://gateway.example/v1/responses`) to use the Responses API. A base URL
+like `https://gateway.example/v1` still uses Chat Completions; a full
+`/chat/completions` URL also works. Model discovery uses the sibling `/models`
+endpoint. If the gateway does not expose it, enter the model ID manually.
+Responses uses CherryAgent's own conversation history and sends `store: false`;
+no gateway-side conversation state is required. Images and reasoning summaries
+require support from the selected model and gateway.
+
 API keys are saved in browser storage through the app config. Existing LLM
 profiles are migrated automatically while keeping their IDs, so session and
 agent selections continue to work.

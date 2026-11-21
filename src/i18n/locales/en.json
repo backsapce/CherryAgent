@@ -191,7 +191,8 @@
     "optional": "optional",
     "customEndpoint": "Custom endpoint URL...",
     "baseUrlHint": "Leave empty to use the default endpoint.",
-    "baseUrlRequiredHint": "Enter the base URL of your OpenAI-compatible API endpoint (e.g. http://localhost:11434/v1)."
+    "baseUrlRequiredHint": "Enter the base URL of your OpenAI-compatible API endpoint (e.g. http://localhost:11434/v1).",
+    "customOpenAiEndpointHint": "Enter a base URL for Chat Completions (e.g. https://gateway.example/v1), or the full /responses endpoint for the Responses API."
   },
   "sandboxSettings": {
     "title": "Sandbox Hosts",

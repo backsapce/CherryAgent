@@ -104,3 +104,23 @@ test('lazy provider construction preserves the selected profile across loading',
   }
   await assert.rejects(createLanguageModel({}), /provider, API key, and model/);
 });
+
+test('custom bare and explicit Chat Completions URLs still use the chat request format', async (t) => {
+  let request;
+  t.mock.method(globalThis, 'fetch', async (url, init) => {
+    request = { url: String(url), body: JSON.parse(init.body) };
+    return Response.json({ choices: [{ index: 0, message: { role: 'assistant', content: 'OK' }, finish_reason: 'stop' }] });
+  });
+  for (const [baseUrl, url] of [
+    ['https://gateway.example/v1/', 'https://gateway.example/v1/chat/completions'],
+    ['https://gateway.example/v1/chat/completions', 'https://gateway.example/v1/chat/completions'],
+    ['https://gateway.example/v1?path=/responses', 'https://gateway.example/v1/chat/completions?path=/responses'],
+    ['https://responses', 'https://responses/chat/completions'],
+  ]) {
+    const model = await createLanguageModel({ provider: 'custom-openai', apiKey: 'test', model: 'alias', baseUrl });
+    await model.doGenerate({ prompt: [{ role: 'user', content: [{ type: 'text', text: 'Hello' }] }] });
+    assert.equal(request.url, url);
+    assert.deepEqual(request.body.messages, [{ role: 'user', content: 'Hello' }]);
+    assert.equal(request.body.input, undefined);
+  }
+});

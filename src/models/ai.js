@@ -1,5 +1,6 @@
 import { wrapLanguageModel } from 'ai';
 import { projectAssistantHistory } from '../agent/sessionHistory.js';
+import { resolveCustomOpenAiEndpoint } from './providers/custom-openai.js';
 import {
   normalizeReasoningEffort,
   resolveReasoningLevels,
@@ -31,20 +32,27 @@ const DEFAULT_BASE_URLS = {
  */
 export async function createLanguageModel(config = {}) {
   config = { ...config };
-  const model = await createBaseLanguageModel(config);
+  const endpoint = config.provider === 'custom-openai' ? resolveCustomOpenAiEndpoint(config.baseUrl) : null;
+  const customResponses = endpoint?.api === 'responses';
+  const model = await createBaseLanguageModel(config, endpoint);
   const effort = normalizeReasoningEffort(config.reasoningEffort);
-  // OpenAI models get middleware even without a configured effort so that
-  // reasoning summaries ("thinking overview") are always requested.
-  if (!effort && config.provider !== 'openai') return model;
+  // Responses models also request reasoning summaries when the model supports them.
+  if (!effort && config.provider !== 'openai' && !customResponses) return model;
   return wrapLanguageModel({ model, middleware: {
     specificationVersion: 'v3',
+    ...(customResponses ? { wrapStream: streamCustomResponses } : {}),
     async transformParams({ params }) {
-      const levels = await resolveReasoningLevels(config.provider, config.model);
+      const levels = await resolveReasoningLevels(config.provider, config.model, {
+        // Private aliases may not appear in models.dev. Honor an explicit
+        // Responses effort in that case, within the OpenAI SDK's value range.
+        allowUnknown: customResponses && Boolean(effort),
+      });
+      const optionProvider = customResponses ? 'openai' : config.provider;
       const sources = [
-        ...(effort && levels.includes(effort) ? [reasoningProviderOptions(config.provider, effort)] : []),
-        ...(levels.length > 0 ? [summaryProviderOptions(config.provider)] : []),
+        ...(effort && levels.includes(effort) ? [reasoningProviderOptions(optionProvider, effort)] : []),
+        ...(levels.length > 0 ? [summaryProviderOptions(optionProvider)] : []),
       ];
-      // Both option sets are keyed by provider name; merge them per key so
+      // Merge the option sets per provider name so
       // summary options do not overwrite the effort options.
       const options = {};
       for (const source of sources) {
@@ -52,14 +60,56 @@ export async function createLanguageModel(config = {}) {
           options[key] = { ...options[key], ...value };
         }
       }
-      if (Object.keys(options).length === 0) return params;
+      if (!customResponses && Object.keys(options).length === 0) return params;
       const providerOptions = { ...params.providerOptions };
       for (const [key, value] of Object.entries(options)) {
         providerOptions[key] = { ...value, ...providerOptions[key] };
       }
-      return { ...params, providerOptions };
+      if (!customResponses) return { ...params, providerOptions };
+      // CherryAgent owns the history (including compaction and wake-ups), so
+      // never replace it with provider-side conversation/item references.
+      const { previousResponseId: _previousResponseId, conversation: _conversation, ...openai } = providerOptions.openai || {};
+      providerOptions.openai = {
+        ...openai,
+        store: false,
+        ...(params.tools?.length ? { parallelToolCalls: false } : {}),
+      };
+      return {
+        ...params,
+        providerOptions,
+        // Agent schemas have optional arguments. Prevent Responses from
+        // implicitly normalizing them into strict, all-required schemas.
+        tools: params.tools?.map((tool) => tool.type === 'function'
+          ? { ...tool, strict: tool.strict ?? false }
+          : tool),
+      };
     },
   } });
+}
+
+// The SDK maps response.failed to a finish reason but omits the provider's
+// error. Surface it as a stream error rather than accepting partial output or
+// retrying an API failure as if it were an empty response.
+async function streamCustomResponses({ model, params }) {
+  const result = await model.doStream({ ...params, includeRawChunks: true });
+  return {
+    ...result,
+    stream: result.stream.pipeThrough(new TransformStream({
+      transform(part, controller) {
+        if (part.type === 'raw') {
+          const event = part.rawValue;
+          if (event?.type === 'response.failed' || event?.type === 'error') {
+            const error = event.response?.error ?? event.error ?? event;
+            controller.enqueue({ type: 'error', error: new Error(error.message || 'The Responses endpoint reported a stream failure.') });
+            controller.terminate();
+            return;
+          }
+          if (!params.includeRawChunks) return;
+        }
+        controller.enqueue(part);
+      },
+    })),
+  };
 }
 
 /**
@@ -77,7 +127,7 @@ function isOfficialOpenAiEndpoint(baseUrl) {
   }
 }
 
-async function createBaseLanguageModel(config = {}) {
+async function createBaseLanguageModel(config, endpoint) {
   const provider = config.provider;
   const apiKey = config.apiKey;
   const model = config.model;
@@ -118,8 +168,17 @@ async function createBaseLanguageModel(config = {}) {
       });
     case 'qwen':
     case 'deepseek':
-    case 'custom-openai':
       return createCompatibleModel({ provider, apiKey, baseUrl, model });
+    case 'custom-openai': {
+      if (!endpoint?.baseUrl) throw new Error(`A base URL is required for ${provider}.`);
+      const fetch = endpoint.query ? (url, init) => globalThis.fetch(`${url}${endpoint.query}`, init) : undefined;
+      if (endpoint.api === 'responses') {
+        return (await import('@ai-sdk/openai')).createOpenAI({
+          name: provider, apiKey, baseURL: endpoint.baseUrl, fetch,
+        }).responses(model);
+      }
+      return createCompatibleModel({ provider, apiKey, baseUrl: endpoint.baseUrl, model, fetch });
+    }
     default:
       throw new Error(`Unsupported AI SDK provider: ${provider}`);
   }
@@ -166,7 +225,7 @@ export function toModelMessages(messages = [], { contextWindow } = {}) {
   });
 }
 
-async function createCompatibleModel({ provider, apiKey, baseUrl, model, headers }) {
+async function createCompatibleModel({ provider, apiKey, baseUrl, model, headers, fetch }) {
   if (!baseUrl) {
     throw new Error(`A base URL is required for ${provider}.`);
   }
@@ -175,6 +234,7 @@ async function createCompatibleModel({ provider, apiKey, baseUrl, model, headers
     apiKey,
     baseURL: baseUrl,
     includeUsage: true,
+    ...(fetch ? { fetch } : {}),
     ...(headers ? { headers } : {}),
   }).chatModel(model);
 }

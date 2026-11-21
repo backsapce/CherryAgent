@@ -191,7 +191,8 @@
     "optional": "任意",
     "customEndpoint": "カスタムエンドポイント URL...",
     "baseUrlHint": "デフォルトのエンドポイントを使用する場合は空欄のままにしてください。",
-    "baseUrlRequiredHint": "OpenAI 互換 API エンドポイントのベース URL を入力してください（例: http://localhost:11434/v1）。"
+    "baseUrlRequiredHint": "OpenAI 互換 API エンドポイントのベース URL を入力してください（例: http://localhost:11434/v1）。",
+    "customOpenAiEndpointHint": "Chat Completions にはベース URL（例: https://gateway.example/v1）、Responses API には /responses まで含む URL を入力してください。"
   },
   "sandboxSettings": {
     "title": "サンドボックスホスト",

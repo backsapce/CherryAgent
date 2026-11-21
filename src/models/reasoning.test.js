@@ -182,3 +182,14 @@ test('resolveReasoningLevels prefers catalog effort lists over heuristics', asyn
     assert.deepEqual(await resolveReasoningLevels('gemini', 'gemini-3-pro-preview'), ['low', 'high']);
   } finally { globalThis.fetch = originalFetch; }
 });
+
+test('custom Responses can generate a summary with native options, and does not force reasoning for a text model', async () => {
+  const catalog = { openai: { models: { 'new-alias': { reasoning: true }, 'gpt-4o': { reasoning: false } } } };
+  const config = { provider: 'custom-openai', apiKey: 'test', baseUrl: 'https://gateway.example/v1/responses' };
+  for (const [model, reasoning] of [['new-alias', { summary: 'auto' }], ['gpt-4o', undefined], ['private-text-alias', undefined]]) {
+    const request = await stubFetchAndGenerate({ catalog, config: { ...config, model } });
+    assert.equal(request.url, config.baseUrl);
+    assert.equal(request.body.store, false);
+    assert.deepEqual(request.body.reasoning, reasoning);
+  }
+});

@@ -17,7 +17,8 @@ function nullableString(value) {
 
 function normalizeBaseUrl(value) {
   const text = nullableString(value);
-  return text ? text.replace(/\/+$/, '') : null;
+  // Normalize only the URL path, not trailing slashes inside a query value.
+  return text ? text.replace(/^([^?#]*?)\/+(?=[?#]|$)/, '$1') : null;
 }
 
 function normalizeApiKey(value) {

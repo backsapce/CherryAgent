@@ -57,7 +57,10 @@ export function reasoningLevels(provider, model, info) {
   return [];
 }
 
-export async function resolveReasoningLevels(provider, model) {
+export async function resolveReasoningLevels(provider, model, { allowUnknown = false } = {}) {
+  // Private gateway aliases need an opt-in effort picker even without
+  // catalog metadata. With no selected effort, the request stays automatic.
+  const fallback = allowUnknown ? PROVIDER_EFFORTS[provider] || [] : [];
   try {
     const data = await catalog();
     const providerId = { gemini: 'google', qwen: 'alibaba' }[provider] || provider;
@@ -67,8 +70,8 @@ export async function resolveReasoningLevels(provider, model) {
       const bare = id.includes('/') ? id.slice(id.indexOf('/') + 1) : id;
       info = Object.values(data).map((entry) => entry.models?.[id] || entry.models?.[bare]).find(Boolean);
     }
-    return reasoningLevels(provider, id, info);
-  } catch { return []; }
+    return info ? reasoningLevels(provider, id, info) : fallback;
+  } catch { return fallback; }
 }
 
 /** Test hook: drop the cached models.dev response so fetch can be re-mocked. */

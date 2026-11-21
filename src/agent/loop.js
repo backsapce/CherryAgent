@@ -305,7 +305,7 @@ export async function runAgentLoop(opts) {
     throwIfAborted(signal);
     if (!hasMeaningfulAgentOutput(state)) {
       const error = new Error(
-        `Model returned an empty response after retrying. Verify that ${opts.model || 'the selected model'} supports chat-completion streaming, or select another model.`
+        `Model returned an empty response after retrying. Verify that ${opts.model || 'the selected model'} supports streaming on the configured endpoint, or select another model.`
       );
       error.name = 'EmptyModelResponseError';
       error.code = 'EMPTY_MODEL_RESPONSE';
@@ -1196,6 +1196,9 @@ function rewriteImageContentRejection(error, apiMessages, model) {
 
 function isContentPartTypeRejection(message) {
   const text = String(message || '');
+  if (/\binput_image\b/i.test(text) && /unsupported|not support|not allowed|invalid|only (?:accepts?|supports?)|不支持|非法/i.test(text)) {
+    return true;
+  }
   if (!/messages\.content(?:\[\d+\])?\.type/i.test(text)) return false;
   // Gateways either name the rejected image part or list text as the only
   // accepted content type (Chinese and English variants).

@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { useI18n } from '../../i18n/context';
 import config from '../../config/config';
 import { resolveReasoningLevels } from '../../models/reasoning';
+import { resolveCustomOpenAiEndpoint } from '../../models/providers/custom-openai';
 
 export default function ReasoningSelect({ profile, onChange, defaultSetting = false }) {
   const { t } = useI18n();
@@ -13,15 +14,17 @@ export default function ReasoningSelect({ profile, onChange, defaultSetting = fa
   const [error, setError] = useState('');
   const provider = profile?.provider;
   const model = profile?.model;
+  const allowUnknown = provider === 'custom-openai' && resolveCustomOpenAiEndpoint(profile.baseUrl)?.api === 'responses';
   useEffect(() => {
     if (!provider || !model) return;
     let cancelled = false;
-    resolveReasoningLevels(provider, model).then((levels) => {
-      if (!cancelled) setCapability({ provider, model, levels });
+    resolveReasoningLevels(provider, model, { allowUnknown }).then((levels) => {
+      if (!cancelled) setCapability({ provider, model, allowUnknown, levels });
     });
     return () => { cancelled = true; };
-  }, [provider, model]);
-  const levels = capability?.provider === provider && capability?.model === model && capability?.levels ? capability.levels : [];
+  }, [provider, model, allowUnknown]);
+  const levels = capability?.provider === provider && capability?.model === model && capability?.allowUnknown === allowUnknown
+    ? capability.levels : [];
   if (!levels.length) return null;
   const configuredValue = defaultSetting ? defaultEffort : profile?.reasoningEffort || '';
   const value = levels.includes(configuredValue) ? configuredValue : '';

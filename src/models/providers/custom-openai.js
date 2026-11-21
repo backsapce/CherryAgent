@@ -6,6 +6,26 @@
 
 const MODELS = [];
 
+/** A complete generation URL selects the protocol; a bare base URL defaults to Chat Completions. */
+export function resolveCustomOpenAiEndpoint(value) {
+  const endpoint = String(value || '').trim();
+  if (!endpoint) return null;
+  // Keep query parameters (e.g. api-version) after the resource path, not
+  // between the base URL and the path the SDK appends. Fragments aren't sent.
+  const [location] = endpoint.split('#', 1);
+  const queryStart = location.indexOf('?');
+  const query = queryStart < 0 ? '' : location.slice(queryStart);
+  const path = (queryStart < 0 ? location : location.slice(0, queryStart)).replace(/\/+$/, '');
+  const resource = path.replace(/^https?:\/\/[^/]+/i, '').match(/\/(responses|chat\/completions)$/);
+  const baseUrl = resource ? path.slice(0, -resource[0].length) : path;
+  return {
+    api: resource?.[1] === 'responses' ? 'responses' : 'chat',
+    baseUrl,
+    query,
+    modelsUrl: `${baseUrl}/models${query}`,
+  };
+}
+
 export default {
   id: 'custom-openai',
   name: 'Custom OpenAI-compatible',
@@ -15,9 +35,9 @@ export default {
   requiresBaseUrl: true,
 
   async listModels(config) {
-    const baseUrl = (config.baseUrl || '').replace(/\/+$/, '');
-    if (!baseUrl) return [];
-    const res = await fetch(`${baseUrl}/models`, {
+    const endpoint = resolveCustomOpenAiEndpoint(config.baseUrl);
+    if (!endpoint) return [];
+    const res = await fetch(endpoint.modelsUrl, {
       headers: { Authorization: `Bearer ${config.apiKey}` },
     });
     if (!res.ok) throw new Error(`Custom endpoint models error ${res.status}`);

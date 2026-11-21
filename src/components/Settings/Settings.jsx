@@ -1311,7 +1311,7 @@ const Settings = ({
                       <p className="settings-hint">{t('llmSettings.contextWindowHint')}</p>
                       <ReasoningSelect
                         defaultSetting
-                        profile={{ provider: selectedProviderConfig?.type, model: settingsForm.model.trim() }}
+                        profile={{ provider: selectedProviderConfig?.type, baseUrl: selectedProviderConfig?.baseUrl, model: settingsForm.model.trim() }}
                       />
                     </>
                   )}
@@ -1397,7 +1397,8 @@ const Settings = ({
                         onChange={(e) => setProviderForm((form) => ({ ...form, baseUrl: e.target.value }))}
                       />
                       <p className="settings-hint">
-                        {editingProviderType?.requiresBaseUrl ? t('llmSettings.baseUrlRequiredHint') : t('llmSettings.baseUrlHint')}
+                        {t(providerForm.type === 'custom-openai' ? 'llmSettings.customOpenAiEndpointHint'
+                          : editingProviderType?.requiresBaseUrl ? 'llmSettings.baseUrlRequiredHint' : 'llmSettings.baseUrlHint')}
                       </p>
                     </>
                   )}

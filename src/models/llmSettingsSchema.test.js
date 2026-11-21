@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { findDuplicateLlm, normalizeLlmSettings } from './llmSettingsSchema.js';
+import { findDuplicateLlm, normalizeLlmSettings, normalizeProviderConfig } from './llmSettingsSchema.js';
 
 const providerTypes = {
   openai: {
@@ -132,4 +132,13 @@ test('findDuplicateLlm collapses repeated saves of the same new profile', () => 
     )?.id,
     'x',
   );
+});
+
+
+test('provider config retains custom generation paths and query values', () => {
+  const provider = normalizeProviderConfig('gateway', {
+    type: 'custom-openai',
+    baseUrl: 'https://gateway.example/v1/responses/?route=tenant/',
+  }, providerTypes);
+  assert.equal(provider.baseUrl, 'https://gateway.example/v1/responses?route=tenant/');
 });
