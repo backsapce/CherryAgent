@@ -1,9 +1,9 @@
 /*
  * CherryAgent – Theme Tokens
  *
- * All visual colors are expressed as CSS custom-properties so that
- * switching between light / dark (or any future custom theme) only
- * requires swapping values on the root element.
+ * Source of truth for app-owned colors, including fixed palettes below.
+ * Vite reads the first --color-bg value (the default theme) for the PWA
+ * manifest and initial browser chrome; App updates chrome on theme changes.
  *
  * The active theme is set via a `data-theme` attribute on <html>:
  *   <html data-theme="dark">   → dark palette
@@ -82,6 +82,9 @@
   /* Misc */
   --color-error:           #ff6b6b;
   --color-error-hover:     #ff4d4d;
+  --color-danger-fill:     #ff6b6b;
+  --color-danger-fill-hover: #ff8585;
+  --color-danger-fg:       #201012;
   --color-success:         #9dc2a5;
   --color-warning:         #f6b84b;
   --color-hint:            #657386;
@@ -95,10 +98,20 @@
   --color-scrollbar-thumb: #2a3a4d;
   --color-scrollbar-track: transparent;
 
-  /* Offline banner */
+  /* Warning surfaces and text */
   --color-warning-bg:     #332b00;
   --color-warning-text:   #ffd666;
   --color-warning-border: #554400;
+
+  /* Message code highlighting */
+  --code-comment: #8b949e;
+  --code-keyword: #ff7b72;
+  --code-string: #a5d6ff;
+  --code-title: #d2a8ff;
+  --code-number: #79c0ff;
+  --code-attribute: #ffa657;
+  --code-section: #7ee787;
+  --code-meta: #c9d1d9;
 }
 
 /* ─── Light theme ─────────────────────────────────────────────── */
@@ -169,6 +182,9 @@
   /* Misc */
   --color-error:           #ff3b30;
   --color-error-hover:     #d63027;
+  --color-danger-fill:     #c62828;
+  --color-danger-fill-hover: #a92121;
+  --color-danger-fg:       #fff;
   --color-success:         #568065;
   --color-warning:         #d98917;
   --color-hint:            #9aa6b5;
@@ -182,10 +198,20 @@
   --color-scrollbar-thumb: #c7c7cc;
   --color-scrollbar-track: transparent;
 
-  /* Offline banner */
+  /* Warning surfaces and text */
   --color-warning-bg:     #fff3cd;
   --color-warning-text:   #856404;
   --color-warning-border: #ffc107;
+
+  /* Message code highlighting */
+  --code-comment: #6e7781;
+  --code-keyword: #cf222e;
+  --code-string: #0a3069;
+  --code-title: #8250df;
+  --code-number: #0550ae;
+  --code-attribute: #953800;
+  --code-section: #116329;
+  --code-meta: #57606a;
 }
 
 :root {
@@ -232,4 +258,32 @@
   --usage-pie-6: #1b7c83;
   --usage-pie-7: #bf3989;
   --usage-pie-8: #6e7781;
+}
+
+/* Fixed palettes: media controls and file-type badges keep their contrast
+   regardless of the page theme. Editor chrome matches CodeMirror One Dark. */
+:root {
+  --color-warning-fg: #20180a;
+  --color-toggle-thumb: #fff;
+  --color-attachment-fg: #fff;
+  --color-attachment-file: #667085;
+  --color-attachment-pdf: #e5484d;
+  --color-attachment-spreadsheet: #1f9d68;
+  --color-attachment-document: #3976d3;
+  --color-attachment-archive: #ad6f1e;
+  --color-attachment-label-bg: rgba(0, 0, 0, 0.3);
+
+  --color-editor-bg: #282c34;
+  --color-editor-gutter: #21252b;
+  --color-editor-gutter-border: #3e4451;
+  --color-editor-muted: #abb2bf;
+
+  --color-preview-fg: #fff;
+  --color-preview-scrim: rgba(0, 0, 0, 0.82);
+  --color-preview-shadow: rgba(0, 0, 0, 0.38);
+  --color-preview-panel: #0d121a;
+  --color-preview-active: #a79fdf;
+  --color-preview-active-fg: #14121f;
+  --color-preview-success: #6ec4d3;
+  --color-preview-error: #ffc5c5;
 }

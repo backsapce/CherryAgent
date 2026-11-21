@@ -742,23 +742,20 @@ function App() {
     };
   }, [loaded, refreshFromStorage, beginSessionStorageBarrier]);
 
-  // Apply theme to <html> and listen for system preference changes
+  // Keep the CSS theme and browser chrome in sync with user/system settings.
   useEffect(() => {
-    const applyTheme = (mode) => {
-      if (mode === 'system') {
-        const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-        document.documentElement.setAttribute('data-theme', prefersDark ? 'dark' : 'light');
-      } else {
-        document.documentElement.setAttribute('data-theme', mode);
-      }
+    const mql = window.matchMedia('(prefers-color-scheme: dark)');
+    const applyTheme = () => {
+      const root = document.documentElement;
+      root.setAttribute('data-theme', theme === 'system' ? (mql.matches ? 'dark' : 'light') : theme);
+      const themeColor = getComputedStyle(root).getPropertyValue('--color-bg').trim();
+      if (themeColor) document.querySelector('meta[name="theme-color"]')?.setAttribute('content', themeColor);
     };
 
-    applyTheme(theme);
-
-    const mql = window.matchMedia('(prefers-color-scheme: dark)');
-    const handler = () => { if (theme === 'system') applyTheme('system'); };
-    mql.addEventListener('change', handler);
-    return () => mql.removeEventListener('change', handler);
+    applyTheme();
+    if (theme !== 'system') return;
+    mql.addEventListener('change', applyTheme);
+    return () => mql.removeEventListener('change', applyTheme);
   }, [theme]);
 
   const handleThemeChange = useCallback(async (newTheme) => {
@@ -3065,13 +3062,13 @@ function App() {
       {initError ? (
         <div style={{ width: 'min(560px, calc(100vw - 32px))', textAlign: 'center' }}>
           <h2 style={{ margin: '0 0 8px' }}>Local data needs recovery</h2>
-          <p style={{ color: '#e53935', margin: 0 }}>Initialization failed: {initError}</p>
+          <p style={{ color: 'var(--color-error)', margin: 0 }}>Initialization failed: {initError}</p>
           <p style={{ margin: '12px 0 0', lineHeight: 1.5 }}>
             Reloading may help after a temporary storage error. If it does not,
             export a backup before resetting. Recovery backups can contain API keys and other private data.
           </p>
           {startupRecoveryError && (
-            <p role="alert" style={{ color: '#e53935', margin: '12px 0 0' }}>
+            <p role="alert" style={{ color: 'var(--color-error)', margin: '12px 0 0' }}>
               {startupRecoveryError}
             </p>
           )}
@@ -3079,21 +3076,21 @@ function App() {
             <button
               disabled={Boolean(startupRecoveryBusy)}
               onClick={() => window.location.reload()}
-              style={{ padding: '8px 16px', borderRadius: 6, border: '1px solid #ccc', background: '#fff', cursor: startupRecoveryBusy ? 'default' : 'pointer' }}
+              style={{ padding: '8px 16px', borderRadius: 6, border: '1px solid var(--color-border)', background: 'var(--color-surface)', cursor: startupRecoveryBusy ? 'default' : 'pointer' }}
             >
               Reload
             </button>
             <button
               disabled={Boolean(startupRecoveryBusy)}
               onClick={handleStartupBackup}
-              style={{ padding: '8px 16px', borderRadius: 6, border: '1px solid #888', background: '#fff', cursor: startupRecoveryBusy ? 'default' : 'pointer' }}
+              style={{ padding: '8px 16px', borderRadius: 6, border: '1px solid var(--color-border-subtle)', background: 'var(--color-surface)', cursor: startupRecoveryBusy ? 'default' : 'pointer' }}
             >
               {startupRecoveryBusy === 'export' ? 'Exporting backup…' : 'Export recovery backup'}
             </button>
             <button
               disabled={Boolean(startupRecoveryBusy)}
               onClick={handleStartupFactoryReset}
-              style={{ padding: '8px 16px', borderRadius: 6, border: '1px solid #c62828', background: '#c62828', color: '#fff', cursor: startupRecoveryBusy ? 'default' : 'pointer' }}
+              style={{ padding: '8px 16px', borderRadius: 6, border: '1px solid var(--color-danger-fill)', background: 'var(--color-danger-fill)', color: 'var(--color-danger-fg)', cursor: startupRecoveryBusy ? 'default' : 'pointer' }}
             >
               {startupRecoveryBusy === 'reset' ? 'Resetting…' : 'Factory reset'}
             </button>

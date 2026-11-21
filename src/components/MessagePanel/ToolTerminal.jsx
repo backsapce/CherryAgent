@@ -28,6 +28,17 @@ function fitAndFollowTerminal(terminal, fitAddon, wasAtBottom) {
   }
 }
 
+function terminalTheme(container) {
+  const style = getComputedStyle(container);
+  const foreground = style.getPropertyValue('--color-text-content').trim();
+  return {
+    background: style.getPropertyValue('--color-bg').trim(),
+    foreground,
+    cursor: foreground,
+    selectionBackground: style.getPropertyValue('--color-accent').trim(),
+  };
+}
+
 const ToolTerminal = ({ output }) => {
   const containerRef = useRef(null);
   const terminalRef = useRef(null);
@@ -35,9 +46,8 @@ const ToolTerminal = ({ output }) => {
   const previousOutputRef = useRef('');
 
   useEffect(() => {
-    if (!containerRef.current) return;
-
-    const style = getComputedStyle(containerRef.current);
+    const container = containerRef.current;
+    if (!container) return;
     const terminal = new Terminal({
       convertEol: true,
       cursorBlink: false,
@@ -47,16 +57,11 @@ const ToolTerminal = ({ output }) => {
       fontSize: 12,
       lineHeight: 1.45,
       scrollback: 5000,
-      theme: {
-        background: style.getPropertyValue('--color-bg').trim() || '#0f172a',
-        foreground: style.getPropertyValue('--color-text-content').trim() || '#e5e7eb',
-        cursor: style.getPropertyValue('--color-text-content').trim() || '#e5e7eb',
-        selectionBackground: style.getPropertyValue('--color-accent').trim() || '#a79fdf',
-      },
+      theme: terminalTheme(container),
     });
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
-    terminal.open(containerRef.current);
+    terminal.open(container);
     fitAddon.fit();
 
     terminalRef.current = terminal;
@@ -69,9 +74,15 @@ const ToolTerminal = ({ output }) => {
         fitAndFollowTerminal(terminalRef.current, fitAddonRef.current, wasAtBottom);
       });
     });
-    resizeObserver.observe(containerRef.current);
+    resizeObserver.observe(container);
+
+    const themeObserver = new MutationObserver(() => {
+      terminal.options.theme = terminalTheme(container);
+    });
+    themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 
     return () => {
+      themeObserver.disconnect();
       resizeObserver.disconnect();
       terminal.dispose();
       terminalRef.current = null;

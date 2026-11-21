@@ -148,7 +148,7 @@
 
 .required-tag {
   font-size: 10px;
-  color: var(--color-error, #e53935);
+  color: var(--color-error);
   margin-left: 2px;
 }
 
@@ -269,8 +269,8 @@
 }
 
 .settings-secondary.danger {
-  color: var(--color-error, #e53935);
-  border-color: color-mix(in srgb, var(--color-error, #e53935) 34%, var(--color-border-subtle));
+  color: var(--color-error);
+  border-color: color-mix(in srgb, var(--color-error) 34%, var(--color-border-subtle));
 }
 
 .settings-checkbox-row {
@@ -350,16 +350,16 @@
   align-items: flex-start;
   gap: 8px;
   padding: 10px 12px;
-  border: 1px solid color-mix(in srgb, #f59e0b 35%, var(--color-border-subtle));
+  border: 1px solid color-mix(in srgb, var(--color-warning) 35%, var(--color-border-subtle));
   border-radius: 8px;
-  background: color-mix(in srgb, #f59e0b 10%, transparent);
+  background: color-mix(in srgb, var(--color-warning) 10%, transparent);
   color: var(--color-text-secondary);
   font-size: 12px;
   line-height: 1.45;
 }
 
 .sync-warning svg {
-  color: #f59e0b;
+  color: var(--color-warning-text);
   flex: 0 0 auto;
   margin-top: 1px;
 }
@@ -370,9 +370,9 @@
   gap: 10px;
   margin-top: 10px;
   padding: 10px 12px;
-  border: 1px solid color-mix(in srgb, #f59e0b 35%, var(--color-border-subtle));
+  border: 1px solid color-mix(in srgb, var(--color-warning) 35%, var(--color-border-subtle));
   border-radius: 8px;
-  background: color-mix(in srgb, #f59e0b 8%, transparent);
+  background: color-mix(in srgb, var(--color-warning) 8%, transparent);
   color: var(--color-text-secondary);
   font-size: 12px;
   line-height: 1.4;
@@ -384,7 +384,7 @@
 }
 
 .sync-storage-protection > svg {
-  color: #f59e0b;
+  color: var(--color-warning-text);
   flex: 0 0 auto;
 }
 
@@ -723,8 +723,8 @@
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  background: var(--color-warning, #f6b84b);
-  color: #20180a;
+  background: var(--color-warning);
+  color: var(--color-warning-fg);
   font-size: 11px;
   font-weight: 700;
   line-height: 16px;
@@ -784,7 +784,7 @@
 }
 
 .sandbox-item.needsAuth {
-  border-left: 3px solid #f59e0b;
+  border-left: 3px solid var(--color-warning);
 }
 
 .sandbox-item-info {
@@ -811,8 +811,8 @@
 }
 
 .sandbox-status-dot.needsAuth {
-  background: #f59e0b;
-  box-shadow: 0 0 4px rgba(245, 158, 11, 0.4);
+  background: var(--color-warning);
+  box-shadow: 0 0 4px color-mix(in srgb, var(--color-warning) 40%, transparent);
 }
 
 .sandbox-item-details {
@@ -851,7 +851,7 @@
 
 .sandbox-remove-btn:hover {
   color: var(--color-error);
-  background: rgba(239, 68, 68, 0.1);
+  background: color-mix(in srgb, var(--color-error) 10%, transparent);
 }
 
 .sandbox-add-row {
@@ -933,9 +933,9 @@
 }
 
 .e2b-add-btn {
-  background: #8b5cf6;
+  background: var(--color-accent-strong);
   border: none;
-  color: #fff;
+  color: var(--color-primary-fg);
   padding: 8px 14px;
   border-radius: 8px;
   cursor: pointer;
@@ -946,7 +946,7 @@
 }
 
 .e2b-add-btn:hover:not(:disabled) {
-  background: #7c3aed;
+  background: color-mix(in srgb, var(--color-accent-strong) 88%, var(--color-text-heading));
 }
 
 .e2b-add-btn:disabled {
@@ -956,17 +956,17 @@
 
 /* E2B Cloud sandbox item */
 .sandbox-item.e2b {
-  border-left: 3px solid #8b5cf6;
-  background: linear-gradient(135deg, var(--color-bg) 0%, rgba(139, 92, 246, 0.03) 100%);
+  border-left: 3px solid var(--color-accent-strong);
+  background: linear-gradient(135deg, var(--color-bg) 0%, color-mix(in srgb, var(--color-accent-strong) 3%, transparent) 100%);
 }
 
 .sandbox-status-dot.e2b {
-  background: #8b5cf6;
-  box-shadow: 0 0 4px rgba(139, 92, 246, 0.4);
+  background: var(--color-accent-strong);
+  box-shadow: 0 0 4px color-mix(in srgb, var(--color-accent-strong) 40%, transparent);
 }
 
 .sandbox-item.e2b .sandbox-item-url {
-  color: #8b5cf6;
+  color: var(--color-accent-strong);
   font-style: italic;
 }
 
@@ -976,9 +976,9 @@
 }
 
 .sandbox-connect-btn {
-  background: rgba(245, 158, 11, 0.15);
-  border: 1px solid rgba(245, 158, 11, 0.3);
-  color: #f59e0b;
+  background: color-mix(in srgb, var(--color-warning) 15%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-warning) 30%, transparent);
+  color: var(--color-warning-text);
   padding: 4px 10px;
   border-radius: 6px;
   cursor: pointer;
@@ -990,7 +990,7 @@
 }
 
 .sandbox-connect-btn:hover {
-  background: rgba(245, 158, 11, 0.25);
+  background: color-mix(in srgb, var(--color-warning) 25%, transparent);
 }
 
 .sandbox-token-row {
@@ -1152,25 +1152,27 @@
 
 /* Danger / Factory Reset styles */
 .data-action-card.danger {
-  border-color: rgba(220, 38, 38, 0.3);
-  background: rgba(220, 38, 38, 0.04);
+  border-color: color-mix(in srgb, var(--color-error) 30%, transparent);
+  background: color-mix(in srgb, var(--color-error) 4%, transparent);
 }
 
 .data-action-icon.danger {
-  background: rgba(220, 38, 38, 0.1);
-  color: #dc2626;
+  background: color-mix(in srgb, var(--color-error) 10%, transparent);
+  color: var(--color-error);
 }
 
 .data-action-title.danger {
-  color: #dc2626;
+  color: var(--color-error);
 }
 
 .data-action-btn.danger {
-  background: #dc2626;
+  background: var(--color-danger-fill);
+  border-color: var(--color-danger-fill);
+  color: var(--color-danger-fg);
 }
 
 .data-action-btn.danger:hover:not(:disabled) {
-  background: #b91c1c;
+  background: var(--color-danger-fill-hover);
   opacity: 1;
 }
 
@@ -1325,7 +1327,7 @@
   width: 16px;
   left: 3px;
   bottom: 3px;
-  background: white;
+  background: var(--color-toggle-thumb);
   border-radius: 50%;
   transition: transform 0.2s;
 }
@@ -1517,7 +1519,7 @@
 
 .agent-remove-btn:hover {
   color: var(--color-error);
-  background: rgba(239, 68, 68, 0.1);
+  background: color-mix(in srgb, var(--color-error) 10%, transparent);
 }
 
 /* ─── Mobile responsive ─────────────────────────────────────────── */
@@ -1963,8 +1965,8 @@
   margin-bottom: 14px;
   padding: 10px 12px;
   border-radius: var(--radius-sm);
-  border: 1px solid color-mix(in srgb, #e5534b 45%, var(--color-border));
-  background: color-mix(in srgb, #e5534b 10%, var(--color-surface-alt));
+  border: 1px solid color-mix(in srgb, var(--color-error) 45%, var(--color-border));
+  background: color-mix(in srgb, var(--color-error) 10%, var(--color-surface-alt));
   color: var(--color-text-content);
   font-size: 12px;
 }
@@ -2152,8 +2154,8 @@
   text-decoration: none;
   padding: 6px 10px;
   border-radius: 8px;
-  color: #20180a;
-  background: var(--color-warning, #f6b84b);
+  color: var(--color-warning-fg);
+  background: var(--color-warning);
   border: none;
   cursor: pointer;
 }

@@ -28,14 +28,14 @@ class ErrorBoundary extends Component {
           fontFamily: 'system-ui, sans-serif', textAlign: 'center',
         }}>
           <h2 style={{ marginBottom: '0.5rem' }}>Something went wrong</h2>
-          <p style={{ color: '#666', marginBottom: '1rem', maxWidth: '400px' }}>
+          <p style={{ color: 'var(--color-text-secondary)', marginBottom: '1rem', maxWidth: '400px' }}>
             {this.state.error?.message || 'An unexpected error occurred.'}
           </p>
           <button
             onClick={this.handleReload}
             style={{
               padding: '0.5rem 1.5rem', borderRadius: '6px',
-              border: '1px solid #ccc', background: '#fff', cursor: 'pointer',
+              border: '1px solid var(--color-border)', background: 'var(--color-surface)', cursor: 'pointer',
               fontSize: '1rem',
             }}
           >

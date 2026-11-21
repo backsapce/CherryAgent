@@ -75,7 +75,7 @@
   background: var(--color-surface-modal);
   border: 1px solid var(--color-border-subtle);
   border-radius: var(--radius-md, 10px);
-  box-shadow: var(--shadow-popover, 0 24px 64px -16px rgba(0, 0, 0, 0.4));
+  box-shadow: var(--shadow-popover);
   outline: none;
   animation: cherry-select-pop-in 0.12s ease;
 }

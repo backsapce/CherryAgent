@@ -15,6 +15,52 @@ const pkg = JSON.parse(readFileSync(resolve('package.json'), 'utf-8'))
 //   npm run build                                  → normal (no prefix)
 const GH_PAGES_BASE = VITE_BASE || '/'
 
+// PWA metadata cannot resolve CSS variables. Generate concrete colors for
+// the initial browser chrome and install splash from the default CSS palette.
+function pwaThemePlugin() {
+  const themeFile = resolve('src/theme.css')
+  const manifestFile = resolve('src/pwa-manifest.json')
+  const readDefaultColor = () => {
+    const css = readFileSync(themeFile, 'utf-8')
+    const color = css.match(/^\s*--color-bg:\s*([^;]+);/m)?.[1].trim()
+    if (!color) throw new Error('Missing default --color-bg in src/theme.css')
+    return color
+  }
+  const readManifest = () => {
+    const color = readDefaultColor()
+    const manifest = JSON.parse(readFileSync(manifestFile, 'utf-8'))
+    return JSON.stringify({ ...manifest, background_color: color, theme_color: color }, null, 2)
+  }
+  let manifestPath
+
+  return {
+    name: 'pwa-theme',
+    configResolved(config) {
+      manifestPath = `${config.base}manifest.json`
+    },
+    transformIndexHtml() {
+      return [
+        { tag: 'link', attrs: { rel: 'manifest', href: manifestPath }, injectTo: 'head' },
+        { tag: 'meta', attrs: { name: 'theme-color', content: readDefaultColor() }, injectTo: 'head' },
+      ]
+    },
+    configureServer(server) {
+      server.middlewares.use((req, res, next) => {
+        if (req.url?.split('?')[0] !== manifestPath) return next()
+        res.setHeader('Content-Type', 'application/manifest+json')
+        res.end(readManifest())
+      })
+    },
+    buildStart() {
+      this.addWatchFile(themeFile)
+      this.addWatchFile(manifestFile)
+    },
+    generateBundle() {
+      this.emitFile({ type: 'asset', fileName: 'manifest.json', source: readManifest() })
+    },
+  }
+}
+
 /**
  * Vite plugin: generate service worker with precache manifest.
  * After build, scans dist/ for all emitted files and injects them
@@ -82,7 +128,7 @@ export default defineConfig(() => {
     define: {
       __APP_VERSION__: JSON.stringify(pkg.version),
     },
-    plugins: [basicSsl(), react(), swPrecachePlugin()],
+    plugins: [basicSsl(), react(), pwaThemePlugin(), swPrecachePlugin()],
     server: {
       port: 5173,
       https: true,

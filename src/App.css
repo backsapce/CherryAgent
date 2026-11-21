@@ -43,11 +43,11 @@
   justify-content: center;
   gap: 8px;
   padding: 6px 16px;
-  background: color-mix(in srgb, var(--color-warning-bg, #fff3cd) 86%, var(--color-surface));
-  color: var(--color-warning-text, #856404);
+  background: color-mix(in srgb, var(--color-warning-bg) 86%, var(--color-surface));
+  color: var(--color-warning-text);
   font-size: 13px;
   font-weight: 500;
-  border-bottom: 1px solid var(--color-warning-border, #ffc107);
+  border-bottom: 1px solid var(--color-warning-border);
   animation: slideDown 0.3s ease;
 }
 
@@ -69,11 +69,11 @@
   justify-content: center;
   gap: 8px;
   padding: 6px 16px;
-  background: color-mix(in srgb, var(--color-warning-bg, #fff3cd) 86%, var(--color-surface));
-  color: var(--color-warning-text, #856404);
+  background: color-mix(in srgb, var(--color-warning-bg) 86%, var(--color-surface));
+  color: var(--color-warning-text);
   font-size: 13px;
   font-weight: 500;
-  border-bottom: 1px solid var(--color-warning-border, #ffc107);
+  border-bottom: 1px solid var(--color-warning-border);
   animation: slideDown 0.3s ease;
 }
 

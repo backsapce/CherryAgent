@@ -4,7 +4,7 @@
   left: 0;
   right: 0;
   bottom: 0;
-  background-color: rgba(0, 0, 0, 0.7);
+  background-color: var(--color-overlay);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -29,7 +29,7 @@
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  box-shadow: var(--shadow-popover);
   animation: slideIn 0.3s ease;
 }
 
@@ -113,14 +113,14 @@
 }
 
 .file-editor-btn.close:hover {
-  background-color: var(--color-error);
-  color: white;
+  background-color: var(--color-danger-fill);
+  color: var(--color-danger-fg);
 }
 
 .file-editor-content {
   flex: 1;
   overflow: hidden;
-  background-color: #282c34;
+  background-color: var(--color-editor-bg);
 }
 
 .file-editor-loading,
@@ -130,14 +130,14 @@
   align-items: center;
   justify-content: center;
   height: 100%;
-  color: var(--color-text-secondary);
+  color: var(--color-editor-muted);
 }
 
 .loading-spinner {
   width: 40px;
   height: 40px;
-  border: 3px solid var(--color-border);
-  border-top-color: var(--color-primary);
+  border: 3px solid var(--color-editor-gutter-border);
+  border-top-color: var(--color-editor-muted);
   border-radius: 50%;
   animation: spin 1s linear infinite;
   margin-bottom: 16px;
@@ -167,8 +167,8 @@
 }
 
 .file-editor-codemirror .cm-gutters {
-  background-color: #21252b;
-  border-right: 1px solid #3e4451;
+  background-color: var(--color-editor-gutter);
+  border-right: 1px solid var(--color-editor-gutter-border);
 }
 
 .file-editor-footer {
@@ -262,7 +262,7 @@
   border-radius: 8px;
   font-size: 14px;
   font-weight: 500;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  box-shadow: var(--shadow-panel);
   z-index: 1001;
   animation: toastIn 0.3s ease;
 }
