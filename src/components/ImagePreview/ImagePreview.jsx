@@ -44,7 +44,7 @@ const ImagePreview = ({
   const copiedAiFieldTimerRef = useRef(null);
   const imageUrl = sourceUrl || loadedImageUrl;
   const aiInfoFields = useMemo(() => buildAiInfoFields(aiMeta, naturalSize, t), [aiMeta, naturalSize, t]);
-  const hasAiInfo = aiInfoFields.length > 0;
+  const hasAiInfo = aiInfoFields.length > 0 || aiMeta?.ambiguousOutput;
   const setAiInfoVisible = (visible) => onAiInfoVisibilityChange?.(visible);
 
   const resetSwipe = () => {
@@ -168,7 +168,7 @@ const ImagePreview = ({
       let meta = null;
       try {
         const buffer = await (await fetch(imageUrl)).arrayBuffer();
-        meta = await parseAiImageMeta(buffer);
+        meta = await parseAiImageMeta(buffer, downloadName || fileName);
       } catch {
         // Metadata is optional; leave the button hidden when it can't be read.
       }
@@ -178,7 +178,7 @@ const ImagePreview = ({
     return () => {
       disposed = true;
     };
-  }, [imageUrl]);
+  }, [imageUrl, downloadName, fileName]);
 
   useEffect(() => {
     const previousOverflow = document.body.style.overflow;
@@ -291,6 +291,11 @@ const ImagePreview = ({
             </button>
           </div>
           <div className="image-preview-ai-fields">
+            {aiMeta.ambiguousOutput && (
+              <div className="image-preview-ai-field">
+                <div className="image-preview-ai-field-value">{t('filemanage.aiAmbiguousOutput')}</div>
+              </div>
+            )}
             {aiInfoFields.map((field) => (
               <div key={field.key} className="image-preview-ai-field">
                 <div className="image-preview-ai-field-label">{field.label}</div>

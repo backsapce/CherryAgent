@@ -422,6 +422,7 @@
     "aiInfo": "AI generation info",
     "copy": "Copy",
     "copied": "Copied",
+    "aiAmbiguousOutput": "The embedded workflow has multiple generation branches. The prompt and sampling settings for this image cannot be determined.",
     "aiPrompt": "Prompt",
     "aiResolution": "Resolution",
     "aiModel": "Model",

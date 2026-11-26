@@ -142,33 +142,59 @@ function parseExifUserComment(view, tiffStart) {
 
 // --- ComfyUI -----------------------------------------------------------------
 
-function parseComfyGraph(graph) {
+const COMFY_SAMPLER = /^(KSampler|KSamplerAdvanced|SamplerCustom)$/i;
+const COMFY_SAVE_IMAGE = /^SaveImage$/i;
+
+function parseComfyGraph(graph, fileName) {
   const nodes = Object.values(graph);
-  const node = (ref) => (Array.isArray(ref) ? graph[String(ref[0])] : null);
+  const node = (ref) => (Array.isArray(ref) && ref.length === 2 && Object.hasOwn(graph, ref[0]) ? graph[ref[0]] : null);
   const literal = (value) => (Array.isArray(value) ? undefined : value);
 
-  const samplers = nodes.filter((entry) => /^(KSampler|KSamplerAdvanced|SamplerCustom)$/i.test(entry?.class_type || ''));
-  const sampler = samplers[0];
-  const inputs = sampler?.inputs || {};
-
-  // SamplerCustom routes sampler/scheduler through selector nodes (KSamplerSelect / BasicScheduler).
-  const followLiteral = (value, field, depth = 0) => {
-    const direct = literal(value);
-    if (direct !== undefined) return direct;
-    const linked = node(value);
-    if (!linked || depth >= 4) return undefined;
-    const nested = linked.inputs?.[field];
-    return nested === undefined ? undefined : literal(nested);
-  };
-
-  // A widget constant (e.g. a switch selector) may be set inline or wired to a
-  // Primitive* node; resolve either shape to its literal value.
-  const constLiteral = (ref) => {
+  // Resolve inline values and constants wired through Primitive* nodes.
+  const constLiteral = (ref, field = 'value') => {
     if (!Array.isArray(ref)) return literal(ref);
-    const linked = node(ref);
-    if (!linked) return undefined;
-    return literal(linked.inputs?.value ?? linked.inputs?.int ?? linked.inputs?.boolean);
+    const inputs = node(ref)?.inputs;
+    return literal(inputs?.[field] ?? inputs?.value ?? inputs?.int ?? inputs?.boolean);
   };
+
+  // Stop at the final sampler on each path from SaveImage. An earlier sampler
+  // may feed a refinement pass without being the sampler for the final image.
+  const upstream = (refs, stopAtSampler = false) => {
+    const pending = [...refs].reverse();
+    const found = new Set();
+    while (pending.length) {
+      const entry = node(pending.pop());
+      if (!entry || found.has(entry)) continue;
+      found.add(entry);
+      if (stopAtSampler && COMFY_SAMPLER.test(entry.class_type)) continue;
+      const inputs = entry.inputs || {};
+      const selector = /Switch/i.test(entry.class_type) ? constLiteral(inputs.switch) : undefined;
+      if (typeof selector === 'boolean' && 'on_true' in inputs && 'on_false' in inputs) {
+        pending.push(inputs[selector ? 'on_true' : 'on_false']);
+      } else {
+        for (const ref of Object.values(inputs).reverse()) pending.push(ref);
+      }
+    }
+    return [...found];
+  };
+
+  // Standard SaveImage appends a counter. The counter itself does not identify
+  // an output node, and multiple outputs can have the same prefix.
+  const basename = (path) => (typeof path === 'string' ? path.split(/[\\/]/).pop() : undefined);
+  const prefix = basename(fileName)?.match(/^(.+)_\d+_\.png$/i)?.[1];
+  const outputs = nodes.filter((entry) => COMFY_SAVE_IMAGE.test(entry?.class_type));
+  const matches = prefix === undefined ? [] : outputs.filter((entry) => basename(entry.inputs?.filename_prefix) === prefix);
+  const candidates = matches.length ? matches : outputs;
+  const allSamplers = nodes.filter((entry) => COMFY_SAMPLER.test(entry?.class_type));
+  const outputSamplers = candidates.map((entry) =>
+    upstream([entry.inputs?.images], true).filter((linked) => COMFY_SAMPLER.test(linked.class_type)));
+  const samplers = candidates.length ? [...new Set(outputSamplers.flat())] : allSamplers;
+  const sampler = samplers.length === 1 && outputSamplers.every((found) => found.length === 1) ? samplers[0] : undefined;
+  const ambiguousOutput = !sampler && allSamplers.length > 1;
+  const inputs = sampler?.inputs || {};
+  const branchNodes = sampler ? upstream(Object.values(inputs)) : (ambiguousOutput ? [] : nodes);
+  const modelNodes = sampler ? upstream([inputs.model]) : branchNodes;
+  const latentNodes = sampler ? upstream([inputs.latent_image ?? inputs.latent]) : branchNodes;
 
   // Follows a string-producing chain to the literal text behind a widget link:
   // multiline string primitives, concatenations, switches, and pass-through
@@ -244,38 +270,38 @@ function parseComfyGraph(graph) {
     return acc;
   };
 
-  const loras = nodes
+  const loras = branchNodes
     .filter((entry) => /LoraLoader/i.test(entry?.class_type || ''))
     .map((entry) => ({
       name: entry.inputs?.lora_name ? String(entry.inputs.lora_name) : null,
-      strength: literal(entry.inputs?.strength_model ?? entry.inputs?.strength),
+      strength: constLiteral(entry.inputs?.strength_model ?? entry.inputs?.strength),
     }))
     .filter((entry) => entry.name);
 
-  const latent = nodes.find((entry) => /Empty\w*Latent/i.test(entry?.class_type || ''));
+  const latent = latentNodes.find((entry) => /Empty\w*Latent/i.test(entry?.class_type || ''));
+  const width = constLiteral(latent?.inputs?.width);
+  const height = constLiteral(latent?.inputs?.height);
 
-  const seedNode = node(inputs.noise ?? inputs.seed);
-  const seed = literal(inputs.seed) ?? literal(inputs.noise_seed)
-    ?? (seedNode ? literal(seedNode.inputs?.seed ?? seedNode.inputs?.noise_seed) : undefined);
+  const model = modelNodes.find((entry) => /CheckpointLoader/i.test(entry?.class_type || ''))?.inputs?.ckpt_name
+    ?? modelNodes.find((entry) => /UNETLoader/i.test(entry?.class_type || ''))?.inputs?.unet_name;
 
-  const model = nodes.find((entry) => /CheckpointLoader/i.test(entry?.class_type || ''))?.inputs?.ckpt_name
-    ?? nodes.find((entry) => /UNETLoader|UnetLoader/i.test(entry?.class_type || ''))?.inputs?.unet_name;
-
-  const samplerName = followLiteral(inputs.sampler_name, 'sampler_name');
-  const scheduler = followLiteral(inputs.scheduler, 'scheduler');
+  // SamplerCustom can wire the sampler through a KSamplerSelect node.
+  const samplerName = constLiteral(inputs.sampler_name ?? inputs.sampler, 'sampler_name');
+  const scheduler = constLiteral(inputs.scheduler, 'scheduler');
 
   return {
     source: 'comfyui',
     sourceLabel: 'ComfyUI',
+    ambiguousOutput,
     prompt: promptTexts(inputs.positive).join('\n') || null,
     negativePrompt: promptTexts(inputs.negative).join('\n') || null,
-    resolution: latent ? `${latent.inputs?.width}x${latent.inputs?.height}` : null,
+    resolution: Number.isFinite(width) && Number.isFinite(height) ? `${width}x${height}` : null,
     model: model === undefined ? null : String(model),
     loras,
     sampler: samplerName === undefined ? null : String(samplerName) + (scheduler ? ` (${scheduler})` : ''),
-    steps: literal(inputs.steps),
-    seed,
-    cfg: literal(inputs.cfg),
+    steps: constLiteral(inputs.steps),
+    seed: constLiteral(inputs.seed, 'seed') ?? constLiteral(inputs.noise_seed ?? inputs.noise, 'noise_seed'),
+    cfg: constLiteral(inputs.cfg),
     duration: null,
   };
 }
@@ -380,11 +406,12 @@ function isComfyGraph(value) {
 /**
  * Parses AI-generation metadata from raw image bytes.
  * @param {ArrayBuffer} buffer
+ * @param {string} [fileName] Original filename used to select a ComfyUI SaveImage output.
  * @returns {Promise<{source: string, sourceLabel: string, prompt: ?string, negativePrompt: ?string,
  *   resolution: ?string, model: ?string, loras: Array<{name: string, strength: ?number}>,
- *   sampler: ?string, steps: ?number, seed: ?number, cfg: ?number, duration: ?string} | null>}
+ *   sampler: ?string, steps: ?number, seed: ?number, cfg: ?number, duration: ?string, ambiguousOutput?: boolean} | null>}
  */
-export async function parseAiImageMeta(buffer) {
+export async function parseAiImageMeta(buffer, fileName) {
   if (!(buffer instanceof ArrayBuffer)) return null;
   try {
     let chunks = null;
@@ -395,7 +422,7 @@ export async function parseAiImageMeta(buffer) {
     }
     if (!chunks) return null;
 
-    if (chunks.prompt && isComfyGraph(chunks.prompt)) return parseComfyGraph(JSON.parse(chunks.prompt));
+    if (chunks.prompt && isComfyGraph(chunks.prompt)) return parseComfyGraph(JSON.parse(chunks.prompt), fileName);
     if (chunks.parameters) return parseA1111Parameters(chunks.parameters);
     if (/novelai/i.test(chunks.Software || '')) return parseNovelai(chunks);
     return null;

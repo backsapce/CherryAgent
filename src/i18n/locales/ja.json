@@ -422,6 +422,7 @@
     "aiInfo": "AI生成情報",
     "copy": "コピー",
     "copied": "コピーしました",
+    "aiAmbiguousOutput": "埋め込まれたワークフローに複数の生成経路があり、この画像のプロンプトやサンプリング設定を特定できません。",
     "aiPrompt": "プロンプト",
     "aiResolution": "解像度",
     "aiModel": "モデル",

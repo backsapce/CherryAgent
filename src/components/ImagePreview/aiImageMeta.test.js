@@ -171,6 +171,71 @@ test('parseAiImageMeta extracts ComfyUI workflow from tEXt prompt chunk', async 
   assert.deepEqual(meta.loras, [{ name: 'detail_tweaker_xl.safetensors', strength: 0.8 }]);
 });
 
+function makeMultiOutputComfyGraph() {
+  const graph = {};
+  for (const [tag, samplerName, seed] of [['yzj', 'er_sde', 11], ['ycc', 'euler', 22]]) {
+    const ref = (id) => [`${tag}:${id}`, 0];
+    const add = (id, class_type, inputs) => { graph[ref(id)[0]] = { class_type, inputs }; };
+    add('save', 'SaveImage', { images: ref('decode'), filename_prefix: `run/outfit/moss_backspace${tag}` });
+    add('decode', 'VAEDecode', { samples: ref('sampler') });
+    add('sampler', 'KSampler', {
+      positive: ref('encode'), model: ref('modelSwitch'), latent_image: ref('latent'),
+      seed: ref('seed'), steps: 25, cfg: 2.5, sampler_name: samplerName, scheduler: 'simple',
+    });
+    add('latent', 'EmptyLatentImage', { width: tag === 'yzj' ? 768 : 640, height: 1024 });
+    add('seed', 'PrimitiveInt', { value: seed });
+    add('encode', 'CLIPTextEncode', { text: ref('concat') });
+    add('concat', 'StringConcatenate', { string_a: `backspace${tag}`, string_b: 'a portrait', delimiter: ' ' });
+    add('base', 'UNETLoader', { unet_name: `${tag}.safetensors` });
+    add('lora', 'LoraLoaderModelOnly', { model: ref('base'), lora_name: `${tag}_lora.safetensors`, strength_model: 1 });
+    add('unusedLora', 'LoraLoaderModelOnly', { model: ref('base'), lora_name: 'unused.safetensors' });
+    add('modelSwitch', 'ComfySwitchNode', { switch: true, on_true: ref('lora'), on_false: ref('unusedLora') });
+  }
+  return graph;
+}
+
+const comfyPng = (graph) => makePng(textChunk('prompt', JSON.stringify(graph)));
+
+test('parseAiImageMeta selects prompt and parameters from the matching SaveImage branch', async () => {
+  const png = comfyPng(makeMultiOutputComfyGraph());
+  const ycc = await parseAiImageMeta(png, 'moss_backspaceycc_00001_.png');
+  const yzj = await parseAiImageMeta(png, 'moss_backspaceyzj_00001_.png');
+  assert.equal(ycc.ambiguousOutput, false);
+  assert.equal(ycc.prompt, 'backspaceycc a portrait');
+  assert.equal(ycc.sampler, 'euler (simple)');
+  assert.equal(ycc.seed, 22);
+  assert.equal(ycc.model, 'ycc.safetensors');
+  assert.equal(ycc.resolution, '640x1024');
+  assert.deepEqual(ycc.loras, [{ name: 'ycc_lora.safetensors', strength: 1 }]);
+  assert.equal(yzj.prompt, 'backspaceyzj a portrait');
+  assert.equal(yzj.sampler, 'er_sde (simple)');
+  assert.equal(yzj.seed, 11);
+  assert.deepEqual(yzj.loras, [{ name: 'yzj_lora.safetensors', strength: 1 }]);
+});
+
+test('parseAiImageMeta does not guess from a shared prefix or an unrelated filename', async () => {
+  const graph = makeMultiOutputComfyGraph();
+  graph['ycc:save'].inputs.filename_prefix = graph['yzj:save'].inputs.filename_prefix;
+  const png = comfyPng(graph);
+  for (const name of ['moss_backspaceyzj_00002_.png', 'renamed.png', undefined]) {
+    const meta = await parseAiImageMeta(png, name);
+    assert.equal(meta.ambiguousOutput, true);
+    assert.equal(meta.prompt, null);
+    assert.equal(meta.sampler, null);
+    assert.deepEqual(meta.loras, []);
+  }
+});
+
+test('parseAiImageMeta does not infer a sampler from the counter of a mixed batch', async () => {
+  const graph = makeMultiOutputComfyGraph();
+  delete graph['ycc:save'];
+  graph.batch = { class_type: 'ImageBatch', inputs: { image1: ['yzj:decode', 0], image2: ['ycc:decode', 0] } };
+  graph['yzj:save'].inputs.images = ['batch', 0];
+  const meta = await parseAiImageMeta(comfyPng(graph), 'moss_backspaceyzj_00002_.png');
+  assert.equal(meta.ambiguousOutput, true);
+  assert.equal(meta.prompt, null);
+});
+
 test('parseAiImageMeta reads compressed iTXt chunks', async () => {
   const meta = await parseAiImageMeta(makePng(await compressedItxtChunk('prompt', COMFY_GRAPH)));
   assert.ok(meta);

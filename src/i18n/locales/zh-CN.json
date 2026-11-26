@@ -422,6 +422,7 @@
     "aiInfo": "AI 生成信息",
     "copy": "复制",
     "copied": "已复制",
+    "aiAmbiguousOutput": "内嵌工作流包含多条生成支路，无法确定这张图使用的提示词和采样参数。",
     "aiPrompt": "提示词",
     "aiResolution": "分辨率",
     "aiModel": "模型",
