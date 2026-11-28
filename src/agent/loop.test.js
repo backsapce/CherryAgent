@@ -4,6 +4,7 @@ import { simulateReadableStream } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import { APICallError } from '@ai-sdk/provider';
 import { runAgentLoop } from './loop.js';
+import { estimateTokens } from './context.js';
 import { compactToolResultForModel } from './toolObservation.js';
 
 const TEST_TOOL_SCHEMA = {
@@ -63,6 +64,77 @@ test('compactToolResultForModel bounds long tool results and preserves head and 
   assert.match(compacted, /END_MARKER/);
   assert.match(compacted, /omitted \d+ chars from middle/);
 });
+
+for (const [name, maxRounds, oversizedInput] of [
+  ['next step shortens huge results without splitting pairs', 2, false],
+  ['finalizer keeps its instruction and shortens huge results', 1, false],
+  ['an unfit call input drops the whole exchange, not just its call or result', 1, true],
+]) {
+  test(name, async () => {
+    const requests = [];
+    const events = [];
+    const output = `START\n${'界'.repeat(2_200)}\nEND`;
+    const run = oversizedInput ? 'large input '.repeat(4_000) : 'small input';
+    const model = new MockLanguageModelV3({
+      doStream: async ({ prompt }) => {
+        requests.push(prompt);
+        return {
+          stream: simulateReadableStream({
+            chunks: requests.length === 1 ? [
+              ...['a', 'b'].map((id) => ({
+                type: 'tool-call', toolCallId: id, toolName: TEST_TOOL_SCHEMA.name, input: JSON.stringify({ run: run + id }),
+              })),
+              { type: 'finish', finishReason: { unified: 'tool-calls' }, usage: TEST_USAGE },
+            ] : [
+              { type: 'text-start', id: 'answer' },
+              { type: 'text-delta', id: 'answer', delta: 'done' },
+              { type: 'text-end', id: 'answer' },
+              { type: 'finish', finishReason: { unified: 'stop' }, usage: TEST_USAGE },
+            ],
+          }),
+        };
+      },
+    });
+    const latest = 'Keep the latest request.';
+    const messages = [
+      ...Array.from({ length: 6 }, (_, index) => ({ id: `m-${index}`, role: index % 2 ? 'assistant' : 'user', content: `turn ${index}` })),
+      { role: 'user', content: latest },
+    ];
+    const result = await runAgentLoop({
+      ...createConcurrentRunOptions('budget'),
+      maxRounds, messages, languageModel: model,
+      contextWindow: 6_000,
+      systemPrompt: 'Additional system instructions. '.repeat(100),
+      summaryState: { content: 'Background to retain.', coveredUntil: 5, anchorId: 'm-4' },
+      dispatchTool: async () => output,
+      onEvent: (event) => events.push(event),
+    });
+    assert.equal(result.content, 'done');
+    assert.equal(requests.length, 2);
+    assert.equal(result.toolCalls.length, 2);
+    assert.ok(result.toolCalls.every((call) => call.result === output), 'visible tool results are unchanged');
+    const prompt = requests[1];
+    const parts = prompt.filter(({ role }) => role !== 'system').flatMap(({ content }) => content);
+    const [compaction] = events.filter(({ type }) => type === 'context-compact');
+    assert.ok(compaction.beforeTokens > 4_320);
+    assert.ok(compaction.afterTokens <= 4_320);
+    assert.ok(estimateTokens(prompt) <= 4_320);
+    assert.ok(parts.some(({ text }) => text === latest));
+    assert.ok(parts.some(({ text }) => text?.includes('<conversation_summary>')));
+    if (maxRounds === 1) assert.match(prompt.at(-1).content[0].text, /tool-use round limit/);
+    const calls = parts.filter(({ type }) => type === 'tool-call');
+    const results = parts.filter(({ type }) => type === 'tool-result');
+    if (oversizedInput) {
+      assert.equal(calls.length + results.length, 0);
+      assert.ok(parts.some(({ text }) => text?.includes('Verify its effects before retrying.')));
+    } else {
+      assert.deepEqual(calls.map(({ toolCallId }) => toolCallId), ['a', 'b']);
+      assert.deepEqual(calls.map(({ input }) => input), [{ run: run + 'a' }, { run: run + 'b' }]);
+      assert.deepEqual(results.map(({ toolCallId }) => toolCallId), ['a', 'b']);
+      for (const result of results) assert.match(result.output.value, /START[\s\S]*omitted[\s\S]*END/);
+    }
+  });
+}
 
 test('a successful wake-up ends the current model loop immediately', async () => {
   let modelCallCount = 0;

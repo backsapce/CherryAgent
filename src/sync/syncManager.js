@@ -14,6 +14,7 @@ import {
   writePathBytes,
   writePathText,
 } from '../vfs/opfs.js';
+import { fingerprintString, mergeArchivedView, parseHotFileBody } from '../vfs/sessionArchive.js';
 import {
   createS3Backend,
   isConditionalRequestUnsupported,
@@ -25,6 +26,7 @@ import { normalizeProviderConfig, normalizeProviderPreset } from './providerPres
 import {
   formatStructuredContent,
   isStructuredPath,
+  mergeSessionMessages,
   mergeStructuredThreeWay,
   mergeStructuredUpdates,
   parseStructuredContent,
@@ -3029,6 +3031,44 @@ async function readRemotePayload(backend, key, maxBytes, cache = null, cacheable
   }
 }
 
+function mixedSessionBodyExpander(path, heads, bases) {
+  if (!isSessionMessagesPath(path) || !heads.some(Array.isArray) || heads.every(Array.isArray)) return null;
+  // shortcut: verify against bare histories until sync can associate chunk versions with individual heads.
+  const bareHistories = [...heads, ...bases].filter(Array.isArray);
+  return (body) => {
+    if (body === undefined || Array.isArray(body)) return body;
+    const envelope = parseHotFileBody(body);
+    if (envelope && envelope.chunks.length === (body.chunks?.length ?? 0)) {
+      for (const history of bareHistories) {
+        let end = 0;
+        const verified = envelope.chunks.every(({ count, index, fingerprint }, position) => {
+          const start = end;
+          end += count;
+          return position === index && count > 0 && end <= history.length
+            && fingerprintString(JSON.stringify(history.slice(start, end))) === fingerprint;
+        });
+        if (verified) return mergeArchivedView([history.slice(0, end)], envelope.hotMessages);
+      }
+    }
+    throw new Error(`Cannot safely resolve session archive conflict for ${path}: no matching archive prefix. Neither session body was replaced.`);
+  };
+}
+
+function mergeLocalStructuredData(path, base, local, remote, options) {
+  const expand = mixedSessionBodyExpander(path, [local, remote], [base]);
+  if (expand) {
+    // A trim can remove the archive altogether. If the archive side did not
+    // change, take the trim without needing to reconstruct the removed prefix.
+    const [bare, archived] = Array.isArray(local) ? [local, remote] : [remote, local];
+    if (base !== undefined && JSON.stringify(base) === JSON.stringify(archived)) return bare;
+    // A complete bare body does not depend on chunk transfers finishing here.
+    return mergeSessionMessages(expand(base), expand(local), expand(remote), options);
+  }
+  return base === undefined
+    ? mergeStructuredUpdates([createStructuredUpdate(remote), createStructuredUpdate(local)]).data
+    : mergeStructuredThreeWay(base, local, remote, options);
+}
+
 async function readRemoteStructuredData(
   backend,
   syncConfig,
@@ -3170,7 +3210,11 @@ async function readRemoteStructuredData(
   // delta against its own immediate base. This preserves cross-branch fields
   // while making explicit deletions survive even when candidates stalled on
   // different logical revisions/bases.
-  let data = mergeStructuredUpdates(snapshots.map(({ update }) => update)).data;
+  const heads = snapshots.map(({ data }) => data);
+  const expand = mixedSessionBodyExpander(path, heads, bases.values());
+  let data = expand
+    ? heads.map(expand).reduce((local, remote) => mergeSessionMessages(undefined, local, remote))
+    : mergeStructuredUpdates(snapshots.map(({ update }) => update)).data;
   for (const { candidate, data: candidateData } of snapshots) {
     if (!candidate.baseYjsKey) continue;
     const signature = [
@@ -3180,7 +3224,9 @@ async function readRemoteStructuredData(
       candidate.basePayloadSize ?? '',
       candidate.baseSize ?? '',
     ].join('\u0000');
-    data = mergeStructuredThreeWay(bases.get(signature), data, candidateData);
+    data = expand
+      ? mergeSessionMessages(expand(bases.get(signature)), data, expand(candidateData))
+      : mergeStructuredThreeWay(bases.get(signature), data, candidateData);
   }
   return { data, candidateCount: snapshots.length };
 }
@@ -3286,12 +3332,10 @@ async function applyRemoteFile(
       );
       const localSyncData = isConfigPath(path) ? stripLocalOnlyConfig(localData) : localData;
       const baseData = await readStructuredBase(path, syncConfig);
-      finalSyncData = baseData === undefined
-        ? mergeStructuredUpdates([createStructuredUpdate(remoteSyncData), createStructuredUpdate(localSyncData)]).data
-        : mergeStructuredThreeWay(baseData, localSyncData, remoteSyncData, {
-          localUpdatedAt: localEntry.lastModified,
-          remoteUpdatedAt: Date.parse(entry.updatedAt || 0),
-        });
+      finalSyncData = mergeLocalStructuredData(path, baseData, localSyncData, remoteSyncData, {
+        localUpdatedAt: localEntry.lastModified,
+        remoteUpdatedAt: Date.parse(entry.updatedAt || 0),
+      });
       merged = true;
     }
 
@@ -4263,12 +4307,10 @@ async function pushInternal(syncConfig, runtime = {}) {
           );
           const remoteSyncData = isConfigPath(path) ? stripLocalOnlyConfig(remoteData) : remoteData;
           const baseData = await readStructuredBase(path, syncConfig);
-          syncData = baseData === undefined
-            ? mergeStructuredUpdates([createStructuredUpdate(remoteSyncData), createStructuredUpdate(localSyncData)]).data
-            : mergeStructuredThreeWay(baseData, localSyncData, remoteSyncData, {
-              localUpdatedAt: entry.lastModified,
-              remoteUpdatedAt: Date.parse(remoteEntry.updatedAt || 0),
-            });
+          syncData = mergeLocalStructuredData(path, baseData, localSyncData, remoteSyncData, {
+            localUpdatedAt: entry.lastModified,
+            remoteUpdatedAt: Date.parse(remoteEntry.updatedAt || 0),
+          });
           stats.merged += 1;
         }
       }

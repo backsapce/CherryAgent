@@ -5,6 +5,7 @@ import {
   deletePath,
   exportToZip,
   importFromZip,
+  loadSessionMessages,
   readPathBytes,
   readPathText,
   registerOpfsSyncHook,
@@ -12,6 +13,7 @@ import {
   writePathBytes,
   writePathText,
 } from '../vfs/opfs.js';
+import { formatHotFileBody, planSessionArchive } from '../vfs/sessionArchive.js';
 import {
   __syncInternals,
   pullSync,
@@ -2042,6 +2044,82 @@ test('structured identity-array deletion converges through the cached three-way 
   }
 });
 
+test('devices that append across the session archive boundary keep both appends', async (t) => {
+  const path = 'sessions/boundary.json';
+  const prefix = Array.from({ length: 198 }, (_, i) => ({ id: `base-${i}`, role: 'user', content: `${i}` }));
+  const bareAppend = { id: 'bare', role: 'user', content: 'bare append' };
+  const archived = [...prefix, { id: 'used-archive', role: 'user', content: 'archive append' },
+    { id: 'used-archive-reply', role: 'assistant', content: 'archive reply' }];
+  const save = (messages) => saveSessions([{ id: 'boundary', title: 'Boundary', messages }]);
+
+  for (const [name, finish, remoteArchives, bare] of [
+    ['sync now with a remote archive', syncNow, true, [...prefix, bareAppend]],
+    ['direct push verifies a local archive against the unedited base', pushSync, false,
+      [{ ...prefix[0], content: 'edited on the bare device' }, ...prefix.slice(1), bareAppend]],
+  ]) {
+    await t.test(name, async () => {
+      const store = new MemoryBackend();
+      const restoreBackend = installBackend(store);
+      try {
+        const first = useMemoryOpfs();
+        await save(prefix);
+        await syncNow(SYNC_CONFIG);
+        const second = useMemoryOpfs();
+        await pullSync(SYNC_CONFIG);
+
+        useMemoryOpfs(first);
+        await save(remoteArchives ? archived : bare);
+        assert.equal(Array.isArray(JSON.parse(await readPathText(path))), !remoteArchives);
+        await syncNow(SYNC_CONFIG);
+
+        useMemoryOpfs(second);
+        await save(remoteArchives ? bare : archived);
+        assert.equal(Array.isArray(JSON.parse(await readPathText(path))), remoteArchives);
+        await finish(SYNC_CONFIG);
+        const expected = [...bare, ...archived.slice(prefix.length)];
+        assert.deepEqual(await loadSessionMessages('boundary'), expected);
+
+        useMemoryOpfs();
+        await pullSync(SYNC_CONFIG);
+        assert.deepEqual(await loadSessionMessages('boundary'), expected);
+      } finally {
+        restoreBackend();
+      }
+    });
+  }
+});
+
+test('a mixed session archive conflict with no matching prefix leaves both bodies intact', async () => {
+  const store = new MemoryBackend();
+  const restoreBackend = installBackend(store);
+  const manifestKey = objectKey(SYNC_CONFIG, CURRENT_MANIFEST_FILE);
+  const path = 'sessions/boundary.json';
+  const prefix = Array.from({ length: 198 }, (_, i) => ({ id: `base-${i}`, role: 'user', content: `${i}` }));
+  const save = (messages) => saveSessions([{ id: 'boundary', messages }]);
+  try {
+    const first = useMemoryOpfs();
+    await save(prefix);
+    await syncNow(SYNC_CONFIG);
+    const second = useMemoryOpfs();
+    await pullSync(SYNC_CONFIG);
+
+    useMemoryOpfs(first);
+    await save([{ ...prefix[0], content: 'changed before archiving' }, ...prefix.slice(1),
+      { id: 'remote-a', content: 'a' }, { id: 'remote-b', content: 'b' }]);
+    await pushSync(SYNC_CONFIG);
+    const remoteBody = store.json(manifestKey).files[path];
+
+    useMemoryOpfs(second);
+    const local = [...prefix, { id: 'local', content: 'local append' }];
+    await save(local);
+    await assert.rejects(syncNow(SYNC_CONFIG), /no matching archive prefix/i);
+    assert.deepEqual(await loadSessionMessages('boundary'), local);
+    assert.deepEqual(store.json(manifestKey).files[path], remoteBody);
+  } finally {
+    restoreBackend();
+  }
+});
+
 test('a newer local child survives a remote directory tombstone', async () => {
   useMemoryOpfs();
   const backend = new MemoryBackend();
@@ -2576,6 +2654,43 @@ test('concurrent OSS structured edits merge against their common base and consol
     assert.equal(noOp.pushed.uploaded, 0);
     assert.equal(backend.countPayloadPuts(), 0);
     assert.equal(backend.count('putJson'), 0);
+  } finally {
+    restoreBackend();
+  }
+});
+
+test('mixed session archive formats also merge across concurrent OSS heads', async () => {
+  const store = new MemoryBackend();
+  const restoreBackend = installBackend(store);
+  const shardPrefix = `${objectKey(OSS_SYNC_CONFIG, 'manifests')}/`;
+  const path = 'sessions/boundary.json';
+  const base = Array.from({ length: 198 }, (_, i) => ({ id: `base-${i}`, content: `${i}` }));
+  const bare = [...base, { id: 'bare', content: 'bare append' }];
+  const archived = [...base, { id: 'used-archive', content: 'archive append' },
+    { id: 'used-archive-reply', content: 'archive reply' }];
+  const head = async (data, clientId) => {
+    const content = formatStructuredContent(path, data);
+    const hash = await sha256Text(content);
+    const yjsKey = objectKey(OSS_SYNC_CONFIG, __syncInternals.yjsPath(path, hash));
+    store.objects.set(yjsKey, createStructuredUpdate(data));
+    return { structured: true, hash, hashType: 'content', yjsKey,
+      size: new TextEncoder().encode(content).byteLength, revision: 1, revisionBy: clientId };
+  };
+  try {
+    const envelope = JSON.parse(formatHotFileBody(planSessionArchive(archived)));
+    assert.ok(envelope.chunks.length);
+    const { yjsKey: baseYjsKey, hash: baseHash, size: baseSize } = await head(base, 'base');
+    const baseRef = { baseYjsKey, baseHash, baseSize };
+    store.setJson(`${shardPrefix}device-a.json`, causalManifest('device-a', 1, {}, {
+      [path]: { ...await head(bare, 'device-a'), ...baseRef },
+    }));
+    store.setJson(`${shardPrefix}device-b.json`, causalManifest('device-b', 1, {}, {
+      [path]: { ...await head(envelope, 'device-b'), ...baseRef },
+    }));
+    useMemoryOpfs();
+    const result = await pullSync(OSS_SYNC_CONFIG);
+    assert.equal(result.merged, 1);
+    assert.deepEqual(await loadSessionMessages('boundary'), [...bare, ...archived.slice(base.length)]);
   } finally {
     restoreBackend();
   }

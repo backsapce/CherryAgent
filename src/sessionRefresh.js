@@ -200,41 +200,63 @@ function mergeMessages(baselineMessages, localMessages, remoteMessages) {
     if (value !== MISSING) resolved.set(key, value);
   }
 
-  const baselineKeys = baseline.keys.filter((key) => resolved.has(key));
-  const baselineKeySet = new Set(baseline.keys);
+  // A pull can fill a previously missing archive chunk in the middle of the
+  // known conversation. Keep that recovered history before its next anchor.
+  const insertions = new Map();
+  const inserted = new Set();
+  let anchor = null;
+  for (let index = remote.keys.length - 1; index >= 0; index -= 1) {
+    const key = remote.keys[index];
+    if (baseline.byKey.has(key)) anchor = key;
+    else if (anchor !== null && resolved.has(key) && !inserted.has(key)) {
+      if (!insertions.has(anchor)) insertions.set(anchor, []);
+      insertions.get(anchor).push(key);
+      inserted.add(key);
+    }
+  }
   const appendOrder = [...new Set([...remote.keys, ...local.keys])]
-    .filter((key) => !baselineKeySet.has(key) && resolved.has(key));
+    .filter((key) => !baseline.byKey.has(key) && !inserted.has(key) && resolved.has(key));
   appendOrder.sort((left, right) => {
     const leftTime = timestampFromGeneratedId(resolved.get(left)?.id);
     const rightTime = timestampFromGeneratedId(resolved.get(right)?.id);
     if (leftTime && rightTime && leftTime !== rightTime) return leftTime - rightTime;
     return left < right ? -1 : left > right ? 1 : 0;
   });
-  return [...baselineKeys, ...appendOrder].map((key) => resolved.get(key));
+  return [
+    ...baseline.keys.flatMap((key) => [
+      ...(insertions.get(key)?.reverse() || []),
+      ...(resolved.has(key) ? [key] : []),
+    ]),
+    ...appendOrder,
+  ].map((key) => resolved.get(key));
 }
 
-function mergeSessionThreeWay(baseline, local, remote) {
+export function sessionMetadataOnly(session) {
+  if (!Object.hasOwn(session, 'messages')) return session;
+  const { messages: _messages, ...metadata } = session;
+  return metadata;
+}
+
+function mergeSessionThreeWay(baseline, local, remote, bodyChanged) {
   const conflictPreference = (() => {
     const localAt = sessionTimestamp(local);
     const remoteAt = sessionTimestamp(remote);
     if (!localAt || !remoteAt || localAt === remoteAt) return null;
     return localAt > remoteAt ? 'local' : 'remote';
   })();
-  const merged = mergeValueThreeWay(baseline, local, remote, conflictPreference);
-  if (!isRecord(merged)) return local;
-  const hasMessages = [baseline, local, remote].some(
-    (session) => Object.prototype.hasOwnProperty.call(session || {}, 'messages')
+  const metadata = mergeValueThreeWay(
+    sessionMetadataOnly(baseline),
+    sessionMetadataOnly(local),
+    sessionMetadataOnly(remote),
+    conflictPreference
   );
-  if (hasMessages) {
-    merged.messages = mergeMessages(
-      baseline?.messages || [],
-      local?.messages || [],
-      remote?.messages || []
-    );
-  } else {
-    delete merged.messages;
-  }
-  return merged;
+  // Missing bodies are unknown, not empty. Never synthesize message deletions
+  // from a metadata-only local or remote record.
+  if (!bodyChanged) return Array.isArray(remote.messages) ? { ...metadata, messages: remote.messages } : metadata;
+  const messages = Array.isArray(remote.messages)
+    ? mergeMessages(baseline.messages || [], local.messages, remote.messages)
+    : local.messages;
+  return { ...metadata, messages };
 }
 
 function sessionsById(sessions) {
@@ -254,13 +276,59 @@ export function sortSessions(sessions, sortBy = 'updatedAt') {
   return [...(sessions || [])].sort((a, b) => timestamp(b) - timestamp(a));
 }
 
-/**
- * Capture the exact serializable value that saveSessions() is asked to persist.
- * Keeping an isolated snapshot prevents later in-memory mutations from making a
- * previously persisted session appear clean.
- */
+const immutableNodes = new WeakSet();
+const NOT_JSON_DATA = Symbol('not-json-data');
+
+function copySessionData(value, ancestors) {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean' || value === undefined) return value;
+  if (typeof value === 'number') return Number.isFinite(value) ? value || 0 : null;
+  if (typeof value !== 'object') return NOT_JSON_DATA;
+  if (immutableNodes.has(value)) return value;
+  const array = Array.isArray(value);
+  if (
+    Object.getPrototypeOf(value) !== (array ? Array.prototype : Object.prototype)
+    || 'toJSON' in value
+    || ancestors.has(value)
+  ) return NOT_JSON_DATA;
+
+  const copy = array ? [] : {};
+  ancestors.add(value);
+  const copyProperty = (key) => {
+    const property = Object.getOwnPropertyDescriptor(value, key);
+    if (!property || !Object.hasOwn(property, 'value')) return false;
+    const child = copySessionData(property.value, ancestors);
+    if (child === NOT_JSON_DATA) return false;
+    if (array) copy.push(child === undefined ? null : child);
+    else if (child !== undefined) Object.defineProperty(copy, key, { value: child, enumerable: true });
+    return true;
+  };
+  if (array) {
+    for (let i = 0; i < value.length; i += 1) if (!copyProperty(i)) return NOT_JSON_DATA;
+  } else {
+    for (const key of Object.keys(value)) if (!copyProperty(key)) return NOT_JSON_DATA;
+  }
+  ancestors.delete(value);
+  Object.freeze(copy);
+  immutableNodes.add(copy);
+  return copy;
+}
+
+/** Own plain session data without walking any previously owned subtrees. */
+export function immutableSessionData(value) {
+  try {
+    const copy = copySessionData(value, new WeakSet());
+    if (copy !== NOT_JSON_DATA) return copy;
+  } catch { /* foreign objects still take the normal serialization path */ }
+  return value;
+}
+
+export function isImmutableSessionData(value) {
+  return immutableNodes.has(value);
+}
+
+/** Capture an isolated snapshot, sharing only data we already own and froze. */
 export function snapshotSessions(sessions) {
-  return JSON.parse(JSON.stringify(sessions || []));
+  return isImmutableSessionData(sessions) ? sessions : JSON.parse(JSON.stringify(sessions || []));
 }
 
 /**
@@ -285,14 +353,21 @@ export function reconcileStoredSessions(savedSessions, currentSessions, persiste
   // changed since its last successful persistence.
   for (const [id, current] of currentById) {
     const persisted = persistedById.get(id);
-    if (!persisted || sessionDataChanged(current, persisted)) {
+    const bodyChanged = Array.isArray(current.messages)
+      && sessionDataChanged(current.messages, persisted?.messages);
+    if (!persisted || bodyChanged || sessionDataChanged(
+      sessionMetadataOnly(current), sessionMetadataOnly(persisted)
+    )) {
       const saved = savedById.get(id);
-      savedById.set(
-        id,
-        persisted && saved
-          ? mergeSessionThreeWay(persisted, current, saved)
-          : current
-      );
+      if (persisted && saved) {
+        savedById.set(id, mergeSessionThreeWay(persisted, current, saved, bodyChanged));
+      } else if (!Array.isArray(current.messages) && Array.isArray(persisted?.messages)) {
+        // A real metadata edit can survive a whole-session deletion. Retain
+        // the last known body if it was only evicted locally.
+        savedById.set(id, { ...current, messages: persisted.messages });
+      } else {
+        savedById.set(id, current);
+      }
     }
   }
 

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import test from 'node:test';
 import process from 'node:process';
 import { createCommandExecutor } from './command-executor.js';
@@ -55,4 +56,26 @@ test('aborting a foreground command rejects only after process cleanup', async (
   setTimeout(() => controller.abort(), 30);
 
   await assert.rejects(running, (error) => error?.name === 'AbortError');
+});
+
+test('termination falls back to the child when taskkill emits an asynchronous error', async () => {
+  const child = new EventEmitter();
+  child.pid = 42;
+  child.kill = (signal) => {
+    child.emit('close', null, signal);
+    return true;
+  };
+  const executor = createCommandExecutor({
+    platform: 'win32',
+    spawnImpl(command) {
+      if (command !== 'taskkill') return child;
+      const killer = new EventEmitter();
+      queueMicrotask(() => killer.emit('error', new Error('taskkill unavailable')));
+      return killer;
+    },
+  });
+
+  const result = await executor.start('example').terminate('aborted');
+  assert.equal(result.status, 'aborted');
+  assert.equal(result.signal, 'SIGTERM');
 });

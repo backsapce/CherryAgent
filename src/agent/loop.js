@@ -8,16 +8,15 @@
 
 import { generateText, jsonSchema, stepCountIs, streamText, tool } from 'ai';
 import llm from '../models/llm.js';
-import { normalizeAiUsage, toModelMessages } from '../models/ai.js';
+import { normalizeAiUsage } from '../models/ai.js';
 import { getEnabledToolSchemas, registry } from './tools.js';
-import { assembleApiMessages, summaryStateMatchesHistory } from './context.js';
+import { assembleApiMessages, estimateSystemTokens, estimateTokens, inputTokenBudget, summaryStateMatchesHistory } from './context.js';
 import { loadMemory } from './memory.js';
 import { buildSandboxSkillFiles, buildSkillsSection } from './skills.js';
 import { compactToolResultForModel } from './toolObservation.js';
 import { AGENT_EVENT_VERSION, createAgentEventState, applyAgentEvent } from './events.js';
 import { createToolLoopGuard } from './loopSafety.js';
 import { assessToolCommandDanger } from './dangerousCommand.js';
-import { estimateTextTokens } from './tokenEstimate.js';
 import { getStaticContextWindow } from '../models/contextWindow.js';
 import { readAgentAgentsFile } from '../vfs/opfs.js';
 import { getAgent, getWorkspaceDirName } from '../agents/agents.js';
@@ -205,13 +204,12 @@ export async function runAgentLoop(opts) {
     });
     const model = await (opts.languageModel || llm.getLanguageModel(opts.llmProfileId));
     const tools = createAgentTools(schemas, toolContext, emit);
-    const modelHistory = toModelMessages(packed.apiMessages, { contextWindow });
-    const initial = await consumeAgentStream({
+    const modelHistory = packed.modelMessages;
+    const streamOptions = {
       model,
-      messages: modelHistory,
       system: packed.systemPrompt,
-      tools,
-      maxRounds,
+      latestUserMessage: packed.latestUserMessage,
+      summaryMessage: packed.summaryMessage,
       modelMaxRetries,
       modelTimeout,
       contextWindow,
@@ -219,7 +217,8 @@ export async function runAgentLoop(opts) {
       emit,
       lifecycle,
       loopControl,
-    });
+    };
+    const initial = await consumeAgentStream({ ...streamOptions, messages: modelHistory, tools, maxRounds });
 
     let latestRun = initial;
     let responseMessages = [...initial.responseMessages];
@@ -250,21 +249,11 @@ export async function runAgentLoop(opts) {
     // accept a completed run and render a permanently blank assistant card.
     if (!hasMeaningfulAgentOutput(state) && modelCallCount < maxRounds) {
       const recovery = await consumeAgentStream({
-        model,
-        messages: [
-          ...modelHistory,
-          { role: 'user', content: EMPTY_RESPONSE_RETRY_PROMPT },
-        ],
-        system: packed.systemPrompt,
+        ...streamOptions,
+        messages: modelHistory,
+        controlPrompt: EMPTY_RESPONSE_RETRY_PROMPT,
         tools,
         maxRounds: Math.max(1, maxRounds - modelCallCount),
-        modelMaxRetries,
-        modelTimeout,
-        contextWindow,
-        signal: turn.signal,
-        emit,
-        lifecycle,
-        loopControl,
       });
       latestRun = recovery;
       responseMessages.push(...recovery.responseMessages);
@@ -278,22 +267,11 @@ export async function runAgentLoop(opts) {
     // to report a useful status, matching the old loop's bounded finalizer.
     if (latestRun.finishReason === 'tool-calls' && !loopControl.wakeupScheduled && !signal?.aborted) {
       const finalizer = await consumeAgentStream({
-        model,
-        messages: [
-          ...modelHistory,
-          ...responseMessages,
-          { role: 'user', content: FINALIZE_PROMPT },
-        ],
-        system: packed.systemPrompt,
+        ...streamOptions,
+        messages: [...modelHistory, ...responseMessages],
+        controlPrompt: FINALIZE_PROMPT,
         tools: {},
         maxRounds: 1,
-        modelMaxRetries,
-        modelTimeout,
-        contextWindow,
-        signal: turn.signal,
-        emit,
-        lifecycle,
-        loopControl,
       });
       latestRun = finalizer;
       latestUsage = finalizer.usage || latestUsage;
@@ -584,6 +562,9 @@ async function consumeAgentStream({
   model,
   messages,
   system,
+  latestUserMessage,
+  summaryMessage,
+  controlPrompt,
   tools,
   maxRounds,
   modelMaxRetries,
@@ -594,9 +575,13 @@ async function consumeAgentStream({
   lifecycle,
   loopControl,
 }) {
+  const controlMessage = controlPrompt ? { role: 'user', content: controlPrompt } : null;
+  const required = [latestUserMessage, controlMessage].filter(Boolean);
+  const systemTokens = estimateSystemTokens(system);
+  const budget = inputTokenBudget(contextWindow, systemTokens + (required.length ? estimateTokens(required) : 0));
   const result = streamText({
     model,
-    messages,
+    messages: controlMessage ? [...messages, controlMessage] : messages,
     ...(system ? { system } : {}),
     ...(Object.keys(tools).length ? {
       tools,
@@ -619,18 +604,18 @@ async function consumeAgentStream({
         stepId: lifecycle?.currentStepId,
         stepIndex: lifecycle?.stepIndex,
       });
-      const compacted = compactAiMessages(stepMessages, contextWindow);
-      if (compacted !== stepMessages) {
-        emit({
-          type: 'context-compact',
-          stepId: lifecycle?.currentStepId || null,
-          beforeTokens: estimateAiMessageTokens(stepMessages),
-          afterTokens: estimateAiMessageTokens(compacted),
-          beforeMessages: stepMessages.length,
-          afterMessages: compacted.length,
-        });
-      }
-      return compacted === stepMessages ? undefined : { messages: compacted };
+      const beforeTokens = systemTokens + estimateTokens(stepMessages);
+      if (beforeTokens <= budget) return;
+      const compacted = compactAiMessages(stepMessages, budget - systemTokens, required, summaryMessage);
+      emit({
+        type: 'context-compact',
+        stepId: lifecycle?.currentStepId || null,
+        beforeTokens,
+        afterTokens: systemTokens + estimateTokens(compacted),
+        beforeMessages: stepMessages.length,
+        afterMessages: compacted.length,
+      });
+      return { messages: compacted };
     },
     maxRetries: modelMaxRetries,
   });
@@ -984,28 +969,68 @@ function createTurnController(parentSignal, enabled) {
  * their tool-result messages. Initial user history is already summarized by
  * assembleApiMessages(); this protects the additional AI SDK loop history.
  */
-function compactAiMessages(messages, contextWindow) {
-  const threshold = Math.floor(Math.max(contextWindow || 0, 8_000) * 0.72);
-  if (estimateAiMessageTokens(messages) <= threshold) return messages;
-
+function compactAiMessages(messages, budget, required, summaryMessage) {
   const blocks = groupAiMessageBlocks(messages);
-  const headBlocks = blocks.slice(0, Math.min(4, blocks.length));
-  const headCount = headBlocks.length;
-  const headTokens = estimateAiMessageTokens(headBlocks.flat());
-  const tailBudget = Math.max(2_048, threshold - headTokens);
-  const tail = [];
-  let tailTokens = 0;
-
-  for (let index = blocks.length - 1; index >= headCount; index -= 1) {
-    const block = blocks[index];
-    const blockTokens = estimateAiMessageTokens(block);
-    const mustKeep = tail.length < 8;
-    if (!mustKeep && tailTokens + blockTokens > tailBudget) break;
-    tail.unshift(block);
-    tailTokens += blockTokens;
+  const kept = new Array(blocks.length);
+  let remaining = budget;
+  const keep = (index, block = blocks[index]) => {
+    const tokens = estimateTokens(block);
+    if (tokens > remaining) return false;
+    kept[index] = block;
+    remaining -= tokens;
+    return true;
+  };
+  for (const message of [...required, summaryMessage].filter(Boolean)) {
+    const index = blocks.findIndex((block) => block[0] === message);
+    if (index >= 0) keep(index);
   }
 
-  return [...headBlocks.flat(), ...tail.flat()];
+  const userIndex = blocks.findIndex((block) => block[0] === required[0]);
+  const latestTool = blocks.findLastIndex((block, index) => index > userIndex && block[1]?.role === 'tool');
+  let tail = blocks.length - 1;
+  const keepTail = (limit) => {
+    for (let count = 0; tail >= 0 && count < limit;) {
+      const index = tail--;
+      if (kept[index]) continue;
+      if (keep(index)) count += 1;
+      else if (index === latestTool) {
+        const shortened = fitLatestToolBlock(blocks[index], remaining);
+        if (keep(index, shortened ?? [{ role: 'user', content: '[A recent tool exchange already ran but was omitted to fit the context budget. Verify its effects before retrying.]' }])) count += 1;
+      }
+    }
+  };
+  keepTail(8);
+  for (let index = 0; index < Math.min(4, blocks.length); index += 1) {
+    if (!kept[index]) keep(index);
+  }
+  keepTail(Infinity);
+  const firstUser = kept.findIndex((block) => block?.[0].role === 'user');
+  return kept.flatMap((block, index) => index < firstUser && block[0].role === 'assistant' ? [] : block);
+}
+
+function fitLatestToolBlock(block, budget) {
+  const resultCount = block.slice(1).reduce((count, message) => count + message.content.length, 0);
+  if (!resultCount) return null;
+  const shorten = (maxChars) => [block[0], ...block.slice(1).map((message) => ({
+    ...message,
+    content: message.content.map((part) => {
+      const value = part.output?.value;
+      if (part.type !== 'tool-result' || typeof value !== 'string' || value.length <= maxChars) return part;
+      const compacted = compactToolResultForModel({ name: part.toolName }, value, { maxChars });
+      return { ...part, output: { ...part.output, value: compacted } };
+    }),
+  }))];
+  // Never alter the call arguments or IDs: if even the minimal block is too
+  // large, the caller omits the entire exchange, not an unmatched half.
+  const minChars = 64;
+  const minimal = shorten(minChars);
+  const room = budget - estimateTokens(minimal);
+  if (room < 0) return null;
+  for (let extra = Math.floor(room / resultCount) * 4; extra > 0; extra = Math.floor(extra / 2)) {
+    const shortened = shorten(minChars + extra);
+    if (estimateTokens(shortened) <= budget) return shortened;
+  }
+  return minimal;
 }
 
 function groupAiMessageBlocks(messages) {
@@ -1024,28 +1049,6 @@ function hasNativeToolCall(message) {
   return message?.role === 'assistant'
     && Array.isArray(message.content)
     && message.content.some((part) => part?.type === 'tool-call');
-}
-
-// prepareStep runs on every model call and re-estimates the whole loop
-// history. Message objects are immutable once appended, so cache each
-// message's serialized token estimate instead of re-stringifying it.
-const aiMessageTokenCache = new WeakMap();
-
-function estimateAiMessageTokens(messages) {
-  return Math.max(1, (messages || []).reduce((total, message) => {
-    let tokens = aiMessageTokenCache.get(message);
-    if (tokens === undefined) {
-      let serialized;
-      try {
-        serialized = JSON.stringify(message);
-      } catch {
-        serialized = '';
-      }
-      tokens = serialized ? estimateTextTokens(serialized) : 64;
-      aiMessageTokenCache.set(message, tokens);
-    }
-    return total + tokens;
-  }, 0));
 }
 
 function formatToolCallSummary(name, args = {}, result = '') {

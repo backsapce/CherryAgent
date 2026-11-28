@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  immutableSessionData,
+  isImmutableSessionData,
   reconcileSessionRecoveryJournal,
   reconcileStoredSessions,
   snapshotSessions,
@@ -25,6 +27,34 @@ test('persisted snapshots are isolated from later in-memory mutations', () => {
   assert.equal(snapshot[0].messages[0].content, 'persisted value');
 });
 
+test('owned snapshots share unchanged messages and allow no retained mutable aliases', () => {
+  const first = session('draft', 100, 'on disk');
+  first.messages[0].images = ['original'];
+  const owned = immutableSessionData([first]);
+  const next = immutableSessionData([{
+    ...owned[0],
+    messages: [...owned[0].messages, { id: 'new', content: 'append' }],
+  }]);
+  assert.equal(snapshotSessions(next), next);
+  assert.equal(next[0].messages[0], owned[0].messages[0]);
+  first.messages[0].images[0] = 'mutated';
+  assert.equal(next[0].messages[0].images[0], 'original');
+  assert.throws(() => { next[0].messages[0].images.push('unsafe'); }, TypeError);
+});
+
+test('frozen accessors and custom serializers do not qualify for snapshot sharing', () => {
+  let content = 'first';
+  const message = Object.freeze({ get content() { return content; } });
+  const input = Object.freeze([Object.freeze({ messages: Object.freeze([message]) })]);
+  assert.equal(isImmutableSessionData(immutableSessionData(input)), false);
+  const captured = snapshotSessions(input);
+  content = 'second';
+  assert.equal(captured[0].messages[0].content, 'first');
+  assert.equal(snapshotSessions(input)[0].messages[0].content, 'second');
+  const custom = [{ toJSON: () => ({ id: 'custom' }) }];
+  assert.deepEqual(snapshotSessions(immutableSessionData(custom)), [{ id: 'custom' }]);
+});
+
 test('a remote deletion removes an unchanged in-memory session', () => {
   const first = session('first', 100);
   const deletedRemotely = session('deleted-remotely', 200);
@@ -38,6 +68,33 @@ test('a remote deletion removes an unchanged in-memory session', () => {
 
   assert.deepEqual(result.sessions.map(({ id }) => id), ['first']);
   assert.equal(result.needsPersist, false);
+});
+
+test('evicting a hydrated body is not an edit or an explicit empty conversation', () => {
+  const hydrated = session('draft', 100, 'last read');
+  const { messages: _messages, ...evicted } = hydrated;
+  assert.deepEqual(reconcileStoredSessions([], [evicted], [hydrated]), {
+    sessions: [], needsPersist: false,
+  });
+  const remote = session('draft', 200, 'remote edit');
+  const local = { ...evicted, title: 'local rename' };
+  const result = reconcileStoredSessions([remote], [local], [hydrated]);
+  assert.equal(result.sessions[0].title, 'local rename');
+  assert.equal(result.sessions[0].messages, remote.messages);
+  assert.equal(reconcileStoredSessions([], [local], [hydrated]).sessions[0].messages, hydrated.messages);
+
+  const cleared = { ...hydrated, messages: [] };
+  assert.deepEqual(reconcileStoredSessions([hydrated], [cleared], [hydrated]).sessions[0].messages, []);
+});
+
+test('a sparse refresh preserves real local body edits without dropping unseen messages', () => {
+  const baseline = session('draft', 100, 'first');
+  const local = { ...baseline, messages: [...baseline.messages, { id: 'appended', content: 'second' }] };
+  const remote = { id: 'draft', title: 'remote rename', updatedAtMs: 200 };
+  const result = reconcileStoredSessions([remote], [local], [baseline]);
+  assert.equal(result.sessions[0].title, 'remote rename');
+  assert.equal(result.sessions[0].messages, local.messages);
+  assert.equal(result.needsPersist, true);
 });
 
 test('an unsaved local edit survives a remote deletion', () => {

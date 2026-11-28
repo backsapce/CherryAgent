@@ -1,6 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import JSZip from 'jszip';
+import { createSessionSaveCoordinator } from '../sessionPersistence.js';
+import {
+  immutableSessionData,
+  reconcileSessionRecoveryJournal,
+  reconcileStoredSessions,
+  snapshotSessions,
+} from '../sessionRefresh.js';
 import {
   ZIP_IMPORT_MAX_ENTRIES,
   ZIP_IMPORT_MAX_FILE_BYTES,
@@ -24,6 +31,7 @@ import {
   saveSessions,
   validateSessionRecoveryJournal,
   writeSessionRecoveryJournal,
+  writePathBytes,
   writePathText,
 } from './opfs.js';
 
@@ -737,7 +745,7 @@ test('ZIP import hard limits are exported and remain compatible with valid overr
 // ─── Session archive (hot tail + gzip chunks) ─────────────────────────────────
 
 import { gzipText } from './compression.js';
-import { HOT_KEEP_MESSAGES, chunkFileName, planSessionArchive } from './sessionArchive.js';
+import { CHUNK_MAX_SERIALIZED_BYTES, HOT_KEEP_MESSAGES, chunkFileName, planSessionArchive } from './sessionArchive.js';
 
 function archiveTestMessages(count, prefix = 'arch') {
   return Array.from({ length: count }, (_, index) => ({
@@ -908,7 +916,9 @@ test('saves self-heal or defer around archive chunks that have not landed', asyn
   const withNewMessage = [...truncatedView, {
     id: 'defer-new', role: 'user', content: 'typed during the sync gap', createdAtMs: 2,
   }];
-  await saveSessions([{ id, title: 'defer', messages: withNewMessage }]);
+  assert.deepEqual(await saveSessions([{ id, title: 'defer', messages: withNewMessage }]), {
+    deferred: true, deferredIds: [id],
+  });
   assert.equal(
     await readPathText(`sessions/${id}.json`),
     envelopeBefore,
@@ -924,6 +934,165 @@ test('saves self-heal or defer around archive chunks that have not landed', asyn
   await saveSessions([{ id, title: 'defer', messages: rebased }]);
   assert.deepEqual(await loadSessionMessages(id), rebased);
   assert.equal((await loadSessionMessages(id)).length, 352);
+});
+
+test('the real save coordinator checkpoints gap edits and commits only after a complete refresh', async () => {
+  useMemoryOpfs();
+  const id = 'defer-coordinator';
+  const all = archiveTestMessages(350);
+  await saveSessions([{ id, title: 'durable', messages: all }]);
+  const chunkPath = `sessions/${id}/c0000.json.gz`;
+  const chunk = await readPathBytes(chunkPath);
+  const envelope = await readPathText(`sessions/${id}.json`);
+  await deletePath(chunkPath, { internal: true });
+  const read = async () => immutableSessionData([{
+    ...(await loadSessionMetadata())[0],
+    messages: await loadSessionMessages(id, { immutable: true }),
+  }]);
+  const baseline = await read();
+  let persisted = baseline;
+  let writes = 0;
+  let commits = 0;
+  const coordinator = createSessionSaveCoordinator({
+    save: (...args) => { writes += 1; return saveSessions(...args); },
+    snapshot: snapshotSessions,
+    checkpoint: (sessions, base) => writeSessionRecoveryJournal({ sessions, baseline: base }),
+    clearCheckpoint: clearSessionRecoveryJournal,
+    onCommitted: (snapshot) => { persisted = snapshot; commits += 1; },
+  });
+  const first = { id: 'typed-1', role: 'user', content: 'before sync' };
+  const last = { id: 'typed-2', role: 'user', content: 'during sync' };
+  const edit = (extra) => immutableSessionData([{
+    ...baseline[0], title: 'local edit', messages: [...baseline[0].messages, ...extra],
+  }]);
+  coordinator.schedule(edit([first]), persisted);
+  const release = await coordinator.beginBarrier();
+  assert.equal(commits, 0);
+  assert.equal(await readPathText(`sessions/${id}.json`), envelope);
+  assert.equal((await loadSessionMetadata())[0].title, 'durable');
+  assert.deepEqual((await readSessionRecoveryJournal()).sessions, edit([first]));
+
+  // The barrier has let the pull run. A body read before it must still
+  // defer even though the missing file now exists on disk.
+  await writePathBytes(chunkPath, chunk, { internal: true });
+  const latest = edit([first, last]);
+  assert.equal((await saveSessions(latest, persisted)).deferred, true);
+  coordinator.schedule(latest, persisted);
+  assert.equal((await coordinator.flush()).deferred, true);
+  const journal = await readSessionRecoveryJournal();
+  assert.deepEqual(journal.sessions, latest);
+  assert.deepEqual(journal.baseline, baseline);
+  assert.equal(writes, 1, 'flush during the storage barrier must only checkpoint');
+
+  const refreshed = await read();
+  const { sessions: merged } = reconcileStoredSessions(refreshed, latest, persisted);
+  assert.deepEqual(merged[0].messages, [...all, first, last]);
+  // This also covers the restart path: the journal needs the freshly loaded
+  // durable body, not a metadata-only index, as its remote side.
+  assert.deepEqual(reconcileSessionRecoveryJournal(refreshed, journal).sessions, merged);
+  coordinator.cancelScheduled();
+  persisted = refreshed;
+  coordinator.schedule(immutableSessionData(merged), persisted);
+  release();
+  assert.equal((await coordinator.flush()).deferred, false);
+  assert.equal(writes, 2);
+  assert.equal(commits, 1);
+  assert.equal(await readSessionRecoveryJournal(), null);
+  const opened = await read();
+  assert.deepEqual(opened, merged);
+
+  await writePathText('session.json', '[]', { internal: true });
+  assert.deepEqual(reconcileStoredSessions(await loadSessionMetadata(), opened, persisted), {
+    sessions: [], needsPersist: false,
+  });
+});
+
+test('repeated owned appends do not serialize sealed message payloads', async () => {
+  const origin = useMemoryOpfs();
+  const id = 'owned-append';
+  const all = archiveTestMessages(650);
+  await saveSessions([{ id, messages: all }]);
+  const loaded = await loadSessionMessages(id, { immutable: true });
+  const save = (messages) => saveSessions(immutableSessionData([{ id, messages }]));
+  let after = immutableSessionData([...loaded, { id: 'append-first', content: 'warm the cache' }]);
+  await save(after);
+  const archived = new Set(loaded.slice(0, 500));
+  const stringify = JSON.stringify;
+  const Inflate = globalThis.DecompressionStream;
+  const serializedSealed = new Set();
+  const previousViews = [after];
+  let inflated = 0;
+  JSON.stringify = function (value, ...args) {
+    if (archived.has(value) || archived.has(value?.[0]) || archived.has(value?.messages?.[0])) {
+      serializedSealed.add(value);
+    }
+    return stringify(value, ...args);
+  };
+  globalThis.DecompressionStream = class extends Inflate {
+    constructor(...args) { super(...args); inflated += 1; }
+  };
+  try {
+    for (let index = 0; index < 3; index += 1) {
+      after = immutableSessionData([...after, ...archiveTestMessages(25, `turn-${index}`)]);
+      await save(after);
+      previousViews.push(after);
+    }
+  } finally {
+    JSON.stringify = stringify;
+    globalThis.DecompressionStream = Inflate;
+  }
+  assert.equal(serializedSealed.size, 0);
+  assert.equal(inflated, 0);
+  assert.deepEqual(await loadSessionMessages(id), after);
+
+  const appRoot = await origin.getDirectoryHandle('cherry-agent');
+  const sessions = await appRoot.getDirectoryHandle('sessions');
+  const archive = await sessions.getDirectoryHandle(id);
+  const sealed = await archive.getFileHandle(chunkFileName(0));
+  const originalBytes = await readPathBytes(`sessions/${id}/${chunkFileName(0)}`);
+  const damagedBytes = originalBytes.slice();
+  damagedBytes[damagedBytes.length - 1] ^= 1;
+  // Simulate an out-of-band writer with the same size and timestamp.
+  sealed.blob = new Blob([damagedBytes]);
+  const next = [...after, { id: 'external-check', content: 'safe fallback' }];
+  await save(next);
+  assert.deepEqual(await readPathBytes(`sessions/${id}/${chunkFileName(0)}`), originalBytes);
+  assert.deepEqual(await loadSessionMessages(id), next);
+
+  const edited = next.slice(0, 175);
+  edited[0] = { ...edited[0], content: 'edit outside the hot tail' };
+  await save(edited);
+  assert.deepEqual(await loadSessionMessages(id), edited);
+  assert.deepEqual(await readSessionDirEntryNames(id), []);
+});
+
+test('editing the lookahead invalidates a byte-capped sealed prefix', async () => {
+  useMemoryOpfs();
+  const id = 'byte-lookahead';
+  const all = archiveTestMessages(HOT_KEEP_MESSAGES + 3);
+  all[0].content = 'a'.repeat(CHUNK_MAX_SERIALIZED_BYTES - 1024);
+  all[1].content = 'b'.repeat(2048);
+  const before = immutableSessionData([{ id, messages: all }]);
+  await saveSessions(before);
+  assert.deepEqual(await readSessionDirEntryNames(id), [chunkFileName(0)]);
+  const edited = [...before[0].messages, { id: 'new', content: 'append' }];
+  edited[1] = { ...edited[1], content: 'shorter' };
+  await saveSessions(immutableSessionData([{ id, messages: edited }]));
+  assert.deepEqual(await readSessionDirEntryNames(id), []);
+  assert.deepEqual(await loadSessionMessages(id), edited);
+});
+
+test('a caller cannot forge immutability with frozen accessors or mutate a queued save', async () => {
+  useMemoryOpfs();
+  let content = 'original';
+  const message = Object.freeze({ id: 'message', get content() { return content; } });
+  const source = Object.freeze([{ id: 'external', messages: Object.freeze([message]) }]);
+  const saving = saveSessions(source);
+  content = 'changed after snapshot';
+  await saving;
+  assert.equal((await loadSessionMessages('external'))[0].content, 'original');
+  await saveSessions(source);
+  assert.equal((await loadSessionMessages('external'))[0].content, 'changed after snapshot');
 });
 
 test('export emits one canonical body per session and import over an archived session converges', async () => {

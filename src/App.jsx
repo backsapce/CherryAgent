@@ -1,4 +1,4 @@
-import { lazy, Suspense, useState, useCallback, useEffect, useLayoutEffect, useRef } from 'react';
+import { lazy, Suspense, useState, useCallback, useEffect, useLayoutEffect, useReducer, useRef } from 'react';
 import SessionList from './components/SessionList/SessionList';
 import MessagePanel from './components/MessagePanel/MessagePanel';
 import {
@@ -41,8 +41,10 @@ import {
 } from './models/sessionTitle';
 import { editUserMessageAndDiscardFollowing } from './messageHistory';
 import {
+  immutableSessionData,
   reconcileSessionRecoveryJournal,
   reconcileStoredSessions,
+  sessionMetadataOnly,
   snapshotSessions,
   sortSessions,
 } from './sessionRefresh';
@@ -100,14 +102,15 @@ function sessionTimeFields(date = new Date()) {
   };
 }
 
-function sessionMetadataOnly(session) {
-  if (!Object.prototype.hasOwnProperty.call(session, 'messages')) return session;
-  const { messages: _messages, ...metadata } = session;
-  return metadata;
+async function loadStoredSessionBodies(ids, bodies = new Map()) {
+  for (const id of ids) bodies.set(id, await loadSessionMessages(id, { immutable: true }));
+  return bodies;
 }
 
-function metadataSnapshot(sessions) {
-  return snapshotSessions((sessions || []).map(sessionMetadataOnly));
+function withStoredSessionBodies(metadata, bodies) {
+  return immutableSessionData(sortSessions(metadata.map((session) => (
+    bodies.has(session.id) ? { ...session, messages: bodies.get(session.id) } : session
+  ))));
 }
 
 function sessionHasRunningRemote(sessions, sessionId) {
@@ -325,7 +328,9 @@ function PermissionCardStack({ items, onResolve }) {
 }
 
 function App() {
-  const [sessions, setSessions] = useState([]);
+  const [sessions, setSessions] = useReducer((previous, update) => (
+    immutableSessionData(typeof update === 'function' ? update(previous) : update)
+  ), []);
   const [activeSessionId, setActiveSessionId] = useState(null);
   const [loaded, setLoaded] = useState(false);
   const [initError, setInitError] = useState(null);
@@ -392,6 +397,7 @@ function App() {
   const activeSessionIdRef = useRef(activeSessionId);
   const localePrefRef = useRef(localePref);
   const sessionLoadRequestRef = useRef(0);
+  const sessionStorageGenerationRef = useRef(0);
   const sessionLoadingRequestsRef = useRef(new Map());
   const sessionRunsRef = useRef(null);
 
@@ -411,7 +417,16 @@ function App() {
       }),
       clearCheckpoint: clearSessionRecoveryJournal,
       onCommitted: (snapshot) => {
-        persistedSessionsRef.current = metadataSnapshot(snapshot);
+        const previousBodies = new Map(persistedSessionsRef.current.map(({ id, messages }) => [id, messages]));
+        const hydrated = new Set(sessionsRef.current.filter(({ messages }) => messages).map(({ id }) => id));
+        // A metadata-only save doesn't supersede a body read that completed
+        // while the write was in flight. Drop baselines for evicted bodies.
+        persistedSessionsRef.current = immutableSessionData(snapshot.map((session) => {
+          const messages = previousBodies.get(session.id);
+          return !session.messages && hydrated.has(session.id) && messages
+            ? { ...session, messages }
+            : session;
+        }));
       },
       onError: (err) => console.warn('OPFS save failed:', err),
     });
@@ -421,6 +436,22 @@ function App() {
     () => sessionSaveCoordinatorRef.current.flush(),
     []
   );
+
+  const rememberReadBody = useCallback((sessionId, messages) => {
+    if (sessionsRef.current.find(({ id }) => id === sessionId)?.messages) return;
+    persistedSessionsRef.current = immutableSessionData(persistedSessionsRef.current.map((session) => (
+      session.id === sessionId ? { ...session, messages } : session
+    )));
+  }, []);
+
+  const evictSavedBodies = useCallback((current, keepId = null) => {
+    const savedBodies = new Map(persistedSessionsRef.current.map(({ id, messages }) => [id, messages]));
+    return current.map((session) => (
+      session.id !== keepId && session.messages === savedBodies.get(session.id)
+        ? sessionMetadataOnly(session)
+        : session
+    ));
+  }, []);
 
   const beginSessionStorageBarrier = useCallback(async () => {
     return sessionSaveCoordinatorRef.current.beginBarrier();
@@ -459,17 +490,27 @@ function App() {
       setUserNickname(config.get('general.userNickname') || config.get('general.nickname') || '');
       setAvatar(config.get('general.avatar') || '');
 
-      const persistedBeforeRefresh = persistedSessionsRef.current;
       const savedMetadata = await loadSessionMetadata();
       loadSessionFolders()
         .then((folders) => setSessionFolders(sortSessionFolders(folders)))
         .catch((err) => console.warn('Failed to load session folders:', err));
-      const selectedId = activeSessionIdRef.current;
-      const savedSessions = sortSessions(await Promise.all(savedMetadata.map(async (session) => (
-        session.id === selectedId
-          ? { ...session, messages: await loadSessionMessages(session.id) }
-          : session
-      ))));
+      const savedBodies = new Map();
+      // A selection or background run can hydrate another body while an OPFS
+      // read is pending. Include its durable body before reconciling any edit.
+      while (true) {
+        const bodyIds = new Set([activeSessionIdRef.current, ...sessionLoadingRequestsRef.current.keys()]);
+        for (const { id, messages } of [...sessionsRef.current, ...persistedSessionsRef.current]) {
+          if (messages) bodyIds.add(id);
+        }
+        const unread = savedMetadata.map(({ id }) => id).filter((id) => bodyIds.has(id) && !savedBodies.has(id));
+        if (!unread.length) break;
+        await loadStoredSessionBodies(unread, savedBodies);
+      }
+      // In-flight lazy reads must not install a body from the previous view.
+      sessionStorageGenerationRef.current += 1;
+      const savedSessions = withStoredSessionBodies(savedMetadata, savedBodies);
+      const persistedBeforeRefresh = persistedSessionsRef.current;
+      const hadDeferredSave = saveCoordinator.hasDeferredSave();
       // The outer storage barrier already flushed the pre-operation state.
       // Only after both storage reads succeed may we discard snapshots queued
       // while remote/imported files were changing. If either read fails, the
@@ -495,15 +536,22 @@ function App() {
           currentSessions,
           persistedBeforeRefresh
         );
-        skipNextSessionSaveRef.current = needsPersist ? null : latestMergedSessions;
-        sessionsRef.current = latestMergedSessions;
-        return latestMergedSessions;
+        const next = immutableSessionData(latestMergedSessions);
+        skipNextSessionSaveRef.current = needsPersist || hadDeferredSave ? null : next;
+        sessionsRef.current = next;
+        return next;
       });
 
       // The non-session state below only depends on session metadata. This
       // preview is refreshed from the same three-way merge; the functional
       // update above remains authoritative for message content.
       const mergedSessions = previewMerge.sessions;
+      const remainingIds = new Set(mergedSessions.map(({ id }) => id));
+      for (const { id } of sessionsRef.current) {
+        if (!remainingIds.has(id) && !deletingSessionIdsRef.current.has(id)) {
+          sessionIncarnationsRef.current.set(id, (sessionIncarnationsRef.current.get(id) || 0) + 1);
+        }
+      }
 
       // A restored session with the same id is a new incarnation. Clear the
       // completed deletion fence while invalidating callbacks captured by the
@@ -598,7 +646,6 @@ function App() {
         return Promise.all([
           loadSessionMetadata()
             .then(async (saved) => {
-              const sortedSaved = sortSessions(saved);
               let recoveryJournal = null;
               try {
                 recoveryJournal = await readSessionRecoveryJournal();
@@ -608,8 +655,12 @@ function App() {
                 // inspection and replace it after the next durable save.
                 console.warn('Ignoring invalid session recovery journal:', error);
               }
+              const journalBodyIds = new Set(recoveryJournal?.sessions
+                .filter(({ messages }) => messages).map(({ id }) => id));
+              const savedBodies = await loadStoredSessionBodies(saved.map(({ id }) => id).filter((id) => journalBodyIds.has(id)));
+              const sortedSaved = withStoredSessionBodies(saved, savedBodies);
               const sorted = recoveryJournal
-                ? reconcileSessionRecoveryJournal(sortedSaved, recoveryJournal).sessions
+                ? immutableSessionData(reconcileSessionRecoveryJournal(sortedSaved, recoveryJournal).sessions)
                 : sortedSaved;
               // Keep the loaded value itself as the initial immutable
               // baseline. Deep-cloning hundreds of MB of history here can
@@ -691,8 +742,8 @@ function App() {
 
   }, []);
 
-  // Debounced save to OPFS whenever sessions change
-  useEffect(() => {
+  // Schedule the immutable view at commit, before navigation or sync can flush it.
+  useLayoutEffect(() => {
     if (!loaded || !sessionPersistenceReadyRef.current) return;
     if (skipNextSessionSaveRef.current === sessions) {
       skipNextSessionSaveRef.current = null;
@@ -700,8 +751,6 @@ function App() {
       return;
     }
     skipNextSessionSaveRef.current = null;
-    // Cloning is intentionally deferred into the timer so streaming renders
-    // only replace one array reference instead of cloning/stringifying history.
     sessionSaveCoordinatorRef.current.schedule(sessions, persistedSessionsRef.current);
   }, [sessions, loaded]);
 
@@ -1097,7 +1146,7 @@ function App() {
       || pendingStreamStartsRef.current.size > 0
       || sessionStopPromisesRef.current.size > 0
       || messageQueue.length > 0;
-    if (!preserveLoadedMessages) await flushPendingSessionSave();
+    if (!preserveLoadedMessages) preserveLoadedMessages = (await flushPendingSessionSave())?.deferred === true;
     preserveLoadedMessages ||= sessionRunsRef.current.values().length > 0
       || pendingStreamStartsRef.current.size > 0
       || sessionStopPromisesRef.current.size > 0
@@ -1105,7 +1154,7 @@ function App() {
     if (!activeSessionId) messagePanelRef.current?.adoptNewSessionDraft(newSession.id);
     setSessions((prev) => sortSessions([
       newSession,
-      ...prev.map((session) => preserveLoadedMessages ? session : sessionMetadataOnly(session)),
+      ...(preserveLoadedMessages ? prev : evictSavedBodies(prev)),
     ]));
     setActiveSessionId(newSession.id);
 
@@ -1116,7 +1165,7 @@ function App() {
       setSessionLlmProfiles((prev) => ({ ...prev, [newSession.id]: llmProfileId }));
       setCurrentLlmProfileId(llmProfileId);
     }
-  }, [sessions, activeSessionId, agentList, agentListReady, lastAgentId, currentLlmProfileId, getAgentDefaultLlmId, flushPendingSessionSave, messageQueue]);
+  }, [sessions, activeSessionId, agentList, agentListReady, lastAgentId, currentLlmProfileId, getAgentDefaultLlmId, flushPendingSessionSave, messageQueue, evictSavedBodies]);
 
   const handleSelectSession = useCallback(async (sessionId) => {
     const requestId = ++sessionLoadRequestRef.current;
@@ -1144,9 +1193,10 @@ function App() {
         || sessionStopPromisesRef.current.size > 0
         || messageQueue.length > 0
       ) return;
-      await flushPendingSessionSave();
+      const saveResult = await flushPendingSessionSave();
       if (
-        requestId !== sessionLoadRequestRef.current
+        saveResult?.deferred
+        || requestId !== sessionLoadRequestRef.current
         || deletedSessionIdsRef.current.has(sessionId)
         || (sessionIncarnationsRef.current.get(sessionId) || 0) !== sessionIncarnation
         || sessionRunsRef.current.values().length > 0
@@ -1154,13 +1204,7 @@ function App() {
         || sessionStopPromisesRef.current.size > 0
         || messageQueue.length > 0
       ) return;
-      setSessions((prev) => prev.map((item) => (
-        item.id === sessionId
-          ? (Object.prototype.hasOwnProperty.call(item, 'messages')
-              ? item
-              : { ...item, messages: session.messages })
-          : sessionMetadataOnly(item)
-      )));
+      setSessions((prev) => evictSavedBodies(prev, sessionId));
       return;
     }
 
@@ -1176,26 +1220,25 @@ function App() {
         || pendingStreamStartsRef.current.size > 0
         || sessionStopPromisesRef.current.size > 0
         || messageQueue.length > 0;
-      if (!preserveLoadedMessages) await flushPendingSessionSave();
-      const loadedMessages = await loadSessionMessages(sessionId);
-      if (
-        requestId !== sessionLoadRequestRef.current
-        || deletedSessionIdsRef.current.has(sessionId)
-        || (sessionIncarnationsRef.current.get(sessionId) || 0) !== sessionIncarnation
-      ) return;
+      if (!preserveLoadedMessages) preserveLoadedMessages = (await flushPendingSessionSave())?.deferred === true;
+      const storageGeneration = sessionStorageGenerationRef.current;
+      const isCurrent = () => requestId === sessionLoadRequestRef.current
+        && sessionStorageGenerationRef.current === storageGeneration
+        && !deletedSessionIdsRef.current.has(sessionId)
+        && (sessionIncarnationsRef.current.get(sessionId) || 0) === sessionIncarnation;
+      const loadedMessages = await loadSessionMessages(sessionId, { immutable: true });
+      if (!isCurrent()) return;
+      rememberReadBody(sessionId, loadedMessages);
       preserveLoadedMessages ||= sessionRunsRef.current.values().length > 0
         || pendingStreamStartsRef.current.size > 0
         || sessionStopPromisesRef.current.size > 0
         || messageQueue.length > 0;
       setSessions((prev) => {
-        return prev.map((item) => {
-          if (item.id === sessionId) {
-            return Object.prototype.hasOwnProperty.call(item, 'messages')
-              ? item
-              : { ...item, messages: loadedMessages };
-          }
-          return preserveLoadedMessages ? item : sessionMetadataOnly(item);
-        });
+        if (!isCurrent()) return prev;
+        const retained = preserveLoadedMessages ? prev : evictSavedBodies(prev, sessionId);
+        return retained.map((item) => (
+          item.id === sessionId && !item.messages ? { ...item, messages: loadedMessages } : item
+        ));
       });
     } catch (error) {
       console.error(`Failed to load session ${sessionId}:`, error);
@@ -1210,7 +1253,7 @@ function App() {
         });
       }
     }
-  }, [sessions, flushPendingSessionSave, messageQueue]);
+  }, [sessions, flushPendingSessionSave, messageQueue, rememberReadBody, evictSavedBodies]);
 
   const handleDeleteSession = useCallback(async (sessionId) => {
     // A stale row can dispatch twice before React removes it. One owner per id
@@ -1272,11 +1315,21 @@ function App() {
         // be streaming. Their later updates remain queued behind this barrier.
         const releaseBarrier = await beginSessionStorageBarrier();
         try {
-          const deletionSnapshot = sessionsRef.current.filter((item) => (
-            !deletedSessionIdsRef.current.has(item.id)
-          ));
+          const coordinator = sessionSaveCoordinatorRef.current;
+          // Don't publish metadata from an uncommitted generation via a delete.
+          const source = coordinator.hasDeferredSave() ? persistedSessionsRef.current : sessionsRef.current;
+          const deletionSnapshot = source.filter((item) => !deletedSessionIdsRef.current.has(item.id));
           await deleteSessionFile(deletionSnapshot, sessionId);
           messagePanelRef.current?.discardSessionDraft(sessionId);
+
+          const remaining = immutableSessionData(sessionsRef.current.filter((item) => item.id !== sessionId));
+          sessionsRef.current = remaining;
+          coordinator.schedule(remaining, persistedSessionsRef.current);
+          // A deferred journal predates this deletion. Replace it before
+          // releasing the barrier so recovery cannot replay the deleted draft.
+          const checkpointDeletion = coordinator.hasDeferredSave()
+            ? coordinator.checkpoint().catch((err) => console.warn('OPFS deletion checkpoint failed:', err))
+            : null;
 
           setSessionAgents((prev) => {
             const next = { ...prev };
@@ -1297,6 +1350,7 @@ function App() {
             }
             return updated;
           });
+          if (checkpointDeletion) await checkpointDeletion;
         } finally {
           releaseBarrier();
         }
@@ -2354,7 +2408,12 @@ function App() {
       addToBoundedSet(resumedRemoteRunsRef.current, session.remoteRun.id);
       void (async () => {
         try {
-          const runMessages = session.messages || await loadSessionMessages(session.id);
+          const storageGeneration = sessionStorageGenerationRef.current;
+          const readMessages = session.messages || await loadSessionMessages(session.id, { immutable: true });
+          if (sessionStorageGenerationRef.current !== storageGeneration) {
+            scheduleRetry(session.remoteRun.id);
+            return;
+          }
           const currentSession = sessionsRef.current.find((item) => item.id === session.id);
           if (
             factoryResetInProgressRef.current
@@ -2369,9 +2428,13 @@ function App() {
             resumedRemoteRunsRef.current.delete(session.remoteRun.id);
             return;
           }
-          setSessions((prev) => prev.map((item) => (
-            item.id === session.id ? { ...item, messages: runMessages } : item
-          )));
+          const runMessages = currentSession.messages || readMessages;
+          if (!currentSession.messages) {
+            rememberReadBody(session.id, runMessages);
+            setSessions((prev) => prev.map((item) => (
+              item.id === session.id && !item.messages ? { ...item, messages: runMessages } : item
+            )));
+          }
           const outcome = await streamResponse(session.id, runMessages, {
             agentId: session.agentId,
             llmProfileId: session.llmProfileId,
@@ -2391,7 +2454,7 @@ function App() {
         }
       })();
     }
-  }, [agentList, loaded, pendingSessionIds, remoteResumeVersion, runningSessionIds, sessions, streamResponse]);
+  }, [agentList, loaded, pendingSessionIds, remoteResumeVersion, runningSessionIds, sessions, streamResponse, rememberReadBody]);
 
   // A page can close in the narrow interval before the returned run id is
   // flushed to OPFS. Discover server-owned runs by session id as a fallback.
@@ -2430,12 +2493,19 @@ function App() {
         ) return;
         const latest = runs?.[0];
         if (!latest || latest.status === 'aborted') return;
-        const storedMessages = session.messages || await loadSessionMessages(session.id);
+        const storageGeneration = sessionStorageGenerationRef.current;
+        const storedMessages = sessionsRef.current.find(({ id }) => id === session.id)?.messages
+          || await loadSessionMessages(session.id, { immutable: true });
+        if (sessionStorageGenerationRef.current !== storageGeneration) {
+          scheduleDiscoveryRetry(discoveryKey);
+          return;
+        }
         if (
           factoryResetInProgressRef.current
           || deletedSessionIdsRef.current.has(session.id)
           || (sessionIncarnationsRef.current.get(session.id) || 0) !== sessionIncarnation
         ) return;
+        rememberReadBody(session.id, storedMessages);
         const terminalFailure = latest.status === 'error' || latest.status === 'interrupted';
         const replyId = latest.replyId || generateId();
         const terminalDetail = latest.status === 'interrupted'
@@ -2496,7 +2566,7 @@ function App() {
         if (!factoryResetInProgressRef.current) scheduleDiscoveryRetry(discoveryKey);
       });
     }
-  }, [agentList, appT, loaded, pendingSessionIds, remoteDiscoveryVersion, runningSessionIds, sessions]);
+  }, [agentList, appT, loaded, pendingSessionIds, remoteDiscoveryVersion, runningSessionIds, sessions, rememberReadBody]);
 
   const cancelPendingStreamStarts = useCallback(({ notify = true } = {}) => {
     const pendingStarts = [...pendingStreamStartsRef.current.values()];
@@ -2659,12 +2729,14 @@ function App() {
             || cancelledWakeupIdsRef.current.has(wakeup.id)
             || !(currentSession.wakeups || []).some((candidate) => candidate.id === wakeup.id)
           ) return;
-          const messages = currentSession.messages || await loadSessionMessages(currentSession.id);
+          const storageGeneration = sessionStorageGenerationRef.current;
+          const messages = currentSession.messages || await loadSessionMessages(currentSession.id, { immutable: true });
           // Loading a metadata-only session is asynchronous. Another turn may
           // have started in that gap, so leave this wake-up pending for retry.
           const latestSession = sessionsRef.current.find((item) => item.id === currentSession.id);
           if (
             !latestSession
+            || sessionStorageGenerationRef.current !== storageGeneration
             || cancelledWakeupIdsRef.current.has(wakeup.id)
             || !(latestSession.wakeups || []).some((candidate) => candidate.id === wakeup.id)
             || sessionRunsRef.current.has(currentSession.id)
@@ -2682,7 +2754,8 @@ function App() {
             role: 'user',
             content: buildWakeupMessage(wakeup),
           };
-          const nextMessages = [...messages, wakeMessage];
+          rememberReadBody(currentSession.id, messages);
+          const nextMessages = [...(latestSession.messages || messages), wakeMessage];
 
           const scheduled = scheduleStreamResponse(currentSession.id, nextMessages, {
             agentId: latestSession.agentId,
@@ -2712,7 +2785,7 @@ function App() {
     }, Math.min(delay, 2_147_483_647));
 
     return () => clearTimeout(timerId);
-  }, [loaded, pendingSessionIds, runningSessionIds, scheduleStreamResponse, sessions, stoppingSessionIds]);
+  }, [loaded, pendingSessionIds, runningSessionIds, scheduleStreamResponse, sessions, stoppingSessionIds, rememberReadBody]);
 
   const handleSendMessage = useCallback(
     (text, images, contextFiles) => {
@@ -2835,9 +2908,16 @@ function App() {
     const session = sessions.find((c) => c.id === sessionId);
     if (!session) return;
 
+    const storageGeneration = sessionStorageGenerationRef.current;
+    const incarnation = sessionIncarnationsRef.current.get(sessionId) || 0;
     const sourceMessages = session.messages || await loadSessionMessages(sessionId);
     const messageIndex = sourceMessages.findIndex((message) => message.id === messageId);
-    if (messageIndex === -1 || deletedSessionIdsRef.current.has(sessionId)) return;
+    if (
+      messageIndex === -1
+      || deletedSessionIdsRef.current.has(sessionId)
+      || sessionStorageGenerationRef.current !== storageGeneration
+      || (sessionIncarnationsRef.current.get(sessionId) || 0) !== incarnation
+    ) return;
 
     const forkedMessages = structuredClone(sourceMessages.slice(0, messageIndex + 1));
     let lastMessage = '';
@@ -2866,14 +2946,14 @@ function App() {
       || pendingStreamStartsRef.current.size > 0
       || sessionStopPromisesRef.current.size > 0
       || messageQueue.length > 0;
-    if (!preserveLoadedMessages) await flushPendingSessionSave();
+    if (!preserveLoadedMessages) preserveLoadedMessages = (await flushPendingSessionSave())?.deferred === true;
     preserveLoadedMessages ||= sessionRunsRef.current.values().length > 0
       || pendingStreamStartsRef.current.size > 0
       || sessionStopPromisesRef.current.size > 0
       || messageQueue.length > 0;
     setSessions((prev) => sortSessions([
       newSession,
-      ...prev.map((item) => (preserveLoadedMessages ? item : sessionMetadataOnly(item))),
+      ...(preserveLoadedMessages ? prev : evictSavedBodies(prev)),
     ]));
     setActiveSessionId(newSession.id);
 
@@ -2883,7 +2963,7 @@ function App() {
     if (session.llmProfileId) {
       setSessionLlmProfiles((prev) => ({ ...prev, [newSession.id]: session.llmProfileId }));
     }
-  }, [activeSessionId, activeSessionBusy, activeSessionAgentLoading, sessions, flushPendingSessionSave, messageQueue]);
+  }, [activeSessionId, activeSessionBusy, activeSessionAgentLoading, sessions, flushPendingSessionSave, messageQueue, evictSavedBodies]);
 
   const handleSelectLLM = useCallback(async (profileId) => {
     const nextProfileId = profileId || null;
@@ -2964,7 +3044,8 @@ function App() {
       configResetStarted = true;
       await clearAll();
       sessionPersistenceReadyRef.current = false;
-      const emptySessions = [];
+      sessionStorageGenerationRef.current += 1;
+      const emptySessions = immutableSessionData([]);
       persistedSessionsRef.current = emptySessions;
       skipNextSessionSaveRef.current = emptySessions;
       sessionsRef.current = emptySessions;
@@ -3222,11 +3303,7 @@ function App() {
           }
           setLlmReady((prev) => !prev);
         }}
-        onFetchModels={(providerId, config, profileId) => (
-          llm.fetchProviderModels
-            ? llm.fetchProviderModels(providerId)
-            : llm.fetchModels(providerId, config, profileId)
-        )}
+        onFetchModels={llm.fetchProviderModels}
         theme={theme}
         onThemeChange={handleThemeChange}
         agents={agents}

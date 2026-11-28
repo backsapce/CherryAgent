@@ -8,20 +8,18 @@
  */
 
 import llm from '../models/llm.js';
+import { toModelMessages } from '../models/ai.js';
 import { buildMemorySection } from './memory.js';
 import { COMMAND_EXECUTION_GUIDANCE } from './commandGuidance.js';
 import { estimateTextTokens } from './tokenEstimate.js';
-import { projectAssistantHistory } from './sessionHistory.js';
-import { clampNumber, truncateText } from '../utils/misc.js';
+import { truncateMiddle } from './toolObservation.js';
 
 const CONTEXT_WINDOW_FALLBACK = 128_000;
 const PACKING_THRESHOLD_RATIO = 0.72;
 const HEAD_PROTECT = 4;
-const MIN_TAIL_KEEP = 8;
+const RECENT_TAIL_KEEP = 8;
 const PREFERRED_TAIL_KEEP = 36;
-const RESPONSE_RESERVE_RATIO = 0.14;
-const MIN_RESPONSE_RESERVE = 4096;
-const MAX_RESPONSE_RESERVE = 24_000;
+const MAX_SUMMARY_TOKENS = 700;
 const MAX_SUMMARY_SOURCE_CHARS = 80_000;
 
 const AGENT_RUNTIME_PROMPT = `You are CherryAgent, an autonomous coding and browser-work agent.
@@ -80,12 +78,12 @@ ${COMMAND_EXECUTION_GUIDANCE}`;
  * @param {string} [opts.skillsList]
  * @param {string} [opts.agentIdentity]
  * @param {number} [opts.contextWindow]
- * @param {{ content?: string, coveredUntil?: number }} [opts.summaryState]
+ * @param {{ content?: string, coveredUntil?: number, anchorId?: string|null }} [opts.summaryState]
  * @param {string} [opts.summary] Legacy summary text.
  * @param {string} [opts.llmProfileId]
  * @param {AbortSignal} [opts.signal]
  * @param {boolean} [opts.autoSummarize=true]
- * @returns {Promise<{ apiMessages: Array, systemPrompt: string, compressed: boolean, summaryState: Object, estimatedTokens: number }>}
+ * @returns {Promise<{ apiMessages: Array, modelMessages: Array, latestUserMessage: Object|null, summaryMessage: Object|null, systemPrompt: string, compressed: boolean, summaryState: Object, estimatedTokens: number }>}
  */
 export async function assembleApiMessages(opts) {
   const {
@@ -110,36 +108,41 @@ export async function assembleApiMessages(opts) {
     runtimeMode,
   });
   let summaryState = normalizeSummaryState(opts.summaryState, opts.summary);
-  // Keep the source reply as the atomic unit for stored summary anchors. Count
-  // what it will expand to, not just the visible assistant text.
-  const projected = messages.map((message) => message?.role === 'assistant' && message.toolCalls?.length
-    ? projectAssistantHistory(message, { contextWindow })
-    : [message]);
-  const messageCosts = projected.map((group) => group.reduce((total, message) => total + estimateMessageTokens(message), 0));
-  let packed = packMessages(messages, fullSystemPrompt, contextWindow, summaryState, messageCosts);
+  // Keep the stored reply atomic for summary anchors, but count exactly the
+  // model-side messages it expands to (including call arguments and results).
+  const usedCallIds = new Set();
+  const projected = messages.map((message) => toModelMessages([message], { contextWindow, usedCallIds }));
+  const messageCosts = projected.map((group) => group.reduce((total, message) => total + estimateModelMessageTokens(message), 0));
+  const latestUserIndex = messages.findLastIndex((message) => message?.role === 'user');
+  const latestUserMessage = projected[latestUserIndex]?.[0] ?? null;
+  const systemTokens = estimateSystemTokens(fullSystemPrompt);
+  const pack = () => packMessages(messages, projected, messageCosts, latestUserIndex, systemTokens, contextWindow, summaryState);
+  let packed = pack();
 
   let summaryPasses = 0;
   while (autoSummarize && packed.needsSummary && summaryPasses < 3) {
     summaryPasses += 1;
-    const start = Math.max(packed.summaryStart, summaryState.coveredUntil || packed.summaryStart);
-    const end = packed.summaryEnd;
-    const newMessages = projected.slice(start, end).flat();
-    if (newMessages.length === 0) break;
-    const summary = await summarizeMiddle(newMessages, summaryState.content, {
+    const start = Math.max(packed.summaryStart, summaryState.content ? summaryState.coveredUntil : 0);
+    const summary = await summarizeMiddle(projected, {
+      start,
+      end: packed.summaryEnd,
+      existingSummary: summaryState.content,
       llmProfileId,
       signal,
       completeSummary,
+      contextWindow,
     });
-    summaryState = {
-      content: summary,
-      coveredUntil: end,
-    };
-    packed = packMessages(messages, fullSystemPrompt, contextWindow, summaryState, messageCosts);
+    if (!summary) break;
+    summaryState = summary;
+    packed = pack();
   }
   summaryState = stampSummaryAnchor(summaryState, messages);
 
   return {
     apiMessages: packed.apiMessages,
+    modelMessages: packed.modelMessages,
+    latestUserMessage,
+    summaryMessage: packed.summaryMessage,
     systemPrompt: fullSystemPrompt,
     compressed: packed.compressed,
     summaryState,
@@ -147,19 +150,9 @@ export async function assembleApiMessages(opts) {
   };
 }
 
-/**
- * Summarize dropped messages and merge into an existing running summary.
- *
- * @param {Array} middleMessages
- * @param {string} existingSummary
- * @param {{ llmProfileId?: string, signal?: AbortSignal }} [opts]
- * @returns {Promise<string>}
- */
-export async function summarizeMiddle(middleMessages, existingSummary = '', opts = {}) {
-  if (!middleMessages?.length) return existingSummary || '';
-
-  const formatted = truncateText(formatMessages(middleMessages), MAX_SUMMARY_SOURCE_CHARS);
-  const prompt = existingSummary
+/** Summarize a bounded prefix of the dropped history, then advance its anchor. */
+async function summarizeMiddle(groups, { start, end, existingSummary, contextWindow, llmProfileId, signal, completeSummary }) {
+  const buildPrompt = (source) => ({ role: 'user', content: (existingSummary
     ? [
       'Update the running conversation summary for an autonomous agent.',
       'Preserve only durable state: user requests, completed work, files touched, tool findings, relevant skill instructions, decisions, blockers, and remaining TODOs.',
@@ -170,116 +163,140 @@ export async function summarizeMiddle(middleMessages, existingSummary = '', opts
       '</existing_summary>',
       '',
       '<new_turns>',
-      formatted,
+      source,
       '</new_turns>',
-    ].join('\n')
+    ]
     : [
       'Summarize these earlier conversation turns for an autonomous agent.',
       'Include: the active task, completed actions, important files/commands/results, relevant skill instructions, decisions, blockers, and pending work.',
       'Keep it concise, factual, and ordered from oldest to newest where useful.',
       '',
       '<turns>',
-      formatted,
+      source,
       '</turns>',
-    ].join('\n');
+    ]).join('\n') });
+  const budget = inputTokenBudget(contextWindow);
+  let remainingTokens = budget - estimateModelMessageTokens(buildPrompt(''));
+  let remainingChars = MAX_SUMMARY_SOURCE_CHARS;
+  const chunks = [];
+  let coveredUntil = start;
+  let prompt;
+  for (; coveredUntil < end && remainingTokens > 0; coveredUntil += 1) {
+    if (!groups[coveredUntil].length) continue;
+    const source = `${formatMessages(groups[coveredUntil])}\n\n`;
+    const tokens = estimateTextTokens(JSON.stringify(source));
+    if (tokens > remainingTokens || source.length > remainingChars) {
+      // Excerpt one oversized reply, not the entire middle: the anchor must
+      // not advance past other turns that were never in the summary request.
+      if (!chunks.length) {
+        prompt = fitTextMessage(truncateMiddle(source, MAX_SUMMARY_SOURCE_CHARS), buildPrompt, budget);
+        if (prompt) coveredUntil += 1;
+      }
+      break;
+    }
+    chunks.push(source);
+    remainingTokens -= tokens;
+    remainingChars -= source.length;
+  }
+  if (!prompt && chunks.length) prompt = buildPrompt(chunks.join(''));
+  if (!prompt) return null;
 
   try {
-    const summary = await (opts.completeSummary || llm.completeSession)(
-      [{ role: 'user', content: prompt }],
-      {
-        llmProfileId: opts.llmProfileId,
-        signal: opts.signal,
-        maxTokens: 700,
-      }
-    );
-    return summary.trim();
+    signal?.throwIfAborted();
+    const summary = await (completeSummary || llm.completeSession)([prompt], {
+      llmProfileId,
+      signal,
+      maxTokens: Math.min(MAX_SUMMARY_TOKENS, normalizeContextWindow(contextWindow) - budget),
+    });
+    signal?.throwIfAborted();
+    const content = typeof summary === 'string' ? summary.trim() : '';
+    return content ? { content, coveredUntil } : null;
   } catch (err) {
-    if (opts.signal?.aborted) throw err;
-    console.warn('Context summary failed:', err.message);
-    const fallback = `[${middleMessages.length} earlier turns were compressed; summary generation failed: ${err.message}]`;
-    return existingSummary ? `${existingSummary}\n${fallback}` : fallback;
+    if (signal?.aborted) throw err;
+    console.warn('Context summary failed:', err?.message || err);
+    return null;
   }
 }
 
 // ─── Packing ────────────────────────────────────────────────────────────────
 
-function packMessages(messages, systemPrompt, contextWindow, summaryState, messageCosts) {
-  const systemTokens = estimateTextTokens(systemPrompt);
-  const estimatedTokens = systemTokens + sum(messageCosts);
-  const hasCompaction = summaryState.content && summaryState.coveredUntil > HEAD_PROTECT;
-  const threshold = Math.floor((contextWindow || CONTEXT_WINDOW_FALLBACK) * PACKING_THRESHOLD_RATIO);
-  if (estimatedTokens <= threshold && !hasCompaction) {
+function normalizeContextWindow(contextWindow) {
+  const window = Number(contextWindow);
+  return Number.isFinite(window) && window > 0 ? window : CONTEXT_WINDOW_FALLBACK;
+}
+
+export function inputTokenBudget(contextWindow, requiredTokens = 0) {
+  // Leave headroom for tool schemas, provider framing, and the reply.
+  const budget = Math.floor(normalizeContextWindow(contextWindow) * PACKING_THRESHOLD_RATIO);
+  if (requiredTokens > budget) {
+    const error = new Error(`The system prompt and latest user message(s) need about ${requiredTokens} tokens, above the model's ${budget}-token input budget. Shorten the prompt or select a model with a larger context window.`);
+    error.name = 'ContextTooLargeError';
+    error.code = 'CONTEXT_TOO_LARGE';
+    throw error;
+  }
+  return budget;
+}
+
+function packMessages(messages, projected, messageCosts, latestUserIndex, systemTokens, contextWindow, summaryState) {
+  const requiredTokens = systemTokens + (messageCosts[latestUserIndex] ?? 0);
+  const budget = inputTokenBudget(contextWindow, requiredTokens);
+  const estimatedTokens = systemTokens + messageCosts.reduce((total, tokens) => total + tokens, 0);
+  const coveredUntil = summaryState.content ? Math.min(messages.length, summaryState.coveredUntil) : 0;
+  if (estimatedTokens <= budget && !coveredUntil) {
     return {
-      apiMessages: [...messages],
-      compressed: false,
-      needsSummary: false,
-      summaryStart: 0,
-      summaryEnd: 0,
-      estimatedTokens,
+      apiMessages: [...messages], modelMessages: projected.flat(), summaryMessage: null,
+      compressed: false, needsSummary: false, estimatedTokens,
     };
   }
 
-  const headCount = Math.min(HEAD_PROTECT, messages.length);
-  const head = messages.slice(0, headCount);
-  const summaryMessage = summaryState.content ? buildSummaryMessage(summaryState.content) : null;
-  const responseReserve = clampNumber(
-    Math.floor((contextWindow || CONTEXT_WINDOW_FALLBACK) * RESPONSE_RESERVE_RATIO),
-    MIN_RESPONSE_RESERVE,
-    MAX_RESPONSE_RESERVE
-  );
-  const targetBudget = Math.max(
-    2048,
-    threshold - responseReserve - systemTokens - sum(messageCosts.slice(0, headCount)) - (summaryMessage ? estimateMessageTokens(summaryMessage) : 0)
-  );
+  let remaining = budget - requiredTokens;
+  const summaryMessage = summaryState.content ? fitTextMessage(summaryState.content, buildSummaryMessage, remaining) : null;
+  if (summaryMessage) remaining -= estimateModelMessageTokens(summaryMessage);
 
-  let tailStart = estimatedTokens <= threshold
-    ? summaryState.coveredUntil
-    : chooseTailStart(messageCosts, headCount, targetBudget);
-  if (summaryState.content && summaryState.coveredUntil > tailStart) {
-    tailStart = Math.min(messages.length, summaryState.coveredUntil);
+  let tailStart = latestUserIndex < 0 ? messages.length : latestUserIndex;
+  let tailEnd = Math.min(messages.length, tailStart + 1);
+  // A replay can end with an assistant reply; it is optional, unlike the last user message.
+  while (tailEnd < messages.length && messageCosts[tailEnd] <= remaining) remaining -= messageCosts[tailEnd++];
+  const tailFloor = Math.min(coveredUntil, tailStart);
+  let headCount = 0;
+  const keepTail = (maxCount) => {
+    while (tailStart > Math.max(headCount, tailFloor) && tailEnd - tailStart < maxCount && messageCosts[tailStart - 1] <= remaining) {
+      remaining -= messageCosts[--tailStart];
+    }
+  };
+  keepTail(RECENT_TAIL_KEEP);
+  // A tight window can summarize within the preferred head; don't replay its anchor on a wider model.
+  const headLimit = Math.min(HEAD_PROTECT, tailStart, coveredUntil ? coveredUntil - 1 : Infinity);
+  while (headCount < headLimit && messageCosts[headCount] <= remaining) {
+    remaining -= messageCosts[headCount++];
   }
-  tailStart = Math.max(headCount, tailStart);
+  keepTail(estimatedTokens <= budget ? Infinity : PREFERRED_TAIL_KEEP);
+  // With no kept head or summary, do not start the prompt with a reply to a dropped user turn.
+  while (!headCount && !summaryMessage && tailStart < latestUserIndex && messages[tailStart]?.role === 'assistant') {
+    remaining += messageCosts[tailStart++];
+  }
 
-  const tail = messages.slice(tailStart);
-  const apiMessages = [
-    ...head,
-    ...(summaryMessage ? [summaryMessage] : []),
-    ...tail,
-  ];
-  const summaryStart = headCount;
-  const summaryEnd = tailStart;
-
+  const summary = summaryMessage ? [summaryMessage] : [];
   return {
-    apiMessages,
+    apiMessages: [...messages.slice(0, headCount), ...summary, ...messages.slice(tailStart, tailEnd)],
+    modelMessages: [...projected.slice(0, headCount).flat(), ...summary, ...projected.slice(tailStart, tailEnd).flat()],
+    summaryMessage,
     compressed: true,
-    needsSummary: summaryEnd > Math.max(summaryStart, summaryState.coveredUntil || 0),
-    summaryStart,
-    summaryEnd,
-    estimatedTokens: systemTokens + sum(messageCosts.slice(0, headCount))
-      + sum(messageCosts.slice(tailStart)) + (summaryMessage ? estimateMessageTokens(summaryMessage) : 0),
+    needsSummary: tailStart > Math.max(headCount, coveredUntil),
+    summaryStart: headCount,
+    summaryEnd: tailStart,
+    estimatedTokens: budget - remaining,
   };
 }
 
-function chooseTailStart(messageCosts, headCount, tokenBudget) {
-  let tokens = 0;
-  let kept = 0;
-  let tailStart = messageCosts.length;
-
-  for (let index = messageCosts.length - 1; index >= headCount; index -= 1) {
-    const messageTokens = messageCosts[index];
-    const mustKeep = kept < MIN_TAIL_KEEP;
-    const preferred = kept < PREFERRED_TAIL_KEEP;
-    if (!mustKeep && (!preferred || tokens + messageTokens > tokenBudget)) break;
-    tokens += messageTokens;
-    kept += 1;
-    tailStart = index;
+function fitTextMessage(text, buildMessage, budget) {
+  const message = buildMessage(text);
+  if (estimateModelMessageTokens(message) <= budget) return message;
+  for (let maxChars = Math.min(text.length - 1, budget * 4); maxChars >= 80; maxChars = Math.floor(maxChars / 2)) {
+    const preview = buildMessage(truncateMiddle(text, maxChars));
+    if (estimateModelMessageTokens(preview) <= budget) return preview;
   }
-
-  return tailStart;
-}
-
-function sum(values) {
-  return values.reduce((total, value) => total + value, 0);
+  return null;
 }
 
 function buildSummaryMessage(summary) {
@@ -314,58 +331,60 @@ function buildAgentIdentitySection(content) {
 // ─── Token estimation and formatting ────────────────────────────────────────
 
 export function estimateTokens(messages, systemPrompt = '') {
-  let total = estimateTextTokens(systemPrompt);
-  for (const msg of messages || []) {
-    total += estimateMessageTokens(msg);
-  }
-  return Math.max(1, total);
+  return Math.max(1, (messages || []).reduce((total, message) => total + estimateModelMessageTokens(message), estimateSystemTokens(systemPrompt)));
 }
 
-function estimateMessageTokens(message) {
+export function estimateSystemTokens(system) {
+  return system ? estimateModelMessageTokens({ role: 'system', content: system }) : 0;
+}
+
+// prepareStep re-estimates immutable message objects on every tool round.
+const modelMessageTokenCache = new WeakMap();
+
+function estimateModelMessageTokens(message) {
   if (!message) return 0;
-  let total = estimateTextTokens(message.role) + estimateTextTokens(message.name);
-  if (typeof message.content === 'string') total += estimateTextTokens(message.content);
-  else if (message.content != null) total += estimateTextTokens(jsonText(message.content));
-  total += estimateTextTokens(message.thinking);
-  total += estimateTextTokens(message.reasoning_content);
-  if (message.tool_calls) total += estimateTextTokens(jsonText(message.tool_calls));
-  total += estimateTextTokens(message.tool_call_id);
-  if (message.images?.length) {
-    total += message.images.reduce((sum, img) => sum + estimateTextTokens(img.dataUrl), 0);
+  let tokens = modelMessageTokenCache.get(message);
+  if (tokens !== undefined) return tokens;
+  let { content } = message;
+  let imageCount = 0;
+  if (message.role !== 'system' && typeof content === 'string') {
+    content = [{ type: 'text', text: content }];
+  } else if (message.role === 'user' && Array.isArray(content)) {
+    content = content.map((part) => {
+      if (part.type !== 'image') return part;
+      imageCount += 1;
+      return { type: 'image', mediaType: part.mediaType };
+    });
   }
-  return Math.max(1, total);
-}
-
-function jsonText(value) {
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return '';
-  }
+  const input = content === message.content ? message : { ...message, content };
+  // shortcut: use a fixed vision estimate rather than pricing base64 as text; use provider tile costs if needed.
+  tokens = estimateTextTokens(JSON.stringify(input)) + imageCount * 1024;
+  modelMessageTokenCache.set(message, tokens);
+  return tokens;
 }
 
 function formatMessages(messages) {
   return messages
-    .map((message, index) => {
-      const role = message.role || (message.tool_call_id ? 'tool' : 'unknown');
-      const parts = [`[${index + 1}] ${role}`];
-      if (message.name) parts.push(`name=${message.name}`);
-      if (message.tool_call_id) parts.push(`tool_call_id=${message.tool_call_id}`);
-      if (message.tool_calls?.length) {
-        parts.push(`tool_calls=${JSON.stringify(message.tool_calls)}`);
-      }
+    .map((message) => {
       const content = typeof message.content === 'string'
         ? message.content
-        : JSON.stringify(message.content || '');
-      return `${parts.join(' ')}\n${truncateText(content, 4000)}`;
+        : message.role === 'user' && Array.isArray(message.content)
+          ? message.content.map((part) => part.type === 'image' ? '[image]' : part.text).join('\n')
+          : JSON.stringify(message.content || '');
+      return `${message.role}:\n${truncateMiddle(content, 4000)}`;
     })
     .join('\n\n');
 }
 
 function normalizeSummaryState(summaryState, legacySummary) {
+  const content = String(summaryState?.content || legacySummary || '').trim();
+  // Older builds saved failures as summaries with a false coverage marker.
+  if (/(?:^|\n)\[\d+ earlier turns were compressed; summary generation failed:/.test(content)) {
+    return { content: '', coveredUntil: 0, anchorId: null };
+  }
   return {
-    content: String(summaryState?.content || legacySummary || '').trim(),
-    coveredUntil: Number.isFinite(summaryState?.coveredUntil) ? summaryState.coveredUntil : 0,
+    content,
+    coveredUntil: Number.isInteger(summaryState?.coveredUntil) && summaryState.coveredUntil > 0 ? summaryState.coveredUntil : 0,
     anchorId: summaryState?.anchorId ?? null,
   };
 }

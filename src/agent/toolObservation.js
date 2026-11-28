@@ -12,7 +12,7 @@ const TOOL_OBSERVATION_OVERRIDES = {
 
 export function compactToolResultForModel(toolCall, result, opts = {}) {
   const text = String(result ?? '');
-  const maxChars = getToolObservationMaxChars(opts.contextWindow, toolCall);
+  const maxChars = opts.maxChars ?? getToolObservationMaxChars(opts.contextWindow, toolCall);
   if (text.length <= maxChars) return text;
 
   if (COMMAND_JOB_TOOLS.has(toolCall?.name)) {
@@ -25,7 +25,12 @@ export function compactToolResultForModel(toolCall, result, opts = {}) {
     'Fuller output remains available in the visible tool result/debug export. If missing detail matters, call a narrower command or read a smaller range.',
     '',
   ].join('\n');
-  const contentBudget = Math.max(1_000, maxChars - notice.length);
+  const contentBudget = maxChars - notice.length;
+  if (contentBudget < 80) {
+    return maxChars < 100
+      ? '[Tool output omitted to fit the context budget.]'
+      : truncateMiddle(text, maxChars, 'tool result compacted');
+  }
   return `${notice}${truncateMiddle(text, contentBudget)}`;
 }
 

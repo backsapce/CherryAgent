@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { assembleApiMessages, summaryStateMatchesHistory } from './context.js';
+import { assembleApiMessages, estimateTokens, summaryStateMatchesHistory } from './context.js';
 
 test('sandbox prompt includes transferred identity and skill catalog', async () => {
   const result = await assembleApiMessages({
@@ -61,6 +61,99 @@ test('a persisted summary is reused without re-summarizing and gains an anchor',
   assert.equal(result.summaryState.coveredUntil, 30);
 });
 
+test('failed or blank summaries stop the pass without replacing the previous summary or anchor', async (t) => {
+  t.mock.method(console, 'warn', () => {});
+  const messages = longHistory();
+  const previous = { content: 'Prior summary', coveredUntil: 5, anchorId: messages[4].id };
+  for (const [summaryState, completeSummary] of [
+    [previous, () => { throw new Error('summary offline'); }],
+    [previous, () => '  \n '],
+    [undefined, () => ''],
+  ]) {
+    let attempts = 0;
+    const result = await assembleApiMessages({
+      messages, contextWindow: 8_000, summaryState,
+      completeSummary: () => { attempts += 1; return completeSummary(); },
+    });
+    assert.equal(attempts, 1);
+    assert.deepEqual(result.summaryState, summaryState ?? { content: '', coveredUntil: 0, anchorId: null });
+    assert.equal(result.summaryMessage?.content.includes('Prior summary') ?? false, Boolean(summaryState));
+  }
+
+  const retried = await assembleApiMessages({
+    messages, contextWindow: 8_000, summaryState: previous,
+    completeSummary: async () => 'Updated summary',
+  });
+  assert.equal(retried.summaryState.content, 'Updated summary');
+  assert.ok(retried.summaryState.coveredUntil > previous.coveredUntil);
+  assert.ok(summaryStateMatchesHistory(retried.summaryState, messages));
+});
+
+test('a legacy summary containing a failed pass does not hide older history', async () => {
+  const messages = longHistory();
+  const reset = await assembleApiMessages({
+    messages, contextWindow: 1_000_000,
+    summaryState: {
+      content: 'Prior summary\n[5 earlier turns were compressed; summary generation failed: offline]',
+      coveredUntil: 10,
+      anchorId: messages[9].id,
+    },
+  });
+  assert.deepEqual(reset.summaryState, { content: '', coveredUntil: 0, anchorId: null });
+  assert.deepEqual(reset.apiMessages, messages);
+});
+
+test('summary calls fit the input budget and only cover history included in successful calls', async () => {
+  const messages = longHistory('文');
+  const requests = [];
+  const result = await assembleApiMessages({
+    messages, contextWindow: 8_000,
+    completeSummary: async (prompt) => {
+      assert.ok(estimateTokens(prompt) <= 5_760);
+      requests.push(prompt[0].content);
+      return requests.length === 1 ? 'First reply summarized' : '';
+    },
+  });
+  assert.equal(requests.length, 2);
+  assert.match(requests[0], /turn-0 /);
+  assert.doesNotMatch(requests[0], /turn-1 /);
+  assert.match(requests[1], /turn-1 /);
+  assert.deepEqual(result.summaryState, { content: 'First reply summarized', coveredUntil: 1, anchorId: 'm-0' });
+  const reopened = await assembleApiMessages({ messages, contextWindow: 1_000_000, summaryState: result.summaryState });
+  assert.match(reopened.apiMessages[0].content, /First reply summarized/);
+  assert.ok(!reopened.apiMessages.includes(messages[0]));
+});
+
+test('large ordinary text drops optional head and tail messages to fit an 8k context', async () => {
+  const messages = longHistory();
+  const result = await assembleApiMessages({ messages, contextWindow: 8_000, autoSummarize: false });
+  assert.equal(result.compressed, true);
+  assert.ok(result.estimatedTokens <= 5_760);
+  assert.equal(result.estimatedTokens, estimateTokens(result.modelMessages, result.systemPrompt));
+  assert.ok(result.apiMessages.length < 8);
+  assert.equal(result.apiMessages.at(-1), messages.at(-1));
+  assert.equal(result.latestUserMessage.content, 'The latest request');
+});
+
+test('the system prompt and latest user can exceed the budget even without history', async () => {
+  await assert.rejects(assembleApiMessages({
+    messages: [{ role: 'user', content: '文'.repeat(1_500) }],
+    systemPrompt: '規'.repeat(3_200),
+    contextWindow: 8_000,
+  }), (error) => error?.code === 'CONTEXT_TOO_LARGE' && /system prompt and latest user/.test(error.message));
+});
+
+function longHistory(char = 'x') {
+  return [
+    ...Array.from({ length: 20 }, (_, index) => ({
+      id: `m-${index}`,
+      role: index % 2 ? 'assistant' : 'user',
+      content: `turn-${index} ${char.repeat(9_000)}`,
+    })),
+    { id: 'latest', role: 'user', content: 'The latest request' },
+  ];
+}
+
 test('summaryStateMatchesHistory validates indices against the anchor id', () => {
   const messages = [
     { id: 'a', role: 'user', content: '1' },
@@ -78,8 +171,7 @@ test('summaryStateMatchesHistory validates indices against the anchor id', () =>
   assert.equal(summaryStateMatchesHistory(undefined, messages), false);
 });
 
-test('token estimation counts CJK text at roughly one token per character', async () => {
-  const { estimateTokens } = await import('./context.js');
+test('token estimation counts CJK text at roughly one token per character', () => {
   const latin = { role: 'user', content: 'a'.repeat(400) };
   const cjk = { role: 'user', content: '好'.repeat(400) };
   const latinTokens = estimateTokens([latin]);

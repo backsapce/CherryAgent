@@ -465,6 +465,25 @@ export function mergeStructuredThreeWay(baseData, localData, remoteData, options
   return merged === MISSING ? undefined : merged;
 }
 
+// At an archive boundary, never fall back to choosing one whole history.
+export function mergeSessionMessages(base, local, remote, options) {
+  if (base === undefined) {
+    let shared = 0;
+    while (shared < Math.min(local.length, remote.length) && sameValue(local[shared], remote[shared])) {
+      shared += 1;
+    }
+    base = local.slice(0, shared);
+  }
+  if (
+    !canMergeIdentityArrays(base, local, remote)
+    && !(isPrefix(base, local) && isPrefix(base, remote))
+    && !sameValue(local, base) && !sameValue(remote, base) && !sameValue(local, remote)
+  ) {
+    throw new Error('Cannot safely merge conflicting session archive histories without unique message IDs. Neither session body was replaced.');
+  }
+  return mergeStructuredThreeWay(base, local, remote, options);
+}
+
 export function mergeStructuredUpdates(updates) {
   let mergedData;
   let hasData = false;

@@ -91,19 +91,15 @@ function swPrecachePlugin() {
 
       // Read the sw.js template from public/ and replace placeholders
       const swTemplate = readFileSync(resolve('public/sw.js'), 'utf-8')
-      const cacheVersion = `cherry-agent-${Date.now()}`
+      const cacheVersion = String(Date.now())
       const swContent = swTemplate
         .replace(
-          /const CACHE_NAME = '[^']*'/,
-          `const CACHE_NAME = '${cacheVersion}'`
+          /const CACHE_VERSION = '[^']*'/,
+          `const CACHE_VERSION = '${cacheVersion}'`
         )
         .replace(
           /const APP_SHELL = \[[^\]]*\]/s,
-          `const APP_SHELL = [\n${allFiles.map(f => `  self.location.origin + BASE + '${f}',`).join('\n')}\n]`
-        )
-        .replace(
-          /const BASE = '[^']*'/,
-          `const BASE = '${GH_PAGES_BASE}'`
+          `const APP_SHELL = [\n${allFiles.map(f => `  self.location.origin + BASE + ${JSON.stringify(f)},`).join('\n')}\n]`
         )
 
       writeFileSync(join(distDir, 'sw.js'), swContent)

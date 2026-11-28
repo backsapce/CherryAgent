@@ -1,4 +1,4 @@
-import { appendFile, writeFile as writeSnapshotFile, rename, rm } from 'node:fs/promises';
+import { appendFile, writeFile as writeSnapshotFile, rename, rm, truncate } from 'node:fs/promises';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -270,6 +270,11 @@ export function createAgentRunManager({
     writer.bytes += lineBytes;
     writer.pending += 1;
     writer.tail = writer.tail.then(async () => {
+      // Repair on the append queue so replay does not require write access.
+      if (run.repairEventLog) {
+        await run.repairEventLog();
+        run.repairEventLog = null;
+      }
       await appendEventLog(join(runsDir, `${run.id}.events.ndjson`), line, { encoding: 'utf8', mode: 0o600 });
       // Parse the captured line so mutable provider objects cannot change the
       // replay payload after it was serialized for disk.
@@ -801,6 +806,7 @@ export function createAgentRunManager({
       throw error;
     }
 
+    const idleState = { ...run };
     run.replyId = input.replyId ? String(input.replyId) : run.replyId;
     run.forceTerminated = false;
     run.status = 'running';
@@ -810,7 +816,16 @@ export function createAgentRunManager({
     run.wakeup = null;
     run.updatedAt = new Date().toISOString();
     run.controller = new AbortController();
-    await persist(run);
+    try {
+      await persist(run);
+    } catch (error) {
+      // A queued cancellation owns the run even if our earlier write failed.
+      if (!run.forceTerminated) {
+        Object.assign(run, idleState);
+        notifyStatus(run);
+      }
+      throw error;
+    }
     if (run.forceTerminated) {
       await cancellations.get(run);
       return serializeRun(run);
@@ -1667,16 +1682,40 @@ function loadPersistedRuns(runsDir, runs, { retentionMs = DEFAULT_RUN_RETENTION_
       }
       const eventsPath = join(runsDir, `${saved.id}.events.ndjson`);
       const eventLog = existsSync(eventsPath) ? readFileSync(eventsPath) : null;
-      const events = eventLog
-        ? eventLog.toString('utf8').split('\n').filter(Boolean).map((line) => {
-          const stored = JSON.parse(line);
-          if (stored?.v === 2 && stored.ev) {
-            return { seq: Number(stored.seq) || 0, turn: Number(stored.turn) || 0, ev: stored.ev };
+      const lines = eventLog?.toString('utf8').split('\n') ?? [];
+      const events = [];
+      let eventBytes = eventLog?.byteLength ?? 0;
+      // The snapshot may lag the log, but its published cursor cannot move backwards.
+      let sequence = Number(saved.sequence) || 0;
+      let repairEventLog;
+      for (const [index, line] of lines.entries()) {
+        if (!line) continue;
+        const unterminated = index === lines.length - 1;
+        let stored;
+        try {
+          stored = JSON.parse(line);
+        } catch (error) {
+          if (!unterminated) {
+            console.warn(`Cannot load agent run ${saved.id}: malformed event log line ${index + 1}.`);
+            throw error;
           }
-          // Legacy protocol-3 lines are already namespaced and sequenced.
-          return { seq: Number(stored?.remoteSequence) || 0, decorated: true, ev: stored };
-        })
-        : [];
+          console.warn(`Ignoring partial final event log line for agent run ${saved.id}.`);
+          eventBytes = eventLog.lastIndexOf('\n') + 1;
+          repairEventLog = () => truncate(eventsPath, eventBytes);
+          break;
+        }
+        if (unterminated) {
+          // The record is valid; only its delimiter needs repair.
+          eventBytes += 1;
+          repairEventLog = () => appendFile(eventsPath, '\n', { mode: 0o600 });
+        }
+        // Legacy protocol-3 lines are already namespaced and sequenced.
+        const entry = stored?.v === 2 && stored.ev
+          ? { seq: Number(stored.seq) || 0, turn: Number(stored.turn) || 0, ev: stored.ev }
+          : { seq: Number(stored?.remoteSequence) || 0, decorated: true, ev: stored };
+        events.push(entry);
+        sequence = Math.max(sequence, entry.seq);
+      }
       const resumable = canResumeWaitingRun(saved);
       const interruptedByRestart = ['running', 'waiting'].includes(saved.status) && !resumable;
       const keepResume = resumable || (saved.status === 'idle' && saved.resume);
@@ -1688,8 +1727,10 @@ function loadPersistedRuns(runsDir, runs, { retentionMs = DEFAULT_RUN_RETENTION_
         // Retention counts from the restart for runs that only became terminal
         // during this load, so a restart cannot immediately erase them.
         ...(interruptedByRestart ? { updatedAt: new Date().toISOString() } : {}),
+        sequence,
         events,
-        eventBytes: eventLog?.byteLength ?? 0,
+        eventBytes,
+        repairEventLog,
         controller: null,
       });
     } catch {

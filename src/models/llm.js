@@ -23,6 +23,7 @@ import customOpenai from './providers/custom-openai.js';
 import { loadSettings, saveSettings } from './settings.js';
 import { getModelsDevProviderCandidates } from './modelLogos.js';
 import { getStaticContextWindow } from './contextWindow.js';
+import { loadModelsDevCatalog } from './modelsDevCatalog.js';
 import { streamText } from 'ai';
 import { createLanguageModel, toModelMessages } from './ai.js';
 import {
@@ -52,10 +53,7 @@ const providers = {
 let activeLlmId = null;
 let providerConfigs = {};
 let llms = {};
-let modelsDevCatalogPromise = null;
 
-const MODELS_DEV_API_URL = 'https://models.dev/api.json';
-const MODELS_DEV_TIMEOUT_MS = 5000;
 function generateLlmId() {
   return `llm_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -147,33 +145,6 @@ function publicLlm(llmConfig) {
     hasApiKey: Boolean(providerConfig?.apiKey),
     updatedAtMs: llmConfig.updatedAtMs || null,
   };
-}
-
-async function loadModelsDevCatalog() {
-  if (!modelsDevCatalogPromise) {
-    modelsDevCatalogPromise = new Promise((resolve, reject) => {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), MODELS_DEV_TIMEOUT_MS);
-      fetch(MODELS_DEV_API_URL, { signal: controller.signal })
-        .then((res) => {
-          clearTimeout(timeoutId);
-          resolve(res);
-        })
-        .catch((err) => {
-          clearTimeout(timeoutId);
-          reject(err);
-        });
-    })
-      .then((res) => {
-        if (!res.ok) throw new Error(`models.dev error ${res.status}`);
-        return res.json();
-      })
-      .catch((err) => {
-        modelsDevCatalogPromise = null;
-        throw err;
-      });
-  }
-  return modelsDevCatalogPromise;
 }
 
 function normalizeModelsDevModelId(model) {
@@ -372,21 +343,6 @@ const llm = {
       ...config,
       apiKey: config.apiKey || providerConfig.apiKey,
       baseUrl: config.baseUrl || providerConfig.baseUrl || adapter.defaultBaseUrl,
-    });
-  },
-
-  /** Backward-compatible adapter-type model lookup. */
-  async fetchModels(providerId, config = {}, profileId = activeLlmId) {
-    if (providerConfigs[providerId]) return llm.fetchProviderModels(providerId, config);
-    const adapter = providers[providerId];
-    if (!adapter) throw new Error(`Unknown provider: ${providerId}`);
-    const llmConfig = getLlm(profileId);
-    const savedProvider = getProviderConfig(llmConfig?.providerId);
-    const matchingProvider = savedProvider?.type === providerId ? savedProvider : null;
-    return listModels(adapter, {
-      ...config,
-      apiKey: config.apiKey || matchingProvider?.apiKey,
-      baseUrl: config.baseUrl || matchingProvider?.baseUrl || adapter.defaultBaseUrl,
     });
   },
 

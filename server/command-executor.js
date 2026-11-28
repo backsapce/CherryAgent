@@ -36,16 +36,24 @@ export function createCommandExecutor({
 } = {}) {
   function signalTree(child, signal) {
     if (!child?.pid) return false;
+    const signalChild = () => {
+      try {
+        return child.kill?.(signal) ?? false;
+      } catch {
+        return false;
+      }
+    };
 
     if (platform === 'win32') {
       const args = ['/pid', String(child.pid), '/t'];
       if (signal === 'SIGKILL') args.push('/f');
       try {
         const killer = spawnImpl('taskkill', args, { windowsHide: true, stdio: 'ignore' });
+        killer.once('error', signalChild);
         killer.unref?.();
         return true;
       } catch {
-        return child.kill?.(signal) ?? false;
+        return signalChild();
       }
     }
 
@@ -53,11 +61,7 @@ export function createCommandExecutor({
       killProcess(-child.pid, signal);
       return true;
     } catch {
-      try {
-        return child.kill?.(signal) ?? false;
-      } catch {
-        return false;
-      }
+      return signalChild();
     }
   }
 

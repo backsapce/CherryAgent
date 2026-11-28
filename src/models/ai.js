@@ -2,7 +2,6 @@ import { wrapLanguageModel } from 'ai';
 import { projectAssistantHistory } from '../agent/sessionHistory.js';
 import { resolveCustomOpenAiEndpoint } from './providers/custom-openai.js';
 import {
-  normalizeReasoningEffort,
   resolveReasoningLevels,
   reasoningProviderOptions,
   summaryProviderOptions,
@@ -35,22 +34,25 @@ export async function createLanguageModel(config = {}) {
   const endpoint = config.provider === 'custom-openai' ? resolveCustomOpenAiEndpoint(config.baseUrl) : null;
   const customResponses = endpoint?.api === 'responses';
   const model = await createBaseLanguageModel(config, endpoint);
-  const effort = normalizeReasoningEffort(config.reasoningEffort);
-  // Responses models also request reasoning summaries when the model supports them.
-  if (!effort && config.provider !== 'openai' && !customResponses) return model;
+  const effort = config.reasoningEffort;
+  const optionProvider = customResponses ? 'openai' : config.provider;
+  const effortOptions = reasoningProviderOptions(optionProvider, effort);
+  const wantsEffort = Object.keys(effortOptions).length > 0;
+  const wantsSummary = customResponses || (config.provider === 'openai' && isOfficialOpenAiEndpoint(config.baseUrl));
+  if (!wantsEffort && !wantsSummary) return model;
+  let levelsPromise;
   return wrapLanguageModel({ model, middleware: {
     specificationVersion: 'v3',
     ...(customResponses ? { wrapStream: streamCustomResponses } : {}),
     async transformParams({ params }) {
-      const levels = await resolveReasoningLevels(config.provider, config.model, {
-        // Private aliases may not appear in models.dev. Honor an explicit
-        // Responses effort in that case, within the OpenAI SDK's value range.
-        allowUnknown: customResponses && Boolean(effort),
-      });
-      const optionProvider = customResponses ? 'openai' : config.provider;
+      // Keep the fallback for this model instance, too: each step should not
+      // wait for another request to an unavailable catalog.
+      const levels = await (levelsPromise ||= resolveReasoningLevels(config.provider, config.model, {
+        allowUnknown: customResponses && wantsEffort,
+      }));
       const sources = [
-        ...(effort && levels.includes(effort) ? [reasoningProviderOptions(optionProvider, effort)] : []),
-        ...(levels.length > 0 ? [summaryProviderOptions(optionProvider)] : []),
+        ...(wantsEffort && levels.includes(effort) ? [effortOptions] : []),
+        ...(wantsSummary && levels.length > 0 ? [summaryProviderOptions(optionProvider)] : []),
       ];
       // Merge the option sets per provider name so
       // summary options do not overwrite the effort options.
@@ -203,8 +205,7 @@ export function normalizeAiUsage(usage) {
 }
 
 /** Convert CherryAgent's persisted message shape into AI SDK ModelMessages. */
-export function toModelMessages(messages = [], { contextWindow } = {}) {
-  const usedCallIds = new Set();
+export function toModelMessages(messages = [], { contextWindow, usedCallIds = new Set() } = {}) {
   return messages.flatMap((message) => {
     if (message?.role === 'assistant') return projectAssistantHistory(message, { contextWindow, usedCallIds });
     if (message?.role === 'system') return [{ role: 'system', content: String(message.content || '') }];

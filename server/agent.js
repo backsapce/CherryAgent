@@ -31,6 +31,8 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  renameSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
@@ -278,11 +280,21 @@ function loadTokens() {
   }
 }
 
-function saveTokens() {
+function saveToken(token) {
+  const temporary = `${TOKEN_FILE}.tmp-${generateToken(16)}`;
+  let prepared = false;
   try {
-    writeFileSync(TOKEN_FILE, [...validTokens].join('\n') + '\n', { encoding: 'utf8', mode: 0o600 });
+    writeFileSync(temporary, [...validTokens, token].join('\n') + '\n', {
+      encoding: 'utf8', mode: 0o600, flag: 'wx',
+    });
+    prepared = true;
+    renameSync(temporary, TOKEN_FILE);
   } catch (err) {
+    if (prepared || err.code !== 'EEXIST') {
+      try { rmSync(temporary, { force: true }); } catch { /* best effort */ }
+    }
     console.warn('[agent] Could not save token file:', err.message);
+    throw new Error('Could not save sandbox token. Check the server logs.');
   }
 }
 
@@ -435,15 +447,11 @@ const agentWsServer = createAgentWsServer({
   authDisabled: AUTH_DISABLED,
   isValidToken: (token) => validTokens.has(token),
   exchangeTempToken: (candidate) => {
-    if (candidate !== tempToken) {
-      // With the HTTP health probe gone, expiry rotation happens here: an
-      // aged-out printed token is invalidated instead of lingering forever.
-      ensureFreshTempToken();
-      return null;
-    }
+    ensureFreshTempToken();
+    if (candidate !== tempToken) return null;
     const longLivedToken = generateToken(48);
+    saveToken(longLivedToken);
     validTokens.add(longLivedToken);
-    saveTokens();
     rotateTempToken('rotated after connect');
     return longLivedToken;
   },

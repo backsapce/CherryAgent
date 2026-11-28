@@ -30,6 +30,8 @@ export function createSessionSaveCoordinator({
   let activityGeneration = 0;
   let failedAttemptGeneration = 0;
   let retryCandidate = null;
+  let deferredSave = null;
+  let discardedThrough = 0;
 
   const commitLatestSuccessful = () => {
     if (!latestSuccessful || latestSuccessful.generation <= committedGeneration) return;
@@ -48,51 +50,54 @@ export function createSessionSaveCoordinator({
     };
   };
 
-  const enqueueValue = (value, revision) => {
+  const enqueueValue = (candidate) => {
+    const { value, revision, baseline } = candidate;
     const generation = ++nextGeneration;
-    const persistValue = checkpoint || clearCheckpoint
-      ? async () => {
-        // A recovery checkpoint may have started while a storage barrier was
-        // active. Let that isolated write finish before publishing the normal
-        // session files, then clear it only after the normal save is durable
-        // and only if no newer in-memory generation appeared meanwhile.
-        await checkpointQueue;
-        await save(value);
-        if (clearCheckpoint) {
-          // Clearing participates in the same journal queue as writes. If a
-          // new checkpoint is requested while deletion is in flight, it chains
-          // after deletion and recreates the journal instead of being erased
-          // by a late clear.
-          const clearTask = checkpointQueue.then(async () => {
-            if (
-              revision === activityGeneration
-              && !hasPendingSource
-              && pendingCheckpoint == null
-            ) {
-              await clearCheckpoint();
-            }
-          });
-          checkpointQueue = clearTask.catch(() => {});
-          await clearTask;
+    const persistValue = async () => {
+      // Journal writes and clears must never overtake one another.
+      if (checkpoint || clearCheckpoint) await checkpointQueue;
+      if (revision <= discardedThrough) return;
+      const result = deferredSave || await save(value, baseline);
+      if (revision <= discardedThrough) return;
+      if (result?.deferred) {
+        // The attempted view may be missing archived history even after the
+        // chunk appears. Only a storage refresh may replace this fence with a
+        // rebased snapshot; lifecycle flushes and later edits only checkpoint.
+        deferredSave = result;
+        if (hasPendingSource) {
+          await checkpointNow().catch(() => {});
+        } else if (revision === activityGeneration) {
+          cancelPendingCheckpoint();
+          await enqueueCheckpoint(candidate).catch(() => {});
         }
+        return result;
       }
-      : () => save(value);
+      if (clearCheckpoint) {
+        const clearTask = checkpointQueue.then(async () => {
+          if (revision === activityGeneration && !hasPendingSource && pendingCheckpoint == null) {
+            await clearCheckpoint();
+          }
+        });
+        checkpointQueue = clearTask.catch(() => {});
+        await clearTask;
+      }
+      return result;
+    };
 
     const task = queue
       .then(persistValue)
       .then(
-        () => {
-          latestSuccessful = { generation, value };
-          // schedule() advances activityGeneration before the newer value is
-          // snapshotted. Do not expose this write as the latest baseline when
-          // a newer in-memory source is already waiting behind it.
+        (result) => {
+          if (revision > discardedThrough && !result?.deferred) {
+            latestSuccessful = { generation, value };
+          }
           if (revision === activityGeneration) commitLatestSuccessful();
+          return result;
         },
         (error) => {
-          retainRetryCandidate({ kind: 'value', revision, value });
+          retainRetryCandidate(candidate);
           onError(error);
-          // When the newest write fails, the last successful write is the
-          // value that storage actually contains and therefore the safe base.
+          // The last successful write is the only safe persisted baseline.
           if (revision === activityGeneration) commitLatestSuccessful();
           throw error;
         }
@@ -110,7 +115,7 @@ export function createSessionSaveCoordinator({
     let value;
     let baseline;
     try {
-      value = snapshot(candidate.source);
+      value = candidate.kind === 'value' ? candidate.value : snapshot(candidate.source);
       baseline = snapshot(candidate.baseline || []);
     } catch (error) {
       onError(error);
@@ -163,12 +168,13 @@ export function createSessionSaveCoordinator({
     return enqueueCheckpoint(candidate);
   };
 
-  const enqueueSource = (source, revision) => {
+  const enqueueSource = (candidate) => {
+    const { source, revision, baseline } = candidate;
     let value;
     try {
       value = snapshot(source);
     } catch (error) {
-      retainRetryCandidate({ kind: 'source', revision, source });
+      retainRetryCandidate(candidate);
       onError(error);
       if (revision === activityGeneration) commitLatestSuccessful();
 
@@ -179,15 +185,12 @@ export function createSessionSaveCoordinator({
       latestTask = failedTask;
       return failedTask;
     }
-    return enqueueValue(value, revision);
+    return enqueueValue({ kind: 'value', value, revision, baseline });
   };
 
-  const enqueueRetry = (candidate) => {
-    if (candidate.kind === 'value') {
-      return enqueueValue(candidate.value, candidate.revision);
-    }
-    return enqueueSource(candidate.source, candidate.revision);
-  };
+  const enqueueRetry = (candidate) => (
+    candidate.kind === 'value' ? enqueueValue(candidate) : enqueueSource(candidate)
+  );
 
   const cancelScheduled = () => {
     if (timer !== null) clearTimer(timer);
@@ -196,9 +199,11 @@ export function createSessionSaveCoordinator({
     pendingSource = null;
     hasPendingSource = false;
     retryCandidate = null;
-    // Invalidate failures from an in-flight snapshot that the caller has
-    // explicitly discarded (for example after a storage refresh/reset).
-    activityGeneration += 1;
+    deferredSave = null;
+    latestSuccessful = null;
+    latestTask = queue;
+    // A discarded in-flight attempt must not reinstate stale work on settle.
+    discardedThrough = ++activityGeneration;
   };
 
   const startTimer = () => {
@@ -208,7 +213,7 @@ export function createSessionSaveCoordinator({
       const pending = pendingSource;
       pendingSource = null;
       hasPendingSource = false;
-      enqueueSource(pending.source, pending.revision).catch(() => {});
+      enqueueSource(pending).catch(() => {});
     }, delayMs);
   };
 
@@ -218,6 +223,7 @@ export function createSessionSaveCoordinator({
     timer = null;
     retryCandidate = null;
     pendingSource = {
+      kind: 'source',
       revision: activityGeneration,
       source,
       baseline: checkpointBaseline || [],
@@ -232,6 +238,11 @@ export function createSessionSaveCoordinator({
 
   const flush = async () => {
     let firstError = null;
+    let result;
+    if (suspendDepth > 0) {
+      await checkpointNow();
+      return { deferred: true };
+    }
     // Retry failures that were already known when this barrier began. A
     // failure produced by this flush remains queued for the next flush instead
     // of causing an immediate, unbounded retry loop.
@@ -251,7 +262,7 @@ export function createSessionSaveCoordinator({
         const pending = pendingSource;
         pendingSource = null;
         hasPendingSource = false;
-        taskToAwait = enqueueSource(pending.source, pending.revision);
+        taskToAwait = enqueueSource(pending);
       } else if (
         retryCandidate
         && retryCandidate.failedAttemptGeneration <= retryCutoff
@@ -262,18 +273,23 @@ export function createSessionSaveCoordinator({
       }
 
       try {
-        await taskToAwait;
+        result = await taskToAwait;
       } catch (error) {
         firstError ||= error;
       }
 
+      if (suspendDepth > 0) {
+        await checkpointNow();
+        if (firstError) throw firstError;
+        return { deferred: true };
+      }
       if (
         !hasPendingSource
         && observedActivity === activityGeneration
         && taskToAwait === latestTask
       ) {
         if (firstError) throw firstError;
-        return;
+        return deferredSave || result;
       }
     }
   };
@@ -292,7 +308,7 @@ export function createSessionSaveCoordinator({
       const pending = pendingSource;
       pendingSource = null;
       hasPendingSource = false;
-      taskToAwait = enqueueSource(pending.source, pending.revision);
+      taskToAwait = enqueueSource(pending);
     } else if (
       retryCandidate
       && retryCandidate.failedAttemptGeneration <= retryCutoff
@@ -301,7 +317,7 @@ export function createSessionSaveCoordinator({
       retryCandidate = null;
       taskToAwait = enqueueRetry(candidate);
     }
-    await taskToAwait;
+    return taskToAwait;
   };
 
   const suspend = () => {
@@ -317,9 +333,11 @@ export function createSessionSaveCoordinator({
   };
 
   const beginBarrier = async () => {
+    const alreadySuspended = suspendDepth > 0;
     suspend();
     try {
-      await flushCurrent();
+      if (alreadySuspended) await latestTask;
+      else await flushCurrent();
     } catch (error) {
       resume();
       throw error;
@@ -338,6 +356,7 @@ export function createSessionSaveCoordinator({
     cancelScheduled,
     checkpoint: checkpointNow,
     flush,
+    hasDeferredSave: () => deferredSave !== null,
     isSuspended: () => suspendDepth > 0,
     resume,
     schedule,

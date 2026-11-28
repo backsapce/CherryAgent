@@ -1,6 +1,5 @@
 import {
   appendFileSync,
-  existsSync,
   mkdirSync,
   openSync,
   closeSync,
@@ -61,6 +60,10 @@ function clampInteger(value, min, max) {
   if (!Number.isFinite(number)) return min;
   return Math.min(max, Math.max(min, Math.floor(number)));
 }
+
+const emptyLog = (cursor = 0, size = 0) => ({
+  log: '', logCursor: cursor, nextCursor: cursor, logSize: size, hasMore: false,
+});
 
 export function createCommandJobManager({
   jobsDir,
@@ -129,6 +132,43 @@ export function createCommandJobManager({
     for (const resolve of pending) resolve();
   };
 
+  const terminateFailedJob = (handle) => {
+    // The failure is already visible; never wait for cleanup or let it throw.
+    if (handle) void Promise.resolve().then(() => handle.terminate('aborted')).catch(() => {});
+  };
+
+  const fail = (job, message) => {
+    const { handle } = job;
+    job.handle = null;
+    job.status = 'failed';
+    job.error = message;
+    job.finishedAt = job.updatedAt = new Date().toISOString();
+    notify(job.id);
+    terminateFailedJob(handle);
+  };
+
+  const failStorage = (job, error) => {
+    job.storageFailed = true;
+    fail(job, `Could not save background command output or state: ${error.message || error}`);
+  };
+
+  const persistUpdate = (job) => {
+    try {
+      persist(job);
+    } catch (error) {
+      failStorage(job, error);
+      return false;
+    }
+    notify(job.id);
+    return true;
+  };
+
+  const failExecution = (job, error) => {
+    if (TERMINAL_STATUSES.has(job.status)) return;
+    fail(job, error?.message || String(error));
+    persistUpdate(job);
+  };
+
   for (const name of readdirSync(jobsDir).filter((entry) => entry.endsWith('.json'))) {
     try {
       const saved = JSON.parse(readFileSync(join(jobsDir, name), 'utf8'));
@@ -148,47 +188,60 @@ export function createCommandJobManager({
   pruneExpiredJobs();
 
   const appendLog = (job, chunk) => {
-    if (!chunk || job.logTruncated) return;
+    if (!chunk || job.logTruncated || TERMINAL_STATUSES.has(job.status)) return;
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
-    const remaining = maxLogBytes - job.logBytes;
-    if (remaining > 0) {
-      const accepted = buffer.subarray(0, remaining);
-      appendFileSync(logPath(job.id), accepted, { mode: 0o600 });
-      job.logBytes += accepted.length;
-    }
-    if (buffer.length > remaining || job.logBytes >= maxLogBytes) {
-      job.logTruncated = true;
-      persist(job);
+    const capped = buffer.subarray(0, Math.max(0, maxLogBytes - job.logBytes));
+    const accepted = utf8SafeLength(capped);
+    if (accepted > 0) {
+      try {
+        appendFileSync(logPath(job.id), capped.subarray(0, accepted), { mode: 0o600 });
+        job.logBytes += accepted;
+      } catch (error) {
+        failStorage(job, error);
+        return;
+      }
     }
     job.updatedAt = new Date().toISOString();
-    notify(job.id);
+    if (accepted < buffer.length || job.logBytes >= maxLogBytes) {
+      job.logTruncated = true;
+      persistUpdate(job);
+    } else {
+      notify(job.id);
+    }
   };
 
-  const readLog = (job, cursor = 0) => {
+  const readLog = (job, cursor) => {
     const path = logPath(job.id);
-    const size = existsSync(path) ? statSync(path).size : 0;
-    const start = clampInteger(cursor, 0, size);
-    const length = Math.min(maxReadBytes, size - start);
-    if (length <= 0) {
-      return { log: '', logCursor: start, nextCursor: start, logSize: size, hasMore: false };
-    }
-    const buffer = Buffer.alloc(length);
-    const descriptor = openSync(path, 'r');
     try {
-      readSync(descriptor, buffer, 0, length, start);
-    } finally {
-      closeSync(descriptor);
+      const size = statSync(path).size;
+      const start = clampInteger(cursor, 0, size);
+      const length = Math.min(Math.max(4, maxReadBytes), size - start); // Fit one UTF-8 code point.
+      if (length <= 0) return emptyLog(start, size);
+      const buffer = Buffer.alloc(length);
+      const descriptor = openSync(path, 'r');
+      let bytesRead;
+      try {
+        bytesRead = readSync(descriptor, buffer, 0, length, start);
+      } finally {
+        closeSync(descriptor);
+      }
+      const safeLength = utf8SafeLength(buffer.subarray(0, bytesRead));
+      // Decode a damaged terminal tail with replacement; no more bytes will arrive.
+      const consumed = TERMINAL_STATUSES.has(job.status) && (start + bytesRead === size || safeLength === 0)
+        ? bytesRead
+        : safeLength;
+      return {
+        log: buffer.subarray(0, consumed).toString('utf8'),
+        logCursor: start,
+        nextCursor: start + consumed,
+        logSize: size,
+        hasMore: consumed > 0 && start + consumed < size,
+      };
+    } catch (error) {
+      if (job.storageFailed) return emptyLog(clampInteger(cursor, 0, job.logBytes), job.logBytes);
+      if (error.code === 'ENOENT') return emptyLog();
+      throw error;
     }
-    // Never hand out a trailing partial UTF-8 sequence: the log is append-only,
-    // so backing the cursor up re-reads those bytes once they are complete.
-    const safeLength = utf8SafeLength(buffer);
-    return {
-      log: buffer.subarray(0, safeLength).toString('utf8'),
-      logCursor: start,
-      nextCursor: start + safeLength,
-      logSize: size,
-      hasMore: start + safeLength < size,
-    };
   };
 
   const snapshot = (job, cursor = 0) => ({
@@ -208,7 +261,7 @@ export function createCommandJobManager({
   });
 
   const complete = (job, result) => {
-    if (job.status === 'stopped') return;
+    if (TERMINAL_STATUSES.has(job.status)) return;
     job.status = result.status === 'aborted'
       ? 'stopped'
       : result.status === 'exited' && result.code === 0
@@ -221,8 +274,7 @@ export function createCommandJobManager({
     job.updatedAt = job.finishedAt;
     if (result.status === 'spawn_error') job.error = result.stderr || 'Command failed to start.';
     job.handle = null;
-    persist(job);
-    notify(job.id);
+    persistUpdate(job);
   };
 
   const start = (command) => {
@@ -248,9 +300,14 @@ export function createCommandJobManager({
       logTruncated: false,
       handle: null,
     };
+    try {
+      writeFileSync(logPath(job.id), '', { mode: 0o600 });
+      persist(job);
+    } catch (error) {
+      removeJobFiles(job.id);
+      throw error;
+    }
     jobs.set(job.id, job);
-    writeFileSync(logPath(job.id), '');
-    persist(job);
 
     try {
       const handle = executor.start(command, {
@@ -259,10 +316,14 @@ export function createCommandJobManager({
         onStdout: (chunk) => appendLog(job, chunk),
         onStderr: (chunk) => appendLog(job, chunk),
       });
-      job.handle = handle;
+      handle.result.then((result) => complete(job, result)).catch((error) => failExecution(job, error));
       job.pid = handle.pid;
-      persist(job);
-      handle.result.then((result) => complete(job, result));
+      if (job.storageFailed) {
+        terminateFailedJob(handle);
+      } else {
+        job.handle = handle;
+        persistUpdate(job);
+      }
     } catch (error) {
       complete(job, {
         status: 'spawn_error',
@@ -284,7 +345,7 @@ export function createCommandJobManager({
   const wait = async (id, { cursor = 0, waitMs = 30_000, signal } = {}) => {
     const initial = get(id, cursor);
     if (!initial) return null;
-    if (TERMINAL_STATUSES.has(initial.status) || initial.logSize > initial.logCursor || waitMs <= 0) return initial;
+    if (TERMINAL_STATUSES.has(initial.status) || initial.nextCursor > initial.logCursor || waitMs <= 0) return initial;
     if (signal?.aborted) throw abortError();
 
     await new Promise((resolve, reject) => {
@@ -309,9 +370,6 @@ export function createCommandJobManager({
       waiters.get(id).add(finish);
       signal?.addEventListener('abort', abort, { once: true });
       timer = setTimeout(finish, clampInteger(waitMs, 1, MAX_WAIT_MS));
-
-      const latest = get(id, cursor);
-      if (!latest || TERMINAL_STATUSES.has(latest.status) || latest.logSize > latest.logCursor) finish();
     });
     return get(id, cursor);
   };
@@ -322,17 +380,20 @@ export function createCommandJobManager({
     if (TERMINAL_STATUSES.has(job.status)) return snapshot(job, job.logBytes);
     job.status = 'stopping';
     job.updatedAt = new Date().toISOString();
-    persist(job);
-    notify(id);
+    if (!persistUpdate(job)) return snapshot(job, job.logBytes);
 
     if (!job.handle) {
       job.status = 'interrupted';
       job.finishedAt = new Date().toISOString();
       job.error = 'The command process is no longer attached to this server.';
-      persist(job);
-      return snapshot(job, job.logBytes);
+      persistUpdate(job);
+    } else {
+      try {
+        await job.handle.terminate('aborted');
+      } catch (error) {
+        failExecution(job, error);
+      }
     }
-    await job.handle.terminate('aborted');
     return snapshot(job, job.logBytes);
   };
 

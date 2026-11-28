@@ -1127,6 +1127,83 @@ test('persisted runs and event logs can be recovered after reconnect', () => {
   }
 });
 
+test('startup recovers an interrupted event log and appends after the recovered sequence', async (t) => {
+  for (const [name, snapshotSequence] of [['partial record', 1], ['missing final newline', 4]]) {
+    await t.test(name, async (t) => {
+      const runsDir = mkdtempSync(join(tmpdir(), 'cherry-recover-events-'));
+      t.after(() => rmSync(runsDir, { recursive: true, force: true }));
+      const warn = t.mock.method(console, 'warn', () => {});
+      const id = 'run-recover-events';
+      const now = new Date().toISOString();
+      const result = { content: '已完成' };
+      writeFileSync(join(runsDir, `${id}.json`), JSON.stringify({
+        id, sessionId: 'recover-events', status: 'idle', sequence: snapshotSequence,
+        createdAt: now, updatedAt: now, result, error: null,
+        resume: {
+          runtimeMessages: [{ role: 'user', content: 'start' }],
+          turnNumber: 1,
+          result,
+          input: { modelConfig: { provider: 'openai', model: 'test', apiKey: 'test' } },
+        },
+      }));
+      const legacy = JSON.stringify({ type: 'run-start', remoteSequence: 1 });
+      const stored = JSON.stringify({ v: 2, seq: 2, turn: 1, ev: { type: 'text-delta', text: result.content } });
+      const prefix = `${legacy}\n${stored}\n`;
+      const path = join(runsDir, `${id}.events.ndjson`);
+      if (name === 'partial record') {
+        const partial = Buffer.from('{"v":2,"seq":3,"turn":1,"ev":{"text":"未').subarray(0, -1);
+        writeFileSync(path, Buffer.concat([Buffer.from(prefix), partial]));
+      } else {
+        writeFileSync(path, prefix.slice(0, -1));
+      }
+
+      const boundary = Math.max(2, snapshotSequence);
+      const next = { type: 'text-delta', text: 'continued' };
+      const nextLine = `${JSON.stringify({ v: 2, seq: boundary + 1, turn: 2, ev: next })}\n`;
+      const manager = createManager(runsDir, {
+        maxEventBytes: Buffer.byteLength(prefix + nextLine),
+        createModel: () => ({}),
+        runAgent: async ({ onEvent }) => {
+          onEvent(next);
+          return { content: next.text };
+        },
+      });
+      const recovered = manager.get(id);
+      assert.equal(recovered?.status, 'idle');
+      assert.equal(recovered.sequence, boundary);
+      assert.deepEqual(recovered.events.map((ev) => ev.remoteSequence), [1, 2]);
+      assert.equal(recovered.events[1].text, result.content);
+      if (name === 'partial record') assert.match(warn.mock.calls[0]?.arguments[0], /partial final event log line/);
+
+      const continued = await manager.continue({ runId: id, message: 'continue', userMessageCount: 2 });
+      assert.equal(continued.sequence, boundary);
+      await waitForRunStatus(manager, id, 'idle');
+      assert.equal(readFileSync(path, 'utf8'), prefix + nextLine);
+      const replay = createManager(runsDir).get(id, boundary);
+      assert.equal(replay.sequence, boundary + 1);
+      assert.deepEqual(replay.events.map((ev) => [ev.remoteSequence, ev.text]), [[boundary + 1, next.text]]);
+    });
+  }
+});
+
+test('startup reports malformed interior event log lines without discarding their bytes', (t) => {
+  const runsDir = mkdtempSync(join(tmpdir(), 'cherry-corrupt-events-'));
+  t.after(() => rmSync(runsDir, { recursive: true, force: true }));
+  const warn = t.mock.method(console, 'warn', () => {});
+  const id = 'run-corrupt-events';
+  writeFileSync(join(runsDir, `${id}.json`), JSON.stringify({
+    id, sessionId: 'corrupt-events', status: 'completed', updatedAt: new Date().toISOString(), sequence: 2,
+  }));
+  const path = join(runsDir, `${id}.events.ndjson`);
+  const log = '{"type":"run-start","remoteSequence":1}\n{broken\n{"type":"run-finish","remoteSequence":2}\n';
+  writeFileSync(path, log);
+
+  const manager = createManager(runsDir);
+  assert.equal(manager.get(id), null);
+  assert.equal(readFileSync(path, 'utf8'), log);
+  assert.match(warn.mock.calls[0]?.arguments[0], /malformed event log line 2/);
+});
+
 test('terminal runs older than the retention window are pruned from memory and disk', () => {
   const runsDir = mkdtempSync(join(tmpdir(), 'cherry-runs-'));
   try {
@@ -1887,7 +1964,7 @@ test('continue rejects a diverged history and refuses non-idle runs', async () =
       messages: [{ role: 'user', content: 'fresh full history' }],
       modelConfig: { provider: 'openai', model: 'test', apiKey: 'test' },
     });
-    assert.equal(manager.get(started.id).status, 'superseded');
+    await waitForRunStatus(manager, started.id, 'superseded');
     await waitForRunStatus(manager, fresh.id, 'idle');
     await assert.rejects(
       () => manager.continue({ runId: started.id, message: 'late' }),
@@ -2367,6 +2444,70 @@ test('initial async snapshot gates model execution and cancellation wins the que
   } finally {
     gate.resolve();
     rmSync(runsDir, { recursive: true, force: true });
+  }
+});
+
+test('a failed continuation snapshot restores idle state unless cancellation has taken over', async (t) => {
+  for (const cancel of [false, true]) {
+    await t.test(cancel ? 'keeps the queued cancellation' : 'allows a retry', async (t) => {
+      const runsDir = mkdtempSync(join(tmpdir(), 'cherry-continue-write-'));
+      const entered = deferred();
+      const gate = deferred();
+      t.after(() => { gate.resolve(); rmSync(runsDir, { recursive: true, force: true }); });
+      const turns = [];
+      let failNext = true;
+      const manager = createManager(runsDir, {
+        createModel: () => ({}),
+        runAgent: async ({ messages }) => {
+          turns.push(messages.map(({ content }) => content));
+          return { content: `reply ${turns.length}` };
+        },
+        writeSnapshot: async (path, json, options) => {
+          const snapshot = JSON.parse(json);
+          if (failNext && snapshot.status === 'running' && snapshot.replyId === 'reply-two') {
+            failNext = false;
+            entered.resolve();
+            await gate.promise;
+            throw new Error('continuation snapshot failed');
+          }
+          writeFileSync(path, json, options);
+        },
+      });
+      const started = await manager.start({
+        sessionId: 'continue-write', replyId: 'reply-one',
+        messages: [{ role: 'user', content: 'first message' }],
+        modelConfig: { provider: 'openai', model: 'test', apiKey: 'test' },
+      });
+      const idle = await waitForRunStatus(manager, started.id, 'idle');
+      const path = join(runsDir, `${started.id}.json`);
+      const saved = readFileSync(path, 'utf8');
+      const request = { runId: started.id, replyId: 'reply-two', message: 'follow up', userMessageCount: 2 };
+      const failing = assert.rejects(manager.continue(request), /continuation snapshot failed/);
+      await entered.promise;
+      const updates = [];
+      t.after(manager.subscribe(started.id, 0, ({ run }) => { if (run) updates.push(run.status); }));
+      const stopping = cancel ? manager.abort(started.id) : null;
+      gate.resolve();
+      await failing;
+      assert.deepEqual(turns, [['first message']]);
+      if (stopping) {
+        const stopped = await stopping;
+        assert.equal(stopped.status, 'aborted');
+        assert.equal(stopped.error, 'Agent run aborted');
+        assert.equal(JSON.parse(readFileSync(path, 'utf8')).status, 'aborted');
+        await assert.rejects(manager.continue(request), /aborted and cannot continue/);
+        assert.deepEqual(updates, ['running', 'aborted']);
+      } else {
+        assert.deepEqual(manager.get(started.id), idle);
+        assert.equal(readFileSync(path, 'utf8'), saved);
+        assert.deepEqual(updates, ['running', 'idle']);
+        assert.equal((await manager.continue(request)).status, 'running');
+        const completed = await waitForRunStatus(manager, started.id, 'idle');
+        assert.equal(completed.replyId, request.replyId);
+        assert.equal(completed.result.content, 'reply 2');
+        assert.deepEqual(turns, [['first message'], ['first message', 'reply 1', request.message]]);
+      }
+    });
   }
 });
 

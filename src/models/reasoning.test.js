@@ -120,6 +120,48 @@ test('custom OpenAI base URLs keep the Chat Completions protocol', async () => {
   assert.equal(request.body.reasoning_effort, 'high');
 });
 
+test('a model keeps its reasoning fallback after a failed catalog fetch', async (t) => {
+  resetReasoningCatalog();
+  t.after(resetReasoningCatalog);
+  let catalogRequests = 0;
+  const reasons = [];
+  t.mock.method(globalThis, 'fetch', async (url, init) => {
+    if (String(url).includes('models.dev')) {
+      catalogRequests += 1;
+      if (catalogRequests === 1) throw new Error('catalog offline');
+      return Response.json({ openai: { models: { alias: { reasoning: false } } } });
+    }
+    reasons.push(JSON.parse(init.body).reasoning);
+    return Response.json(responsesGeneratePayload('alias'));
+  });
+  const config = {
+    provider: 'custom-openai', apiKey: 'test', model: 'alias', reasoningEffort: 'high',
+    baseUrl: 'https://gateway.example/v1/responses',
+  };
+  const request = { prompt: [{ role: 'user', content: [{ type: 'text', text: 'Hello' }] }] };
+  const model = await createLanguageModel(config);
+  await model.doGenerate(request);
+  await model.doGenerate(request);
+  assert.equal(catalogRequests, 1);
+  await (await createLanguageModel(config)).doGenerate(request);
+  assert.equal(catalogRequests, 2, 'a new model may retry the catalog');
+  assert.deepEqual(reasons, [{ effort: 'high', summary: 'auto' }, { effort: 'high', summary: 'auto' }, undefined]);
+});
+
+test('chat models without an applicable effort skip the catalog', async (t) => {
+  const fetch = t.mock.method(globalThis, 'fetch', async (url) => {
+    assert.ok(String(url).endsWith('/chat/completions'));
+    return Response.json({ choices: [{ index: 0, message: { role: 'assistant', content: 'OK' }, finish_reason: 'stop' }] });
+  });
+  for (const [provider, reasoningEffort] of [['openai', undefined], ['openai', 'max'], ['deepseek', 'high']]) {
+    const model = await createLanguageModel({
+      provider, apiKey: 'test', model: 'alias', baseUrl: 'https://proxy.example/v1', reasoningEffort,
+    });
+    await model.doGenerate({ prompt: [{ role: 'user', content: [{ type: 'text', text: 'Hello' }] }] });
+  }
+  assert.equal(fetch.mock.callCount(), 3);
+});
+
 test('summary provider options only apply to the OpenAI provider', () => {
   assert.deepEqual(summaryProviderOptions('openai'), { openai: { reasoningSummary: 'auto', forceReasoning: true } });
   assert.deepEqual(summaryProviderOptions('openrouter'), {});

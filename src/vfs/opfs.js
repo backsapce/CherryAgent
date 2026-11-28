@@ -6,11 +6,15 @@
 import JSZip from 'jszip';
 import yaml from 'js-yaml';
 import { getWorkspaceDirName } from '../agents/agents.js';
-import { reconcileSessionRecoveryJournal } from '../sessionRefresh.js';
+import {
+  immutableSessionData,
+  isImmutableSessionData,
+  reconcileSessionRecoveryJournal,
+  snapshotSessions,
+} from '../sessionRefresh.js';
 import { gzipSupported, gzipText, gunzipText } from './compression.js';
 import {
   chunkFileName,
-  fingerprintString,
   formatHotFileBody,
   mergeArchivedView,
   parseChunkFileName,
@@ -44,6 +48,7 @@ export class ZipImportValidationError extends Error {
 const syncHooks = new Set();
 let sessionMetadataWriteSnapshot = null;
 const sessionMessageWriteSnapshots = new Map();
+const incompleteSessionViews = new WeakMap();
 let sessionWriteCacheRoot = null;
 const agentWorkspaceMutationQueues = new Map();
 
@@ -59,13 +64,6 @@ function withAgentWorkspaceMutation(agentId, scope, operation) {
     }
   });
   return task;
-}
-
-// Keep only a compact change fingerprint here. Retaining the full serialized
-// message body duplicated every conversation (including image data URLs) for
-// the lifetime of the tab and made session persistence a major heap consumer.
-function sessionMessageFingerprint(serialized) {
-  return fingerprintString(serialized);
 }
 
 async function ensureSessionWriteCacheRoot(root) {
@@ -120,6 +118,14 @@ export function registerOpfsSyncHook(fn) {
   return () => syncHooks.delete(fn);
 }
 
+function invalidateSessionWriteSnapshot(path) {
+  if (path === 'session.json') sessionMetadataWriteSnapshot = null;
+  if (path === 'sessions') sessionMessageWriteSnapshots.clear();
+  const match = /^sessions\/([^/]+)\.json$/.exec(path)
+    || /^sessions\/([^/]+)(?:\/c\d{4,}\.json\.gz)?$/.exec(path);
+  if (match) sessionMessageWriteSnapshots.delete(match[1]);
+}
+
 export function notifyOpfsMutation(paths, type = 'write') {
   const changedPaths = [...new Set(
     (Array.isArray(paths) ? paths : [paths])
@@ -128,11 +134,7 @@ export function notifyOpfsMutation(paths, type = 'write') {
   )];
   if (changedPaths.length === 0) return;
 
-  for (const path of changedPaths) {
-    if (path === 'session.json') sessionMetadataWriteSnapshot = null;
-    const match = /^sessions\/([^/]+)\.json$/.exec(path);
-    if (match) sessionMessageWriteSnapshots.delete(match[1]);
-  }
+  for (const path of changedPaths) invalidateSessionWriteSnapshot(path);
 
   const event = { type, paths: changedPaths, at: Date.now() };
   for (const fn of syncHooks) {
@@ -278,6 +280,7 @@ export async function writeText(dirHandle, filename, content, options = {}) {
     throw error;
   }
   if (!options.internal) notifyOpfsMutation(options.localPath || filename, 'write');
+  else if (options.localPath) invalidateSessionWriteSnapshot(normalizeLocalPath(options.localPath));
 }
 
 export async function readPathBlob(localPath) {
@@ -320,7 +323,8 @@ export async function deletePath(localPath, options = {}) {
   try {
     const dir = parts.length > 0 ? await getExistingDirectory(...parts) : await getRootDir();
     await dir.removeEntry(filename, { recursive: true });
-    if (!options.internal) notifyOpfsMutation(localPath, 'delete');
+    if (options.internal) invalidateSessionWriteSnapshot(normalizeLocalPath(localPath));
+    else notifyOpfsMutation(localPath, 'delete');
     return true;
   } catch (error) {
     if (isMissingFileSystemEntry(error)) return false;
@@ -349,7 +353,8 @@ export async function deletePathNonRecursive(localPath, options = {}) {
     // Deliberately omit `recursive`: a concurrent file-to-directory change
     // with new descendants must never turn a sync deletion into data loss.
     await dir.removeEntry(filename);
-    if (!options.internal) notifyOpfsMutation(localPath, 'delete');
+    if (options.internal) invalidateSessionWriteSnapshot(normalizeLocalPath(localPath));
+    else notifyOpfsMutation(localPath, 'delete');
     return true;
   } catch (error) {
     if (isMissingFileSystemEntry(error)) return true;
@@ -394,13 +399,19 @@ export async function deleteEmptyPathTree(localPath, options = {}) {
     throw error;
   }
   const removed = await removeDirectoryTreeIfEmpty(parent, name);
-  if (removed && !options.internal) notifyOpfsMutation(localPath, 'delete');
+  if (removed) {
+    if (options.internal) invalidateSessionWriteSnapshot(normalizeLocalPath(localPath));
+    else notifyOpfsMutation(localPath, 'delete');
+  }
   return removed;
 }
 
 export async function hashBlob(blob) {
-  const buffer = await blob.arrayBuffer();
-  const digest = await crypto.subtle.digest('SHA-256', buffer);
+  return hashBytes(await blob.arrayBuffer());
+}
+
+async function hashBytes(bytes) {
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
   return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
@@ -621,8 +632,8 @@ async function expandLocalSessionBodyText(filename, existingText, normalizedPath
   const body = parseHotFileBody(parsed);
   if (!body || !(body.chunks || []).length) return existingText;
   const id = String(filename).replace(/\.json$/, '');
-  const chunkPayloads = await loadArchiveChunks(id, body.chunks);
-  return JSON.stringify(mergeArchivedView(chunkPayloads, body.hotMessages));
+  const { payloads } = await loadArchiveChunks(id, body.chunks);
+  return JSON.stringify(mergeArchivedView(payloads, body.hotMessages));
 }
 
 /**
@@ -841,15 +852,16 @@ async function readSessionHotBody(sessionDir, id) {
  * on disk for manual recovery and the next save re-plans the archive.
  */
 async function loadArchiveChunks(id, envelopeChunks) {
-  if (!envelopeChunks.length) return [];
+  const payloads = [];
+  const missing = [];
+  if (!envelopeChunks.length) return { payloads, missing };
   let archiveDir;
   try {
     archiveDir = await getExistingDirectory(SESSIONS_DIR, id);
   } catch (error) {
-    if (isMissingFileSystemEntry(error)) return [];
+    if (isMissingFileSystemEntry(error)) return { payloads, missing: envelopeChunks };
     throw error;
   }
-  const payloads = [];
   for (const entry of envelopeChunks) {
     const name = chunkFileName(entry.index);
     let bytes;
@@ -859,6 +871,7 @@ async function loadArchiveChunks(id, envelopeChunks) {
     } catch (error) {
       if (isMissingFileSystemEntry(error)) {
         console.warn(`Session archive chunk ${SESSIONS_DIR}/${id}/${name} is missing; skipping`);
+        missing.push(entry);
         continue;
       }
       throw error;
@@ -871,13 +884,13 @@ async function loadArchiveChunks(id, envelopeChunks) {
       console.warn(`Session archive chunk ${SESSIONS_DIR}/${id}/${name} is unreadable; skipping`, error);
     }
   }
-  return payloads;
+  return { payloads, missing };
 }
 
 async function readFullSessionMessages(sessionDir, id) {
   const { parsed, loadedPrimaryMessages } = await readSessionHotBody(sessionDir, id);
   if (parsed === MISSING_SESSION_JSON) {
-    return { messages: [], loadedPrimaryMessages: false };
+    return { messages: [], loadedPrimaryMessages: false, missing: [] };
   }
   const body = parseHotFileBody(parsed);
   if (!body) {
@@ -886,10 +899,11 @@ async function readFullSessionMessages(sessionDir, id) {
     }
     throw new Error(`Session messages for ${id} must contain a JSON array`);
   }
-  const chunkPayloads = await loadArchiveChunks(id, body.chunks);
+  const { payloads, missing } = await loadArchiveChunks(id, body.chunks);
   return {
-    messages: mergeArchivedView(chunkPayloads, body.hotMessages),
+    messages: mergeArchivedView(payloads, body.hotMessages),
     loadedPrimaryMessages,
+    missing,
   };
 }
 
@@ -913,20 +927,18 @@ async function removeSessionArchiveDir(id) {
   return removed;
 }
 
-/** Names of archive chunk files that currently exist under sessions/<id>/. */
-async function listArchiveChunkNames(id) {
+async function inspectSessionArchive(id) {
   let archiveDir;
   try {
     archiveDir = await getExistingDirectory(SESSIONS_DIR, id);
   } catch (error) {
-    if (isMissingFileSystemEntry(error)) return new Set();
+    if (isMissingFileSystemEntry(error)) return { dir: null, names: new Set() };
     throw error;
   }
-  return new Set(
-    (await listEntries(archiveDir))
-      .map(({ name }) => (parseChunkFileName(name) == null ? null : name))
-      .filter((name) => name != null)
-  );
+  const names = new Set((await listEntries(archiveDir))
+    .filter(({ name, kind }) => kind === 'file' && parseChunkFileName(name) != null)
+    .map(({ name }) => name));
+  return { dir: archiveDir, names };
 }
 
 /**
@@ -941,117 +953,149 @@ async function listArchiveChunkNames(id) {
  * which keeps appends write-once for sealed history. Returns the written and
  * deleted paths so callers can notify sync hooks accurately.
  *
- * A referenced chunk file that has not landed yet - typically because a pull
- * is still running or was interrupted - defers the whole write instead of
- * letting a re-plan orphan it: the save is retried on the next call once the
- * bytes arrive. Unreadable bytes are a different failure and are pruned by
- * the re-plan; deferral protects only references without files.
+ * A referenced chunk that was missing when the session was read or is still
+ * missing now defers the write unless this snapshot can reconstruct it. A
+ * refresh must reconcile the draft against the restored history before retry.
  */
-async function writeSessionBody(sessionDir, id, messages) {
-  const plan = gzipSupported()
-    ? planSessionArchive(messages)
-    : { hotMessages: messages, chunks: [] };
+async function writeSessionBody(sessionDir, id, messages, baseline) {
+  const cached = sessionMessageWriteSnapshots.get(id);
+  const before = cached?.source.deref();
+  sessionMessageWriteSnapshots.delete(id);
+  const canArchive = gzipSupported();
+  const ownedMessages = typeof globalThis.WeakRef === 'function' && isImmutableSessionData(messages);
   const hotPath = `${SESSIONS_DIR}/${id}.json`;
   const written = [];
   const deleted = [];
 
-  // The current envelope identifies chunks that are already durable and
-  // byte-identical. A hot file that cannot be parsed is about to be replaced,
-  // so read failures degrade to "no reusable chunks" instead of blocking.
+  // The current envelope identifies candidates for reuse. Check the actual
+  // files too: the envelope and chunks can be written independently by sync.
+  const previousText = await readText(sessionDir, `${id}.json`);
   let existingBody = null;
   try {
-    existingBody = parseHotFileBody(await readSessionJSON(sessionDir, `${id}.json`));
+    if (previousText !== null) existingBody = parseHotFileBody(JSON.parse(previousText));
   } catch (error) {
     console.warn(`Failed to read the existing body of session ${id} while saving:`, error);
   }
-  const existingChunks = new Map(
-    (existingBody?.chunks || []).map((entry) => [entry.index, entry])
-  );
-  const diskChunkNames = await listArchiveChunkNames(id);
+  const existingChunks = new Map((existingBody?.chunks || []).map((entry) => [entry.index, entry]));
+  const { dir, names: diskChunkNames } = await inspectSessionArchive(id);
+  let archiveDir = dir;
+  let prefix = [];
+  let offset = 0;
+  if (canArchive && ownedMessages && before && cached.chunks?.length && messages.length >= before.length) {
+    // A byte-capped last chunk also depends on the first message that did
+    // not fit in it. Include that lookahead in the identity check.
+    const prefixEnd = cached.archivedCount;
+    let index = 0;
+    while (index <= prefixEnd && messages[index] === before[index]) index += 1;
+    if (index > prefixEnd && await verifyArchivePrefix(archiveDir, cached.chunks, existingChunks)) {
+      prefix = cached.chunks;
+      offset = prefixEnd;
+    }
+  }
 
-  const planReuses = (index, fingerprint) => plan.chunks.some(
-    (chunk) => chunk.index === index && chunk.fingerprint === fingerprint
+  const plan = canArchive
+    ? planSessionArchive(offset ? messages.slice(offset) : messages)
+    : { hotMessages: messages, chunks: [], archivedCount: 0 };
+  const canRestore = ({ index, count, fingerprint }) => {
+    const planned = index < prefix.length ? prefix[index] : plan.chunks[index - prefix.length];
+    return planned?.count === count && planned.fingerprint === fingerprint;
+  };
+  const stillMissing = [...existingChunks.values()].some(
+    (entry) => !diskChunkNames.has(chunkFileName(entry.index)) && !canRestore(entry)
   );
-  const missingReferenced = [...existingChunks.values()].filter(
-    (entry) => !diskChunkNames.has(chunkFileName(entry.index))
-      && !planReuses(entry.index, entry.fingerprint)
-  );
-  if (missingReferenced.length > 0) {
-    console.warn(
-      `Session ${id} body save deferred: ${missingReferenced.length} referenced archive chunk file(s) have not landed yet`
-    );
+  const missingAtRead = incompleteSessionViews.get(baseline) || [];
+  if (stillMissing || missingAtRead.some((entry) => !canRestore(entry))) {
+    console.warn(`Session ${id} body save deferred: re-read the referenced archive chunks before saving`);
     return { written, deleted, deferred: true };
   }
 
-  if (plan.chunks.length === 0) {
-    await writeSerializedJSON(
-      sessionDir,
-      `${id}.json`,
-      formatHotFileBody({ chunks: [], hotMessages: plan.hotMessages }),
-      { internal: true }
-    );
-    written.push(hotPath);
-    deleted.push(...(await removeSessionArchiveDir(id)));
-    return { written, deleted };
-  }
-
-  const archiveDir = await getDirectory(SESSIONS_DIR, id);
-  const chunkEntries = [];
-  const wantedNames = new Set();
+  const chunkEntries = [...prefix];
+  const wantedNames = new Set(prefix.map((chunk) => chunkFileName(chunk.index)));
+  if (plan.chunks.length && !archiveDir) archiveDir = await getDirectory(SESSIONS_DIR, id);
   for (const chunk of plan.chunks) {
-    const name = chunkFileName(chunk.index);
-    const existing = existingChunks.get(chunk.index);
-    if (existing && existing.fingerprint === chunk.fingerprint && diskChunkNames.has(name)) {
-      wantedNames.add(name);
-      chunkEntries.push({
-        index: chunk.index,
-        count: chunk.count,
-        bytes: existing.bytes ?? null,
-        fingerprint: chunk.fingerprint,
-      });
-      continue;
+    const { count, fingerprint, serialized } = chunk;
+    const index = chunk.index + prefix.length;
+    const name = chunkFileName(index);
+    const existing = existingChunks.get(index);
+    let bytes = null;
+    let reuse = false;
+    if (existing?.fingerprint === fingerprint && diskChunkNames.has(name)) {
+      const file = await (await archiveDir.getFileHandle(name)).getFile();
+      bytes = new Uint8Array(await file.arrayBuffer());
+      // An envelope's fingerprint is a change hint, not proof of its file's contents.
+      try { reuse = await gunzipText(bytes) === serialized; } catch { /* repair unreadable bytes */ }
     }
-    const bytes = await gzipText(chunk.serialized);
-    await writeText(archiveDir, name, bytes, { internal: true });
-    written.push(`${SESSIONS_DIR}/${id}/${name}`);
+    if (!reuse) bytes = await gzipText(serialized);
+    const digest = ownedMessages ? await hashBytes(bytes) : null;
+    if (!reuse) {
+      await writeText(archiveDir, name, bytes, { internal: true });
+      written.push(`${SESSIONS_DIR}/${id}/${name}`);
+    }
     wantedNames.add(name);
     chunkEntries.push({
-      index: chunk.index,
-      count: chunk.count,
+      index,
+      count,
       bytes: bytes.byteLength,
-      fingerprint: chunk.fingerprint,
+      fingerprint,
+      digest,
     });
   }
-  await writeSerializedJSON(
-    sessionDir,
-    `${id}.json`,
-    formatHotFileBody({ chunks: chunkEntries, hotMessages: plan.hotMessages }),
-    { internal: true }
-  );
-  written.push(hotPath);
-  // Delete stale chunks only now that the published envelope no longer
-  // references them; deleting earlier would leave the old hot file pointing
-  // at removed chunks if the envelope write crashed mid-save.
-  for (const name of diskChunkNames) {
-    if (wantedNames.has(name)) continue;
-    if (await deleteEntry(archiveDir, name)) {
-      deleted.push(`${SESSIONS_DIR}/${id}/${name}`);
+  const text = formatHotFileBody({ chunks: chunkEntries, hotMessages: plan.hotMessages });
+  if (text !== previousText) {
+    await writeSerializedJSON(sessionDir, `${id}.json`, text, { internal: true });
+    written.push(hotPath);
+  }
+  // Never remove chunks before publishing the envelope that stops referencing them.
+  if (!chunkEntries.length) {
+    deleted.push(...(await removeSessionArchiveDir(id)));
+  } else {
+    for (const name of diskChunkNames) {
+      if (wantedNames.has(name)) continue;
+      if (await deleteEntry(archiveDir, name)) deleted.push(`${SESSIONS_DIR}/${id}/${name}`);
     }
   }
-  return { written, deleted };
+  return {
+    written,
+    deleted,
+    snapshot: ownedMessages ? {
+      source: new globalThis.WeakRef(messages),
+      chunks: chunkEntries,
+      archivedCount: offset + plan.archivedCount,
+    } : null,
+  };
 }
 
-/** Load one session's message body on demand. */
-export async function loadSessionMessages(sessionId) {
+async function verifyArchivePrefix(archiveDir, chunks, existingChunks) {
+  if (!archiveDir) return false;
+  for (const chunk of chunks) {
+    const existing = existingChunks.get(chunk.index);
+    if (existing?.fingerprint !== chunk.fingerprint || existing.count !== chunk.count) return false;
+    try {
+      const file = await (await archiveDir.getFileHandle(chunkFileName(chunk.index))).getFile();
+      // OPFS timestamps and sizes alone cannot detect a same-size replacement.
+      if (file.size !== chunk.bytes || await hashBlob(file) !== chunk.digest) return false;
+    } catch (error) {
+      if (isMissingFileSystemEntry(error)) return false;
+      throw error;
+    }
+  }
+  return true;
+}
+
+/** Load one session's message body on demand. The App shares its immutable view. */
+export async function loadSessionMessages(sessionId, { immutable = false } = {}) {
   const root = await getRootDir();
   await ensureSessionWriteCacheRoot(root);
   const id = String(sessionId);
   const sessionDir = await getDirectory(SESSIONS_DIR);
-  const { messages, loadedPrimaryMessages } = await readFullSessionMessages(sessionDir, id);
-  if (loadedPrimaryMessages) {
-    sessionMessageWriteSnapshots.set(id, sessionMessageFingerprint(JSON.stringify(messages)));
+  const { messages, loadedPrimaryMessages, missing } = await readFullSessionMessages(sessionDir, id);
+  const view = immutable ? immutableSessionData(messages) : messages;
+  if (missing.length) incompleteSessionViews.set(view, missing);
+  if (loadedPrimaryMessages && typeof globalThis.WeakRef === 'function' && isImmutableSessionData(view)) {
+    // shortcut: freshly reopened archives plan once on their first edit; seed proofs on read if this is too slow.
+    sessionMessageWriteSnapshots.set(id, { source: new globalThis.WeakRef(view) });
   }
-  return messages;
+  return view;
 }
 
 export function validateSessionRecoveryJournal(journal) {
@@ -1133,14 +1177,8 @@ export async function loadSessions() {
         nextSessionIndex += 1;
         const session = sessions[index];
         try {
-          const { messages, loadedPrimaryMessages } = await readFullSessionMessages(
-            sessionDir,
-            String(session.id)
-          );
-          loaded[index] = {
-            session: { ...session, messages },
-            loadedPrimaryMessages,
-          };
+          const { messages } = await readFullSessionMessages(sessionDir, String(session.id));
+          loaded[index] = { ...session, messages };
         } catch (error) {
           loadError ||= error;
         }
@@ -1151,28 +1189,24 @@ export async function loadSessions() {
   if (loadError) throw loadError;
 
   sessionMetadataWriteSnapshot = loadedPrimaryIndex ? JSON.stringify(sessions) : null;
-  sessionMessageWriteSnapshots.clear();
-  for (const { session, loadedPrimaryMessages } of loaded) {
-    if (loadedPrimaryMessages) {
-      const serialized = JSON.stringify(session.messages || []);
-      sessionMessageWriteSnapshots.set(String(session.id), sessionMessageFingerprint(serialized));
-    }
-  }
-  return loaded.map(({ session }) => session);
+  return loaded;
 }
 
 /**
- * Save all sessions.
- * @param {Array} sessions - Array of session objects with messages
+ * Save sessions, omitting bodies that are not loaded. A deferred result is
+ * not a commit: refresh/reconcile before retrying. Some other bodies may have
+ * landed, but the index is not published until every body is ready.
  */
-export async function saveSessions(sessions) {
+export async function saveSessions(sessions, baseline = []) {
+  const snapshot = snapshotSessions(sessions);
+  const previousBodies = new Map(baseline.map(({ id, messages }) => [String(id), messages]));
   const root = await getRootDir();
   await ensureSessionWriteCacheRoot(root);
   const sessionDir = await getDirectory(SESSIONS_DIR);
   const nextSessionsById = new Map();
   const nextMessagesById = new Map();
 
-  for (const session of sessions) {
+  for (const session of snapshot) {
     if (session?.id != null) {
       const { messages: _messages, ...rest } = session;
       const id = String(session.id);
@@ -1193,11 +1227,11 @@ export async function saveSessions(sessions) {
 
   const messageEntries = [...nextMessagesById];
   const writtenMessageSnapshots = [];
+  const deferredIds = [];
   let nextIndex = 0;
   let firstError = null;
   const workers = Array.from(
-    // Each worker temporarily owns a serialized conversation. Two workers
-    // keep OPFS responsive without multiplying large image/chat bodies eightfold.
+    // Bound the working set when several bodies need full archive plans.
     { length: Math.min(2, messageEntries.length) },
     async () => {
       while (!firstError && nextIndex < messageEntries.length) {
@@ -1205,14 +1239,12 @@ export async function saveSessions(sessions) {
         nextIndex += 1;
         const [id, messages] = messageEntries[index];
         try {
-          const fingerprint = sessionMessageFingerprint(JSON.stringify(messages));
-          if (fingerprint === sessionMessageWriteSnapshots.get(id)) continue;
-          const { written, deleted, deferred } = await writeSessionBody(sessionDir, id, messages || []);
-          changedPaths.push(...written);
-          deletedPaths.push(...deleted);
-          // A deferred body keeps its stale snapshot so the next save retries
-          // instead of treating the unwritten messages as durable.
-          if (!deferred) writtenMessageSnapshots.push([id, fingerprint]);
+          if (messages === sessionMessageWriteSnapshots.get(id)?.source.deref()) continue;
+          const result = await writeSessionBody(sessionDir, id, messages, previousBodies.get(id));
+          changedPaths.push(...result.written);
+          deletedPaths.push(...result.deleted);
+          if (result.deferred) deferredIds.push(id);
+          else if (result.snapshot) writtenMessageSnapshots.push([id, result.snapshot]);
         } catch (err) {
           firstError ||= err;
         }
@@ -1224,7 +1256,7 @@ export async function saveSessions(sessions) {
   // Publish the index last. If the browser closes mid-save, an orphaned
   // message file is recoverable on retry; an index pointing at a missing new
   // message file would make that session appear empty and risk overwriting it.
-  if (metadataChanged) {
+  if (metadataChanged && !deferredIds.length) {
     await writeJSON(root, SESSION_FILE, metadata, { internal: true });
     changedPaths.unshift(SESSION_FILE);
   }
@@ -1232,9 +1264,10 @@ export async function saveSessions(sessions) {
   notifyOpfsMutation(changedPaths, 'write');
   if (deletedPaths.length > 0) notifyOpfsMutation(deletedPaths, 'delete');
   if (changedPaths.includes(SESSION_FILE)) sessionMetadataWriteSnapshot = metadataSnapshot;
-  for (const [id, fingerprint] of writtenMessageSnapshots) {
-    sessionMessageWriteSnapshots.set(id, fingerprint);
+  for (const [id, writtenSnapshot] of writtenMessageSnapshots) {
+    sessionMessageWriteSnapshots.set(id, writtenSnapshot);
   }
+  return { deferred: deferredIds.length > 0, deferredIds };
 }
 
 /**

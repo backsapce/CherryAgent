@@ -1,3 +1,7 @@
+import { loadModelsDevCatalog } from './modelsDevCatalog.js';
+
+export { resetModelsDevCatalog as resetReasoningCatalog } from './modelsDevCatalog.js';
+
 export const REASONING_EFFORTS = ['low', 'medium', 'high'];
 
 // Canonical order of every reasoning-effort value models.dev reports today.
@@ -15,18 +19,6 @@ const PROVIDER_EFFORTS = {
 };
 
 export const normalizeReasoningEffort = (value) => EFFORT_ORDER.includes(value) ? value : null;
-let catalogPromise;
-
-async function catalog() {
-  if (!catalogPromise) {
-    catalogPromise = fetch('https://models.dev/api.json', { signal: AbortSignal.timeout(5000) })
-      .then((response) => {
-        if (!response.ok) throw new Error('Model catalog unavailable');
-        return response.json();
-      }).catch((error) => { catalogPromise = null; throw error; });
-  }
-  return catalogPromise;
-}
 
 function effortValuesFromInfo(info) {
   const options = Array.isArray(info?.reasoning_options) ? info.reasoning_options : [];
@@ -58,11 +50,13 @@ export function reasoningLevels(provider, model, info) {
 }
 
 export async function resolveReasoningLevels(provider, model, { allowUnknown = false } = {}) {
+  const supported = PROVIDER_EFFORTS[provider];
+  if (!supported?.length) return [];
   // Private gateway aliases need an opt-in effort picker even without
   // catalog metadata. With no selected effort, the request stays automatic.
-  const fallback = allowUnknown ? PROVIDER_EFFORTS[provider] || [] : [];
+  const fallback = allowUnknown ? supported : [];
   try {
-    const data = await catalog();
+    const data = await loadModelsDevCatalog();
     const providerId = { gemini: 'google', qwen: 'alibaba' }[provider] || provider;
     const id = String(model || '').replace(/^models\//, '');
     let info = data[providerId]?.models?.[id];
@@ -74,11 +68,8 @@ export async function resolveReasoningLevels(provider, model, { allowUnknown = f
   } catch { return fallback; }
 }
 
-/** Test hook: drop the cached models.dev response so fetch can be re-mocked. */
-export function resetReasoningCatalog() { catalogPromise = null; }
-
 export function reasoningProviderOptions(provider, effort) {
-  if (!normalizeReasoningEffort(effort)) return {};
+  if (!PROVIDER_EFFORTS[provider]?.includes(effort)) return {};
   if (provider === 'anthropic') return { anthropic: { thinking: { type: 'adaptive' }, effort } };
   if (provider === 'gemini') return { google: { thinkingConfig: { thinkingLevel: effort, includeThoughts: true } } };
   if (provider === 'openrouter') return { openrouter: { reasoning: { effort } } };

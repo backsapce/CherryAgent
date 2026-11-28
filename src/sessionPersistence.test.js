@@ -492,6 +492,64 @@ test('a failed primary save retains the recovery checkpoint until a successful r
   assert.deepEqual(events, ['checkpoint', 'save-1', 'save-2', 'clear']);
 });
 
+test('a deferred barrier checkpoints the newest generation but allows sync to run', async () => {
+  const attempt = deferred();
+  const attempts = [];
+  const committed = [];
+  const checkpoints = [];
+  let clears = 0;
+  const coordinator = createSessionSaveCoordinator({
+    save: async (value) => {
+      attempts.push(value);
+      return value === 'early' ? attempt.promise : { deferred: false };
+    },
+    snapshot: structuredClone,
+    checkpoint: async (value, baseline) => checkpoints.push([value, baseline]),
+    clearCheckpoint: async () => { clears += 1; },
+    onCommitted: (value) => committed.push(value),
+  });
+
+  coordinator.schedule('early', 'base');
+  const acquiring = coordinator.beginBarrier();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(attempts, ['early']);
+  coordinator.schedule('during-sync', 'base');
+  attempt.resolve({ deferred: true, deferredIds: ['missing'] });
+  const release = await acquiring;
+  assert.deepEqual(checkpoints, [['during-sync', 'base']]);
+  release();
+  assert.deepEqual(await coordinator.flush(), { deferred: true, deferredIds: ['missing'] });
+  assert.deepEqual(attempts, ['early']);
+  assert.deepEqual(committed, []);
+  assert.equal(clears, 0);
+
+  coordinator.cancelScheduled();
+  coordinator.schedule('rebased', 'remote-base');
+  await coordinator.flush();
+  assert.deepEqual(attempts, ['early', 'rebased']);
+  assert.deepEqual(committed, ['rebased']);
+  assert.equal(clears, 1);
+});
+
+test('a flush during a storage operation only checkpoints and will not overwrite the pull', async () => {
+  const attempts = [];
+  const checkpoints = [];
+  const coordinator = createSessionSaveCoordinator({
+    save: async (value) => attempts.push(value),
+    snapshot: structuredClone,
+    checkpoint: async (value) => checkpoints.push(value),
+  });
+  const release = await coordinator.beginBarrier();
+  coordinator.schedule('during-refresh');
+  assert.equal((await coordinator.flush()).deferred, true);
+  assert.deepEqual(attempts, []);
+  assert.deepEqual(checkpoints, ['during-refresh']);
+  release();
+  await coordinator.flush();
+  assert.deepEqual(attempts, ['during-refresh']);
+});
+
 test('a checkpoint requested during journal deletion is written after the late clear', async () => {
   const timers = fakeTimers();
   const allowClear = deferred();

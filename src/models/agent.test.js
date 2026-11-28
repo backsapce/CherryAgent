@@ -690,15 +690,18 @@ test('sandbox file requests honor caller cancellation', { timeout: 2_000 }, asyn
   }
 });
 
-test('sandbox file requests route configured loopback hosts through the page proxy', async () => {
+test('LAN pages use their proxy only for same-origin sandbox file requests', async () => {
   AgentServerMock.reset(defaultWsHandlers());
   const restore = installBrowserMocks(AgentServerMock, async () => { throw new Error('no http'); });
   window.location.href = 'https://192.168.1.20:5173/';
   window.location.origin = 'https://192.168.1.20:5173';
 
   try {
-    await listRemoteFiles('', 'http://localhost:3099');
+    await listRemoteFiles('', '/agent');
     assert.equal(AgentServerMock.instances[0].url, 'wss://192.168.1.20:5173/agent/ws');
+
+    await listRemoteFiles('', 'http://localhost:3099');
+    assert.equal(AgentServerMock.instances[1].url, 'ws://localhost:3099/agent/ws');
   } finally {
     restore();
   }
